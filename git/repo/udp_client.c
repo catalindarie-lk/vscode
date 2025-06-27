@@ -105,8 +105,8 @@ HANDLE send_message_event;
 
 AckHashNode *hash_table[HASH_SIZE] = {NULL};
 
-const char *server_ip = "10.10.10.1"; // loopback address
-const char *client_ip = "10.10.10.2";
+const char *server_ip = "127.0.0.1"; // loopback address
+const char *client_ip = "127.0.0.1";
 
 unsigned int WINAPI command_thread_func(void* ptr);
 unsigned int WINAPI receive_frame_thread_func(void* ptr);
@@ -765,6 +765,8 @@ unsigned int WINAPI file_transfer_thread_func(LPVOID lpParam){
 
     uint32_t file_id;
 
+    BOOL throttle;
+
     while(client.client_status == CLIENT_READY){
         
         WaitForSingleObject(file_transfer_event[index], INFINITE);
@@ -802,16 +804,16 @@ unsigned int WINAPI file_transfer_thread_func(LPVOID lpParam){
                 remaining_bytes_to_send = 0;
                 continue;
             }
-            // if(client.hash_count > HASH_HIGH_WATERMARK){
-            //     client.file_throttle = TRUE;
-            // }
-            // if(client.hash_count < HASH_LOW_WATERMARK){
-            //     client.file_throttle = FALSE;
-            // }
-            // if(client.file_throttle){
-            //     Sleep(10);
-            //     continue;
-            // }
+            if(client.hash_count > HASH_HIGH_WATERMARK){
+                throttle = TRUE;
+            }
+            if(client.hash_count < HASH_LOW_WATERMARK){
+                throttle = FALSE;
+            }
+            if(throttle){
+                Sleep(10);
+                continue;
+            }
             chunk_bytes_to_send = fread(chunk_buffer, 1, FILE_CHUNK_SIZE, file);
             if (chunk_bytes_to_send == 0 && ferror(file)) {
                 fprintf(stdout, "Error reading file\n");

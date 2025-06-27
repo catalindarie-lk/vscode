@@ -128,7 +128,7 @@ HANDLE server_command_thread;
 
 UniqueIdentifierNode *uid_hash_table[HASH_SIZE] = {NULL};
 
-const char *server_ip = "10.10.10.1"; // IPv4 example
+const char *server_ip = "127.0.0.1"; // IPv4 example
 
 // Client management functions
 ClientData* find_client(ClientList *list, const uint32_t session_id);
@@ -139,8 +139,7 @@ void update_statistics(ClientData *client);
 
 
 // Handle message fragment helper functions
-static void register_ack(ClientData *client, UdpFrame *frame, uint8_t op_code);
-static void register_ack_priority(ClientData *client, UdpFrame *frame, uint8_t op_code);
+static void register_ack(QueueSeqNum *queue, ClientData *client, UdpFrame *frame, uint8_t op_code);
 static int mesg_match_fragment(ClientData *client, UdpFrame *frame);
 static int mesg_validate_fragment(ClientData *client, const int index, UdpFrame *frame);
 static int mesg_get_available_slot(ClientData *client);
@@ -150,7 +149,7 @@ static int mesg_check_completion_and_record(IncomingMessageEntry *entry, const u
 
 static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t file_id);
 static int file_get_available_slot(ClientData *client);
-static void file_attach_fragment(IncomingFileEntry *entry, char *fragment_buffer, const uint32_t fragment_offset, const uint32_t fragment_size);
+static void file_attach_fragment(IncomingFileEntry *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size);
 static int file_init_recv_slot(IncomingFileEntry *entry, const uint32_t file_id, const uint64_t file_size);
 static int file_check_completion_and_record(IncomingFileEntry *entry, const uint32_t session_id);
 
@@ -479,7 +478,7 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame){
     uint64_t recv_file_size = ntohll(frame->payload.file_metadata.file_size);
 
     if(search_uid_hash_table(uid_hash_table, recv_file_id, client->session_id, UID_RECV_COMPLETE) == TRUE){
-        register_ack(client, frame, STS_TRANSFER_COMPLETE);
+        register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
         fprintf(stderr, "Fragment is part of a previously fully received file! - Session ID: %d, Message ID: %d\n", client->session_id, recv_file_id);
         goto exit_error;
     }
@@ -487,11 +486,11 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame){
     int slot = file_get_available_slot(client);
     if(slot == RET_VAL_ERROR){
         fprintf(stderr, "Maximum file transfers reached!\n");
-        register_ack_priority(client, frame, ERR_RESOURCE_LIMIT);
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_RESOURCE_LIMIT);
         goto exit_error;
     }
 
-    fprintf(stdout, "Received metadata Session ID: %d, File ID: %d, File Size: %zu, Fragment Size: %d\n", client->session_id, recv_file_id, recv_file_size, (uint32_t)FILE_FRAGMENT_SIZE);
+    fprintf(stdout, "Received metadata Session ID: %d, File ID: %d, File Size: %zu, Fragment Size: %d\n", client->session_id, recv_file_id, recv_file_size, FILE_FRAGMENT_SIZE);
 
     if(file_init_recv_slot(&client->file_recv_slot[slot], recv_file_id, recv_file_size) == RET_VAL_ERROR){
         goto exit_error;
@@ -500,7 +499,7 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame){
     add_uid_hash_table(uid_hash_table, recv_file_id, client->session_id, UID_WAITING_FRAGMENTS);
     //snprintf(client->file_recv_slot[slot].file_name, PATH_SIZE, "E:\\file_sid%d_cnt%zu.txt", client->session_id, InterlockedIncrement64(&client->uid_count));
     snprintf(client->file_recv_slot[slot].file_name, PATH_SIZE, "E:\\file_SID_%d_UID_%d.txt", client->session_id, recv_file_id);
-    register_ack_priority(client, frame, STS_ACK);
+    register_ack(&queue_seq_num, client, frame, STS_ACK);
    
     LeaveCriticalSection(&list.mutex);
     return RET_VAL_SUCCESS;
@@ -519,7 +518,7 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame){
     uint32_t recv_fragment_size = ntohl(frame->payload.file_fragment.size);
  
     if(search_uid_hash_table(uid_hash_table, recv_file_id, client->session_id, UID_RECV_COMPLETE) == TRUE){
-        register_ack(client, frame, STS_TRANSFER_COMPLETE);
+        register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
         fprintf(stderr, "Fragment is part of a previously fully received file! - Session ID: %d, Message ID: %d\n", client->session_id, recv_file_id);
         goto exit_error;
     }
@@ -527,41 +526,41 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame){
     int slot = file_match_fragment(client, frame, recv_file_id);
     if(slot == RET_VAL_ERROR){
         fprintf(stderr, "Recived frame with unknown file ID: %d Session ID %d - missing metadata\n", recv_file_id, client->session_id);
-        register_ack_priority(client, frame, ERR_INVALID_FILE_ID);
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_INVALID_FILE_ID);
         goto exit_error;
     }
 
     if (client->file_recv_slot[slot].file_id != recv_file_id){
-        register_ack_priority(client, frame, ERR_INVALID_FILE_ID);
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_INVALID_FILE_ID);
         fprintf(stderr, "No file transfer in progress (no file buffer allocated)!!!\n");
         goto exit_error;
     }
     if(client->file_recv_slot[slot].buffer == NULL){
-        register_ack_priority(client, frame, STS_TRANSFER_COMPLETE);
+        register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
         goto exit_error;
     }
     //copy the received fragment text to the buffer
 
     if(check_fragment_received(client->file_recv_slot[slot].bitmap, recv_fragment_offset, FILE_FRAGMENT_SIZE)){
-        register_ack_priority(client, frame, ERR_DUPLICATE_FRAME);
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_DUPLICATE_FRAME);
         //fprintf(stderr, "Received duplicate frame (offset: %zu)!!!\n", recv_fragment_offset);
         goto exit_error;
     }
 
     if(recv_fragment_offset >= client->file_recv_slot[slot].file_size){
-        register_ack_priority(client, frame, ERR_MALFORMED_FRAME);       
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);       
         fprintf(stderr, "Received fragment with offset out of limits. File size: %zu, Received offset: %zu\n", client->file_recv_slot[slot].file_size, recv_fragment_offset);
         goto exit_error;
     }
     if (recv_fragment_offset + recv_fragment_size > client->file_recv_slot[slot].file_size){
-        register_ack_priority(client, frame, ERR_MALFORMED_FRAME); 
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME); 
         fprintf(stderr, "Fragment extends past file bounds\n");
         goto exit_error;
     }
 
     file_attach_fragment(&client->file_recv_slot[slot], frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size);
     
-    register_ack(client, frame, STS_ACK);
+    register_ack(&queue_seq_num, client, frame, STS_ACK);
  
     if(file_check_completion_and_record(&client->file_recv_slot[slot], client->session_id) == RET_VAL_ERROR){
         goto exit_error;
@@ -587,7 +586,7 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
     EnterCriticalSection(&list.mutex);
 
     if(search_uid_hash_table(uid_hash_table, recv_message_id, client->session_id, UID_RECV_COMPLETE) == TRUE){
-        register_ack(client, frame, STS_TRANSFER_COMPLETE);
+        register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
         fprintf(stderr, "Fragment is part of a previously fully received message! - Session ID: %d, Message ID: %d\n", client->session_id, recv_message_id);
         goto exit_error;
     }
@@ -600,7 +599,7 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
             goto exit_error;
         }            
         mesg_attach_fragment(&client->recv_slot[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
-        register_ack(client, frame, STS_ACK);
+        register_ack(&queue_seq_num, client, frame, STS_ACK);
         if (mesg_check_completion_and_record(&client->recv_slot[slot], client->session_id) == RET_VAL_ERROR) 
             goto exit_error;
         LeaveCriticalSection(&list.mutex);
@@ -609,7 +608,7 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
         // Handle new incoming message
         int free_slot = mesg_get_available_slot(client);
         if (free_slot == RET_VAL_ERROR){
-            register_ack(client, frame, ERR_RESOURCE_LIMIT);
+            register_ack(&queue_seq_num_ctrl, client, frame, ERR_RESOURCE_LIMIT);
             goto exit_error;
         }
         //fprintf(stdout, "New message received assigned to slot: %d", free_slot);
@@ -620,7 +619,7 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
         mesg_attach_fragment(&client->recv_slot[free_slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
         snprintf(client->recv_slot[free_slot].file_name, PATH_SIZE, "E:\\msg_SID_%d_UID%d.txt", client->session_id, recv_message_id);
         add_uid_hash_table(uid_hash_table, recv_message_id, client->session_id, UID_WAITING_FRAGMENTS);
-        register_ack(client, frame, STS_ACK);
+        register_ack(&queue_seq_num, client, frame, STS_ACK);
         if (mesg_check_completion_and_record(&client->recv_slot[free_slot], client->session_id) == RET_VAL_ERROR) 
             goto exit_error;
         LeaveCriticalSection(&list.mutex);
@@ -816,13 +815,7 @@ unsigned int WINAPI process_frame_thread_func(void* ptr) {
 
             case FRAME_TYPE_KEEP_ALIVE:
                 client->last_activity_time = time(NULL);
-                // ack_entry.seq_num = header_seq_num;
-                // ack_entry.op_code = STS_KEEP_ALIVE;
-                // ack_entry.session_id = header_session_id;
-                // memcpy(&ack_entry.addr, &client->addr, sizeof(struct sockaddr_in));   
-                // push_seq_num(&queue_seq_num_ctrl, &ack_entry);
-                register_ack_priority(client, frame, STS_KEEP_ALIVE);
-                //send_ack_nak(header_seq_num, header_session_id, STS_KEEP_ALIVE, server.socket, &client->addr, client->log_path);
+                register_ack(&queue_seq_num_ctrl, client, frame, STS_KEEP_ALIVE);
                 break;
                 //TODO: Handle ACK processing, e.g., update internal state or queues
                        
@@ -926,26 +919,16 @@ unsigned int WINAPI server_command_thread_func(void* ptr){
 
 
 
-
+static void register_ack(QueueSeqNum *queue, ClientData *client, UdpFrame *frame, uint8_t op_code) {
+    QueueSeqNumEntry entry = {
+        .seq_num = ntohll(frame->header.seq_num),
+        .op_code = op_code,
+        .session_id = ntohl(frame->header.session_id)
+    };
+    memcpy(&entry.addr, &client->addr, sizeof(struct sockaddr_in));
+    push_seq_num(queue, &entry);
+}
 // Handle message fragment helper functions
-static void register_ack(ClientData *client, UdpFrame *frame, uint8_t op_code) {
-    QueueSeqNumEntry entry = {
-        .seq_num = ntohll(frame->header.seq_num),
-        .op_code = op_code,
-        .session_id = ntohl(frame->header.session_id)
-    };
-    memcpy(&entry.addr, &client->addr, sizeof(struct sockaddr_in));
-    push_seq_num(&queue_seq_num, &entry);
-}
-static void register_ack_priority(ClientData *client, UdpFrame *frame, uint8_t op_code) {
-    QueueSeqNumEntry entry = {
-        .seq_num = ntohll(frame->header.seq_num),
-        .op_code = op_code,
-        .session_id = ntohl(frame->header.session_id)
-    };
-    memcpy(&entry.addr, &client->addr, sizeof(struct sockaddr_in));
-    push_seq_num(&queue_seq_num_ctrl, &entry);
-}
 static int mesg_match_fragment(ClientData *client, UdpFrame *frame){
     
     uint32_t message_id = ntohl(frame->payload.long_text_msg.message_id);
@@ -965,23 +948,23 @@ static int mesg_validate_fragment(ClientData *client, const int index, UdpFrame 
     uint32_t recv_fragment_offset = ntohl(frame->payload.long_text_msg.fragment_offset);
 
     BOOL is_duplicate_fragment = client->recv_slot[index].bitmap && client->recv_slot[index].buffer &&
-                                    check_fragment_received(client->recv_slot[index].bitmap, recv_fragment_offset, (uint32_t)TEXT_FRAGMENT_SIZE);
+                                    check_fragment_received(client->recv_slot[index].bitmap, recv_fragment_offset, TEXT_FRAGMENT_SIZE);
     if (is_duplicate_fragment == TRUE) {
         //Client already has bitmap and message buffer allocated so fragment can be processed
         //if the message was already received send duplicate frame ack op_code
-        register_ack(client, frame, ERR_DUPLICATE_FRAME);
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_DUPLICATE_FRAME);
         fprintf(stderr, "Received duplicate text message fragment! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
         return RET_VAL_ERROR;
     }
     if(recv_fragment_offset >= recv_message_len){
         //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code
-        register_ack(client, frame, ERR_MALFORMED_FRAME);
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);
         fprintf(stderr, "Fragment offset past message bounds! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
         return RET_VAL_ERROR;
     }
     if (recv_fragment_offset + recv_fragment_len > recv_message_len || recv_fragment_len > TEXT_FRAGMENT_SIZE) {
         //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code 
-        register_ack(client, frame, ERR_MALFORMED_FRAME);
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);
         fprintf(stderr, "Fragment len past message bounds! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
         return RET_VAL_ERROR;
     }
@@ -1000,8 +983,8 @@ static int mesg_init_recv_slot(IncomingMessageEntry *entry, const uint32_t messa
     entry->message_id = message_id;
     entry->message_len = message_len;
 
-    entry->fragment_count = message_len / (uint32_t)TEXT_FRAGMENT_SIZE;
-    if((message_len % (uint32_t)TEXT_FRAGMENT_SIZE) > 0){
+    entry->fragment_count = message_len / TEXT_FRAGMENT_SIZE;
+    if((message_len % TEXT_FRAGMENT_SIZE) > 0){
         entry->fragment_count++;
     }
     entry->bitmap_entries_count = entry->fragment_count / 32;  
@@ -1032,7 +1015,7 @@ static void mesg_attach_fragment(IncomingMessageEntry *entry, char *fragment_buf
     char *src = fragment_buffer;                                              
     memcpy(dest, src, fragment_len);
     entry->bytes_received += fragment_len;       
-    mark_fragment_received(entry->bitmap, fragment_offset, (uint32_t)TEXT_FRAGMENT_SIZE);
+    mark_fragment_received(entry->bitmap, fragment_offset, TEXT_FRAGMENT_SIZE);
 }
 static int mesg_check_completion_and_record(IncomingMessageEntry *entry, const uint32_t session_id){
 
@@ -1066,9 +1049,6 @@ static int mesg_check_completion_and_record(IncomingMessageEntry *entry, const u
     }
     return RET_VAL_SUCCESS;
 }
-
-
-
 // Handle file fragment helper functions
 static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t file_id){   
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
@@ -1086,12 +1066,12 @@ static int file_get_available_slot(ClientData *client){
     }
     return RET_VAL_ERROR;
 }
-static void file_attach_fragment(IncomingFileEntry *entry, char *fragment_buffer, const uint32_t fragment_offset, const uint32_t fragment_size){
+static void file_attach_fragment(IncomingFileEntry *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
     char *dest = entry->buffer + fragment_offset;
     char *src = fragment_buffer;                                              
     memcpy(dest, src, fragment_size);
     entry->bytes_received += fragment_size;       
-    mark_fragment_received(entry->bitmap, fragment_offset, (uint32_t)FILE_FRAGMENT_SIZE);
+    mark_fragment_received(entry->bitmap, fragment_offset, FILE_FRAGMENT_SIZE);
 }
 static int file_init_recv_slot(IncomingFileEntry *entry, const uint32_t file_id, const uint64_t file_size){
 

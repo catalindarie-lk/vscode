@@ -22,8 +22,8 @@
 #define PATH_SIZE                            255
 //#define ENABLE_FRAME_LOG                1
 
-#define TEXT_FRAGMENT_SIZE              (MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4)
-#define FILE_FRAGMENT_SIZE              (MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t))
+#define TEXT_FRAGMENT_SIZE              ((uint32_t)(MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4))
+#define FILE_FRAGMENT_SIZE              ((uint32_t)(MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t)))
 
 #define RET_VAL_ERROR                   -1
 #define RET_VAL_SUCCESS                 0
