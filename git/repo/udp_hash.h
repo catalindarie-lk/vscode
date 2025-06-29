@@ -3,15 +3,26 @@
 
 #include "UDP_lib.h"
 
-#define HASH_SIZE 65536
-#define HASH_SIZE_MESSAGE_ID 1024
+#define HASH_SIZE               65536
+#define HASH_SIZE_UID           1024
+#define HASH_HIGH_WATERMARK     65536
+#define HASH_LOW_WATERMARK      32768
+
+#define BLOCK_SIZE              (sizeof(AckHashNode))
+#define BLOCK_COUNT             (HASH_HIGH_WATERMARK * 2)
+
+typedef struct {
+    uint8_t* memory;             // Raw memory buffer
+    int free_head;               // Index of the first free block
+    int next[BLOCK_COUNT];       // Next free block indices
+    BOOL used[BLOCK_COUNT];      // Usage flags (optional, for safety/debugging)
+} MemPool;
 
 typedef uint8_t HashMessageStatus;
 enum HashMessageStatus{
     UID_WAITING_FRAGMENTS = 1,
     UID_RECV_COMPLETE= 2
 };
-
 
 typedef struct AckHashNode{
     UdpFrame frame;
@@ -33,22 +44,54 @@ typedef struct UniqueIdentifierNode{
     struct UniqueIdentifierNode *next;
 }UniqueIdentifierNode;
 
+//--------------------------------------------------------------------------------------------------------------------------
+void pool_init(MemPool* pool) {
+    pool->memory = malloc(BLOCK_SIZE * BLOCK_COUNT);
+    pool->free_head = 0;
 
+    for (int i = 0; i < BLOCK_COUNT - 1; i++) {
+        pool->next[i] = i + 1;
+        pool->used[i] = FALSE;
+    }
+    pool->next[BLOCK_COUNT - 1] = -1; // End of free list
+    pool->used[BLOCK_COUNT - 1] = FALSE;
+}
+void* pool_alloc(MemPool* pool) {
+    if (pool->free_head == -1) return NULL; // Pool exhausted
+
+    int index = pool->free_head;
+    pool->free_head = pool->next[index];
+    pool->used[index] = TRUE;
+
+    return (void *)(pool->memory + index * BLOCK_SIZE);
+}
+void pool_free(MemPool* pool, void* ptr) {
+    int index = ((uint8_t*)ptr - pool->memory) / BLOCK_SIZE;
+    if (index < 0 || index >= BLOCK_COUNT || !pool->used[index]) return;
+
+    pool->next[index] = pool->free_head;
+    pool->free_head = index;
+    pool->used[index] = FALSE;
+}
+void pool_destroy(MemPool* pool) {
+    free(pool->memory);
+    pool->memory = NULL;
+}
+//--------------------------------------------------------------------------------------------------------------------------
 uint16_t get_hash(uint64_t seq_num){
     return (seq_num % HASH_SIZE);
 }
-
 uint16_t get_hash_uid(uint32_t uid){
-    return (uid % HASH_SIZE_MESSAGE_ID);
+    return (uid % HASH_SIZE_UID);
 }
-
-
-
-void insert_frame(AckHashNode *hash_table[], UdpFrame *frame, uint32_t *count) {
+int insert_frame(AckHashNode *hash_table[], UdpFrame *frame, uint32_t *count, MemPool *pool) {
     uint64_t seq_num = ntohll(frame->header.seq_num);
     uint16_t index = get_hash(seq_num);
 //    fprintf(stdout, "SeqNum: %d inserted at index: %d\n", seq_num, index);
-    AckHashNode *node = (AckHashNode *)malloc(sizeof(AckHashNode));
+    AckHashNode *node = (AckHashNode *)pool_alloc(pool);//         malloc(sizeof(AckHashNode));
+    if(node == NULL){
+        return RET_VAL_ERROR;
+    }
     memcpy(&node->frame, frame, sizeof(UdpFrame));
     node->time = time(NULL);
     node->counter = 1;
@@ -56,10 +99,9 @@ void insert_frame(AckHashNode *hash_table[], UdpFrame *frame, uint32_t *count) {
     node->next = (AckHashNode *)hash_table[index];  // Insert at the head (linked list)
     hash_table[index] = node;
     (*count)++;
-    return;
+    return RET_VAL_SUCCESS;
 }
-
-void remove_frame(AckHashNode *hash_table[], uint64_t seq_num, uint32_t *count) {
+void remove_frame(AckHashNode *hash_table[], uint64_t seq_num, uint32_t *count, MemPool *pool) {
     uint16_t index = get_hash(seq_num);
     AckHashNode *curr = hash_table[index];
     AckHashNode *prev = NULL;
@@ -72,7 +114,8 @@ void remove_frame(AckHashNode *hash_table[], uint64_t seq_num, uint32_t *count) 
             } else {
                 hash_table[index] = curr->next;
             }
-            free(curr);
+            pool_free(pool, curr);
+            //free(curr);
             (*count)--;
             //fprintf(stdout, "Hash count: %d\n", *count);
             return;
@@ -81,7 +124,6 @@ void remove_frame(AckHashNode *hash_table[], uint64_t seq_num, uint32_t *count) 
         curr = curr->next;
     }
 }
-
 void clean_frame_hash_table(AckHashNode *hash_table[], uint32_t *count){
     AckHashNode *head = NULL;
     for (int i = 0; i < HASH_SIZE; i++) {
@@ -101,7 +143,6 @@ void clean_frame_hash_table(AckHashNode *hash_table[], uint32_t *count){
 //    fprintf(stdout, "Frame hash table clean\n");
     return;
 }
-
 //--------------------------------------------------------------------------------------------------------------------------
 void insert_seq_num(SeqNumNode *hash_table[], uint64_t seq_num, uint32_t id) {
     uint16_t index = get_hash(seq_num);
@@ -114,7 +155,6 @@ void insert_seq_num(SeqNumNode *hash_table[], uint64_t seq_num, uint32_t id) {
     hash_table[index] = node;
     return;
 }
-
 void remove_seq_num(SeqNumNode *hash_table[], uint64_t seq_num) {
     uint16_t index = get_hash(seq_num); 
     SeqNumNode *curr = hash_table[index];
@@ -135,7 +175,6 @@ void remove_seq_num(SeqNumNode *hash_table[], uint64_t seq_num) {
     }
     return;
 }
-
 SeqNumNode *search_seq_num(SeqNumNode *hash_table[], uint64_t seq_num, uint32_t id) {
     uint16_t index = get_hash(seq_num);
     SeqNumNode *ptr = hash_table[index];
@@ -148,7 +187,6 @@ SeqNumNode *search_seq_num(SeqNumNode *hash_table[], uint64_t seq_num, uint32_t 
     }
     return NULL;
 }
-
 void print_seq_num_table(SeqNumNode *hash_table[]) {
     for (int i = 0; i < HASH_SIZE; i++) {
         if(hash_table[i]){
@@ -162,7 +200,6 @@ void print_seq_num_table(SeqNumNode *hash_table[]) {
     }
     return;
 }
-
 void clean_seq_num_hash_table(SeqNumNode *hash_table[]){
     SeqNumNode *head = NULL;
     for (int i = 0; i < HASH_SIZE; i++) {
@@ -180,9 +217,7 @@ void clean_seq_num_hash_table(SeqNumNode *hash_table[]){
     }
     return;
 }
-
 //--------------------------------------------------------------------------------------------------------------------------
-
 void add_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid, uint32_t session_id, uint8_t status){
     uint16_t index = get_hash_uid(uid);
     
@@ -195,7 +230,6 @@ void add_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid, uint32
     hash_table[index] = head;
     return;
 }
-
 void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid) {
     uint16_t index = get_hash_uid(uid); 
     UniqueIdentifierNode *curr = hash_table[index];
@@ -216,7 +250,6 @@ void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid) {
     }
     return;
 }
-
 BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid, uint32_t session_id, uint8_t status) {
     uint16_t index = get_hash_uid(uid);
     UniqueIdentifierNode *node = hash_table[index];
@@ -229,7 +262,6 @@ BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid, uin
     }
     return FALSE;
 }
-
 int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t session_id, uint32_t uid, uint8_t status){
     uint16_t index = get_hash_uid(uid);
     UniqueIdentifierNode *node = hash_table[index];
@@ -244,10 +276,9 @@ int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], const uint3
     return RET_VAL_ERROR;
 
 }
-
 void clean_uid_hash_table(UniqueIdentifierNode *hash_table[]){
     UniqueIdentifierNode *head = NULL;
-    for (int i = 0; i < HASH_SIZE_MESSAGE_ID; i++) {
+    for (int i = 0; i < HASH_SIZE_UID; i++) {
         if(hash_table[i]){       
             UniqueIdentifierNode *node = hash_table[i];
             while (node) {
@@ -262,9 +293,8 @@ void clean_uid_hash_table(UniqueIdentifierNode *hash_table[]){
     }
     return;
 }
-
 void print_uid_hash_table(UniqueIdentifierNode *hash_table[]) {
-    for (int i = 0; i < HASH_SIZE_MESSAGE_ID; i++) {
+    for (int i = 0; i < HASH_SIZE_UID; i++) {
         if(hash_table[i]){
             printf("BUCKET %d: \n", i);           
             UniqueIdentifierNode *node = hash_table[i];
