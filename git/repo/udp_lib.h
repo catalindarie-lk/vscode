@@ -277,21 +277,21 @@ void log_frame(uint8_t log_type, UdpFrame *frame, const struct sockaddr_in *addr
     //-----------------------------------
     switch(frame->header.frame_type){
         case FRAME_TYPE_ACK:
-            fprintf(file,"%s\n   FRAME_TYPE_ACK\n   Seq Num: %zu\n   Session ID: %d\n   Checksum: %d\n",
+            fprintf(file,"%s\n   FRAME_TYPE_ACK\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n",
                                                     buffer,                                           
                                                     ntohll(frame->header.seq_num), 
                                                     ntohl(frame->header.session_id), 
                                                     ntohl(frame->header.checksum));
             break;
         case FRAME_TYPE_KEEP_ALIVE:
-            fprintf(file,"%s\n   FRAME_TYPE_KEEP_ALIVE\n   Seq Num: %zu\n   Session ID: %d\n   Checksum: %d\n",
+            fprintf(file,"%s\n   FRAME_TYPE_KEEP_ALIVE\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n",
                                                     buffer,                                           
                                                     ntohll(frame->header.seq_num), 
                                                     ntohl(frame->header.session_id), 
                                                     ntohl(frame->header.checksum));
             break;
         case FRAME_TYPE_CONNECT_REQUEST:
-            fprintf(file, "%s\n   FRAME_TYPE_CONNECT_REQUEST\n   Seq Num: %zu\n   Session ID: %d\n   Checksum: %d\n   Client ID: %d\n   Flags: %d\n   Client Name: %s\n", 
+            fprintf(file, "%s\n   FRAME_TYPE_CONNECT_REQUEST\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   Client ID: %d\n   Flags: %d\n   Client Name: %s\n", 
                                                     buffer,
                                                     ntohll(frame->header.seq_num), 
                                                     ntohl(frame->header.session_id), 
@@ -300,7 +300,7 @@ void log_frame(uint8_t log_type, UdpFrame *frame, const struct sockaddr_in *addr
                                                     ntohl(frame->payload.request.flag), frame->payload.request.client_name);
             break;
         case FRAME_TYPE_CONNECT_RESPONSE:
-            fprintf(file, "%s\n   FRAME_TYPE_CONNECT_RESPONSE\n   Seq Num: %zu\n   Session ID: %d\n   Checksum: %d\n   Session Timeout: %d\n   Sever Status: %d\n   Server Name: %s\n", 
+            fprintf(file, "%s\n   FRAME_TYPE_CONNECT_RESPONSE\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   Session Timeout: %d\n   Sever Status: %d\n   Server Name: %s\n", 
                                                     buffer,
                                                     ntohll(frame->header.seq_num), 
                                                     ntohl(frame->header.session_id), 
@@ -310,7 +310,7 @@ void log_frame(uint8_t log_type, UdpFrame *frame, const struct sockaddr_in *addr
                                                     frame->payload.response.server_name);
             break;
         case FRAME_TYPE_FILE_METADATA:
-            fprintf(file, "%s   FRAME_TYPE_FILE_METADATA\n   Seq Num: %zu\n   Session ID: %d\n   Checksum: %d\n   File ID: %d\n   File Size: %d\n", 
+            fprintf(file, "%s   FRAME_TYPE_FILE_METADATA\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %d\n   File Size: %d\n", 
                                                     buffer,
                                                     ntohll(frame->header.seq_num), 
                                                     ntohl(frame->header.session_id), 
@@ -319,7 +319,7 @@ void log_frame(uint8_t log_type, UdpFrame *frame, const struct sockaddr_in *addr
                                                     ntohl(frame->payload.file_metadata.file_size));                                                    
                                                     break;
         case FRAME_TYPE_FILE_FRAGMENT:
-            fprintf(file, "%s   FRAME_TYPE_FILE_FRAGMENT\n   Seq Num: %zu\n   Session ID: %d\n   Checksum: %d\n   File ID: %d\n   Current Fragment Size: %d\n   Fragment Offset: %d\n   Fragment Bytes: %s\n", 
+            fprintf(file, "%s   FRAME_TYPE_FILE_FRAGMENT\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %d\n   Current Fragment Size: %d\n   Fragment Offset: %d\n   Fragment Bytes: %s\n", 
                                                     buffer,
                                                     ntohll(frame->header.seq_num), 
                                                     ntohl(frame->header.session_id), 
@@ -330,7 +330,7 @@ void log_frame(uint8_t log_type, UdpFrame *frame, const struct sockaddr_in *addr
                                                     frame->payload.file_fragment.bytes);                                                    
                                                     break;
         case FRAME_TYPE_LONG_TEXT_MESSAGE:
-            fprintf(file, "%s   FRAME_TYPE_LONG_TEXT_MESSAGE\n   Seq Num: %zu\n   Session ID: %d\n   Checksum: %d\n   Message ID: %d\n   Total Length: %d\n   Fragment Length: %d\n   Fragment Offset: %d\n   Fragment Text: %s\n", 
+            fprintf(file, "%s   FRAME_TYPE_LONG_TEXT_MESSAGE\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   Message ID: %d\n   Total Length: %d\n   Fragment Length: %d\n   Fragment Offset: %d\n   Fragment Text: %s\n", 
                                                     buffer,
                                                     ntohll(frame->header.seq_num), 
                                                     ntohl(frame->header.session_id), 
@@ -342,7 +342,7 @@ void log_frame(uint8_t log_type, UdpFrame *frame, const struct sockaddr_in *addr
                                                     frame->payload.long_text_msg.fragment_text);
                                                     break;
         case FRAME_TYPE_DISCONNECT:
-            fprintf(file, "%s\n   FRAME_TYPE_DISCONNECT\n   Seq Num: %zu\n   Session ID: %d\n   Checksum: %d\n", 
+            fprintf(file, "%s\n   FRAME_TYPE_DISCONNECT\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n", 
                                                     buffer,
                                                     ntohll(frame->header.seq_num), 
                                                     ntohl(frame->header.session_id), 

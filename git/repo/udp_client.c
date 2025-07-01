@@ -659,7 +659,7 @@ unsigned int WINAPI process_frame_thread_func(void* ptr) {
                 break; 
 
             case FRAME_TYPE_ACK:
-                //fprintf(stdout, "received ack frame %zu\n", received_seq_num);
+                //fprintf(stdout, "received ack frame %llu\n", received_seq_num);
                 if(received_session_id != client.session_id){
                     fprintf(stderr, "Received ACK frame with invalid session ID: %d", received_session_id);
                     //TODO - send ACK frame with error code for invalid session ID
@@ -710,7 +710,7 @@ unsigned int WINAPI keep_alive_thread_func(void* ptr){
         DWORD keep_alive_clock = (DWORD)((DWORD)client.session_timeout / 5 * 1000);
         uint64_t seq_num = get_new_seq_num();
         send_keep_alive(seq_num, client.session_id, client.socket, &client.server_addr);
-        fprintf(stdout, "\nSending keep alive frame seq num: %zu\n", seq_num);
+        fprintf(stdout, "\nSending keep alive frame seq num: %llu\n", seq_num);
         if(time(NULL) > (time_t)(client.last_active_time + client.session_timeout * 2)){
             client.session_status = SESSION_DISCONNECTED;
         }
@@ -870,7 +870,7 @@ unsigned int WINAPI file_transfer_thread_func(LPVOID lpParam){
                 client.file_bytes_to_send = remaining_bytes_to_send;
             }     
         }                  
-        fprintf(stdout, "Sent bytes: %zu\n", client.file_size);
+        fprintf(stdout, "Sent bytes: %llu\n", client.file_size);
         fclose(file);
         ResetEvent(file_transfer_event[index]);
     }

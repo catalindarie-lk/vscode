@@ -4,9 +4,10 @@
 #include "udp_queue.h"
 #include "udp_bitmap.h"
 #include "udp_hash.h"
+#include "udp_file_chunk_pool.h"
 #include "safefileio.h"
 
-// --- Constants ---
+// --- Constants 
 #define SERVER_PORT                     12345       // Port the server listens on
 #define RECVFROM_TIMEOUT_MS             100         // Timeout for recvfrom in milliseconds in the receive thread
 #define CLIENT_SESSION_TIMEOUT_SEC      120       // Seconds after which an inactive client is considered disconnected
@@ -50,10 +51,11 @@ typedef struct{
     unsigned long long prev_microseconds;
     ULARGE_INTEGER crt_uli;
     unsigned long long crt_microseconds;
-    float crt_file_transfer_speed;
-    float prev_file_transfer_speed;
-    float avg_file_transfer_speed;
+    float file_transfer_speed;
     float file_transfer_progress;
+
+    float crt_bytes_received;
+    float prev_bytes_received;
 }Statistics;
 
 typedef struct{
@@ -61,22 +63,34 @@ typedef struct{
     uint64_t *bitmap;
     uint32_t message_id;
     uint32_t message_len;
-    uint32_t bytes_received;
+    uint32_t chars_received;
     uint32_t fragment_count;
     uint32_t bitmap_entries_count;
     char file_name[PATH_SIZE];
 }IncomingMessageEntry;
 
 typedef struct{
+    BOOL busy;
 
-    char *buffer;
-    uint64_t *bitmap;
+    uint64_t *bitmap_mem;
+    uint8_t* flag;
+    char** chunk_mem_block;
+    uint32_t session_id;
     uint32_t file_id;
     uint64_t file_size;
-    uint32_t fragment_count;  
+    uint64_t fragment_count;  
     uint64_t bytes_received;
-    uint32_t bitmap_entries_count;
-    char file_name[PATH_SIZE];
+    uint64_t bytes_written;
+    uint64_t bitmap_entries_count;
+    
+    BOOL last_bitmap_is_partial;
+    BOOL last_chunk_bytes_received;
+    uint64_t last_chunk_size;
+
+    char test_file_name[PATH_SIZE];
+    FILE *test_file_fp;
+
+    CRITICAL_SECTION mutex;
 }IncomingFileEntry;
 
 typedef struct {  
@@ -95,8 +109,8 @@ typedef struct {
     uint32_t slot_num;
     uint8_t slot_status;            //0->FREE; 1->BUSY
  
-    IncomingMessageEntry recv_slot[MAX_CLIENT_MESSAGE_STREAMS];
-    IncomingFileEntry file_recv_slot[MAX_CLIENT_FILE_STREAMS];
+    IncomingMessageEntry recv_slot_mesg[MAX_CLIENT_MESSAGE_STREAMS];
+    IncomingFileEntry recv_slot_file[MAX_CLIENT_FILE_STREAMS];
     
  
     volatile long long uid_count;
@@ -125,7 +139,11 @@ HANDLE process_frame_thread;
 HANDLE client_timeout_thread;
 HANDLE server_command_thread;
 
+HANDLE check_complete_block_in_bitmap_thread;
+
 UniqueIdentifierNode *uid_hash_table[HASH_SIZE] = {NULL};
+MemPoolFileChunk mem_pool_file_chunk;
+
 
 const char *server_ip = "127.0.0.1"; // IPv4 example
 
@@ -145,11 +163,10 @@ static int mesg_init_recv_slot(IncomingMessageEntry *entry, const uint32_t messa
 static void mesg_attach_fragment(IncomingMessageEntry *entry, char *fragment_buffer, const uint32_t fragment_offset, const uint32_t fragment_len);
 static int mesg_check_completion_and_record(IncomingMessageEntry *entry, const uint32_t session_id);
 
-static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t file_id);
+static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id);
 static int file_get_available_slot(ClientData *client);
-static void file_attach_fragment(IncomingFileEntry *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size);
-static int file_init_recv_slot(IncomingFileEntry *entry, const uint32_t file_id, const uint64_t file_size);
-static int file_check_completion_and_record(IncomingFileEntry *entry, const uint32_t session_id);
+static void file_attach_fragment_to_chunk(IncomingFileEntry *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size);
+static int file_init_recv_slot(IncomingFileEntry *entry, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size);
 
 int handle_file_metadata(ClientData *client, UdpFrame *frame);
 int handle_file_fragment(ClientData *client, UdpFrame *frame);
@@ -161,6 +178,7 @@ unsigned int WINAPI process_frame_thread_func(void* ptr);
 unsigned int WINAPI ack_thread_func(void* ptr);
 unsigned int WINAPI client_timeout_thread_func(void* ptr);
 unsigned int WINAPI server_command_thread_func(void* ptr);
+unsigned int WINAPI check_complete_blocks_in_bitmap_func(LPVOID lpParam);
 
 
 void get_network_config(){
@@ -224,7 +242,7 @@ int create_output_file(const char *buffer, const uint64_t size, const char *path
     }
     size_t written = safe_fwrite(fp, buffer, size);
     if (written != size) {
-        fprintf(stderr, "Incomplete bytes written to file. Expected: %zu, Written: %zu\n", size, written);
+        fprintf(stderr, "Incomplete bytes written to file. Expected: %llu, Written: %zu\n", size, written);
         fclose(fp);
         return RET_VAL_ERROR;
     }
@@ -280,6 +298,9 @@ int init_server(){
     server.status = SERVER_READY;
     InitializeCriticalSection(&list.mutex);
 
+    pool_init_chunk(&mem_pool_file_chunk);
+    InitializeCriticalSection(&mem_pool_file_chunk.mutex);
+
     printf("Server listening on port %d...\n", SERVER_PORT);
     return RET_VAL_SUCCESS;
 }
@@ -306,9 +327,14 @@ int start_threads() {
         fprintf(stderr, "Failed to create client timeout thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
-    server_command_thread = (HANDLE)_beginthreadex(NULL, 0, server_command_thread_func, NULL, 0, NULL);
-    if (server_command_thread == NULL) {
-        fprintf(stderr, "Failed to create command thread. Error: %d\n", GetLastError());
+    client_timeout_thread = (HANDLE)_beginthreadex(NULL, 0, client_timeout_thread_func, NULL, 0, NULL);
+    if (client_timeout_thread == NULL) {
+        fprintf(stderr, "Failed to create client timeout thread. Error: %d\n", GetLastError());
+        return RET_VAL_ERROR;
+    }
+    check_complete_block_in_bitmap_thread = (HANDLE)_beginthreadex(NULL, 0, check_complete_blocks_in_bitmap_func, NULL, 0, NULL);
+    if (check_complete_block_in_bitmap_thread == NULL) {
+        fprintf(stderr, "Failed to create bitmap check thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
     return RET_VAL_SUCCESS;
@@ -366,13 +392,9 @@ int main() {
     // Main server loop for general management, timeouts, and state updates
     while (server.status == SERVER_READY) {
 
-        printf("Press 'q' to quit...\n");
-        char c = getchar();
-        if (c == 'q' || c == 'Q') {
-            server.status = SERVER_STOP; // Signal threads to stop
-            break;
-        }
-        Sleep(10); // Prevent busy-waiting
+        Sleep(250); // Prevent busy-waiting
+        update_statistics(&list.client[0]);
+
     }
     // --- Server Shutdown Sequence ---
     shutdown_server();
@@ -410,13 +432,11 @@ ClientData* add_client(ClientList *list, const UdpFrame *recv_frame, const struc
     memset(new_client, 0, sizeof(ClientData));
 
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-        new_client->file_recv_slot[i].buffer = NULL;
-        new_client->file_recv_slot[i].bitmap = NULL;
+        memset(&new_client->recv_slot_file[i], 0, sizeof(IncomingFileEntry));
     }
 
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        new_client->recv_slot[i].buffer = NULL;
-        new_client->recv_slot[i].bitmap = NULL;
+        memset(&new_client->recv_slot_mesg[i], 0, sizeof(IncomingMessageEntry));
     }
     
     new_client->slot_num = free_slot;
@@ -455,11 +475,13 @@ int remove_client(ClientList *list, const uint32_t slot) {
     fprintf(stdout, "\nRemoving client with session ID: %d from slot %d\n", list->client[slot].session_id, list->client[slot].slot_num);
 
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-        free(list->client[slot].file_recv_slot[i].buffer);
-        list->client[slot].file_recv_slot[i].buffer = NULL;
+        free(list->client[slot].recv_slot_file[i].bitmap_mem);
+        list->client[slot].recv_slot_file[i].bitmap_mem = NULL;
+    }
 
-        free(list->client[slot].file_recv_slot[i].bitmap);
-        list->client[slot].file_recv_slot[i].bitmap = NULL;
+    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
+        free(list->client[slot].recv_slot_mesg[i].bitmap);
+        list->client[slot].recv_slot_mesg[i].bitmap = NULL;
     }
 
 
@@ -470,14 +492,18 @@ int remove_client(ClientList *list, const uint32_t slot) {
 // Process received file metadata frame
 int handle_file_metadata(ClientData *client, UdpFrame *frame){
 
-    EnterCriticalSection(&list.mutex);
+     if(client == NULL){
+        fprintf(stdout, "Received frame for non existing client context!\n");
+        goto exit_error;
+    }  
 
     uint32_t recv_file_id = ntohl(frame->payload.file_metadata.file_id);
     uint64_t recv_file_size = ntohll(frame->payload.file_metadata.file_size);
 
+    EnterCriticalSection(&list.mutex);
+
     if(search_uid_hash_table(uid_hash_table, recv_file_id, client->session_id, UID_RECV_COMPLETE) == TRUE){
         register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
-        fprintf(stderr, "Fragment is part of a previously fully received file! - Session ID: %d, Message ID: %d\n", client->session_id, recv_file_id);
         goto exit_error;
     }
 
@@ -488,15 +514,19 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame){
         goto exit_error;
     }
 
-    fprintf(stdout, "Received metadata Session ID: %d, File ID: %d, File Size: %zu, Fragment Size: %d\n", client->session_id, recv_file_id, recv_file_size, FILE_FRAGMENT_SIZE);
+    fprintf(stdout, "Received metadata Session ID: %d, File ID: %d, File Size: %llu, Fragment Size: %d\n", client->session_id, recv_file_id, recv_file_size, FILE_FRAGMENT_SIZE);
 
-    if(file_init_recv_slot(&client->file_recv_slot[slot], recv_file_id, recv_file_size) == RET_VAL_ERROR){
+    if(file_init_recv_slot(&client->recv_slot_file[slot], client->session_id, recv_file_id, recv_file_size) == RET_VAL_ERROR){
         goto exit_error;
     }
 
     add_uid_hash_table(uid_hash_table, recv_file_id, client->session_id, UID_WAITING_FRAGMENTS);
-    //snprintf(client->file_recv_slot[slot].file_name, PATH_SIZE, "E:\\file_sid%d_cnt%zu.txt", client->session_id, InterlockedIncrement64(&client->uid_count));
-    snprintf(client->file_recv_slot[slot].file_name, PATH_SIZE, "E:\\file_SID_%d_UID_%d.txt", client->session_id, recv_file_id);
+
+    //snprintf(client->recv_slot_file[slot].file_name, PATH_SIZE, "E:\\file_SID_%d_UID_%d.txt", client->session_id, recv_file_id);
+    snprintf(client->recv_slot_file[slot].test_file_name, PATH_SIZE, "E:\\test_file_SID_%d_UID_%d.txt", client->session_id, recv_file_id);
+
+    client->recv_slot_file[slot].test_file_fp = fopen(client->recv_slot_file[slot].test_file_name, "wb+"); 
+
     register_ack(&queue_seq_num, client, frame, STS_ACK);
    
     LeaveCriticalSection(&list.mutex);
@@ -508,63 +538,72 @@ exit_error:
 }
 // Process received file fragment frame
 int handle_file_fragment(ClientData *client, UdpFrame *frame){
-
-    EnterCriticalSection(&list.mutex);
-
+    
+    if(client == NULL){
+        fprintf(stdout, "Received frame for non existing client context!\n");
+        goto exit_error;
+    }
+    uint32_t recv_session_id = ntohl(frame->header.session_id);
     uint32_t recv_file_id = ntohl(frame->payload.file_fragment.file_id);
     uint64_t recv_fragment_offset = ntohll(frame->payload.file_fragment.offset);
     uint32_t recv_fragment_size = ntohl(frame->payload.file_fragment.size);
  
+    EnterCriticalSection(&list.mutex);
+
     if(search_uid_hash_table(uid_hash_table, recv_file_id, client->session_id, UID_RECV_COMPLETE) == TRUE){
         register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
-        fprintf(stderr, "Fragment is part of a previously fully received file! - Session ID: %d, Message ID: %d\n", client->session_id, recv_file_id);
         goto exit_error;
     }
 
-    int slot = file_match_fragment(client, frame, recv_file_id);
+    int slot = file_match_fragment(client, frame, recv_session_id, recv_file_id);
     if(slot == RET_VAL_ERROR){
         fprintf(stderr, "Recived frame with unknown file ID: %d Session ID %d - missing metadata\n", recv_file_id, client->session_id);
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_INVALID_FILE_ID);
         goto exit_error;
     }
 
-    if (client->file_recv_slot[slot].file_id != recv_file_id){
+    if (client->recv_slot_file[slot].file_id != recv_file_id){
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_INVALID_FILE_ID);
         fprintf(stderr, "No file transfer in progress (no file buffer allocated)!!!\n");
         goto exit_error;
     }
-    if(client->file_recv_slot[slot].buffer == NULL){
-        register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
-        goto exit_error;
-    }
-    //copy the received fragment text to the buffer
-
-    if(check_fragment_received(client->file_recv_slot[slot].bitmap, recv_fragment_offset, FILE_FRAGMENT_SIZE)){
+    
+    if(check_fragment_received(client->recv_slot_file[slot].bitmap_mem, recv_fragment_offset, FILE_FRAGMENT_SIZE)){
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_DUPLICATE_FRAME);
-        fprintf(stderr, "Received duplicate frame (offset: %zu)!!!\n", recv_fragment_offset);
+        fprintf(stderr, "Received duplicate frame (offset: %llu)!!!\n", recv_fragment_offset);
         goto exit_error;
     }
 
-    if(recv_fragment_offset >= client->file_recv_slot[slot].file_size){
+    if(recv_fragment_offset >= client->recv_slot_file[slot].file_size){
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);       
-        fprintf(stderr, "Received fragment with offset out of limits. File size: %zu, Received offset: %zu\n", client->file_recv_slot[slot].file_size, recv_fragment_offset);
+        fprintf(stderr, "Received fragment with offset out of limits. File size: %llu, Received offset: %llu\n", client->recv_slot_file[slot].file_size, recv_fragment_offset);
         goto exit_error;
     }
-    if (recv_fragment_offset + recv_fragment_size > client->file_recv_slot[slot].file_size){
+    if (recv_fragment_offset + recv_fragment_size > client->recv_slot_file[slot].file_size){
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME); 
         fprintf(stderr, "Fragment extends past file bounds\n");
         goto exit_error;
     }
 
-    file_attach_fragment(&client->file_recv_slot[slot], frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size);
+    uint64_t entry_index = (recv_fragment_offset / FILE_FRAGMENT_SIZE) / 64ULL;
+    if(client->recv_slot_file[slot].bitmap_mem[entry_index] == 0ULL){
+
+        EnterCriticalSection(&mem_pool_file_chunk.mutex);
+        
+        client->recv_slot_file[slot].chunk_mem_block[entry_index] = pool_alloc_chunk(&mem_pool_file_chunk);
+        if(client->recv_slot_file[slot].chunk_mem_block[entry_index] == NULL){
+            LeaveCriticalSection(&mem_pool_file_chunk.mutex);
+            //fprintf(stdout, "Pool is full! Waiting for free block!\n");
+            return RET_VAL_ERROR;
+        }
+        //fprintf(stdout, "Allocated free pool for index: %llu\n", entry_index);
+    }
+    LeaveCriticalSection(&mem_pool_file_chunk.mutex);
+    file_attach_fragment_to_chunk(&client->recv_slot_file[slot], frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size);
     
     register_ack(&queue_seq_num, client, frame, STS_ACK);
  
-    if(file_check_completion_and_record(&client->file_recv_slot[slot], client->session_id) == RET_VAL_ERROR){
-        goto exit_error;
-    }
     LeaveCriticalSection(&list.mutex);
-    update_statistics(client);
     return RET_VAL_SUCCESS;
 
 exit_error:
@@ -575,19 +614,22 @@ exit_error:
 int handle_message_fragment(ClientData *client, UdpFrame *frame){
 
     int slot;
+    if(client == NULL){
+        fprintf(stdout, "Received frame for non existing client context!\n");
+        goto exit_error;
+    }
 
-    // Extract the long text fragment and recombine the long message
     uint32_t recv_message_id = ntohl(frame->payload.long_text_msg.message_id);
     uint32_t recv_message_len = ntohl(frame->payload.long_text_msg.message_len);
     uint32_t recv_fragment_len = ntohl(frame->payload.long_text_msg.fragment_len);
     uint32_t recv_fragment_offset = ntohl(frame->payload.long_text_msg.fragment_offset);
     update_statistics(client);
-    EnterCriticalSection(&list.mutex);
+
+    EnterCriticalSection(&list.mutex);    
 
     // Guard against fragments for already completed messages.
     if(search_uid_hash_table(uid_hash_table, recv_message_id, client->session_id, UID_RECV_COMPLETE) == TRUE){
         register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
-        fprintf(stderr, "Fragment is part of a previously fully received message! - Session ID: %d, Message ID: %d\n", client->session_id, recv_message_id);
         goto exit_error;
     }
 
@@ -600,10 +642,10 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
             goto exit_error;
         }
         // Attach the fragment to the buffer.
-        mesg_attach_fragment(&client->recv_slot[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
+        mesg_attach_fragment(&client->recv_slot_mesg[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
         // Acknowledge the fragment.
         register_ack(&queue_seq_num, client, frame, STS_ACK);
-        if (mesg_check_completion_and_record(&client->recv_slot[slot], client->session_id) == RET_VAL_ERROR) 
+        if (mesg_check_completion_and_record(&client->recv_slot_mesg[slot], client->session_id) == RET_VAL_ERROR) 
             goto exit_error;
         LeaveCriticalSection(&list.mutex);
         return RET_VAL_SUCCESS;
@@ -618,16 +660,16 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
         // Validate the fragment after determining the slot.
         if (mesg_validate_fragment(client, slot, frame) == RET_VAL_ERROR) 
             goto exit_error;
-        if (mesg_init_recv_slot(&client->recv_slot[slot], recv_message_id, recv_message_len) == RET_VAL_ERROR) 
+        if (mesg_init_recv_slot(&client->recv_slot_mesg[slot], recv_message_id, recv_message_len) == RET_VAL_ERROR) 
             goto exit_error;
         // Attach the fragment to the buffer.
-        mesg_attach_fragment(&client->recv_slot[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
-        snprintf(client->recv_slot[slot].file_name, PATH_SIZE, "E:\\msg_SID_%d_UID%d.txt", client->session_id, recv_message_id);
+        mesg_attach_fragment(&client->recv_slot_mesg[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
+        snprintf(client->recv_slot_mesg[slot].file_name, PATH_SIZE, "E:\\msg_SID_%d_UID%d.txt", client->session_id, recv_message_id);
         // Acknowledge the fragment.
         add_uid_hash_table(uid_hash_table, recv_message_id, client->session_id, UID_WAITING_FRAGMENTS);
         register_ack(&queue_seq_num, client, frame, STS_ACK);
         // Check if the message is complete and finalize it.
-        if (mesg_check_completion_and_record(&client->recv_slot[slot], client->session_id) == RET_VAL_ERROR) 
+        if (mesg_check_completion_and_record(&client->recv_slot_mesg[slot], client->session_id) == RET_VAL_ERROR) 
             goto exit_error;
         LeaveCriticalSection(&list.mutex);
         return RET_VAL_SUCCESS;
@@ -646,20 +688,17 @@ void update_statistics(ClientData * client){
     client->statistics.crt_uli.HighPart = client->statistics.ft.dwHighDateTime;
     client->statistics.crt_microseconds = client->statistics.crt_uli.QuadPart / 10;
 
+    client->statistics.crt_bytes_received = (float)client->recv_slot_file[0].bytes_received;
+
     //TRANSFER SPEED
     //current speed (1 cycle)
-    client->statistics.crt_file_transfer_speed = (float)MAX_PAYLOAD_SIZE / (float)((client->statistics.crt_microseconds - client->statistics.prev_microseconds));
-    //prev time = current time
+    client->statistics.file_transfer_speed = (client->statistics.crt_bytes_received - client->statistics.prev_bytes_received) / (float)((client->statistics.crt_microseconds - client->statistics.prev_microseconds));
+    client->statistics.prev_bytes_received = client->statistics.crt_bytes_received;
     client->statistics.prev_microseconds = client->statistics.crt_microseconds;
-    //first order filter for speed calc - filtered_speed = prev_filtered_speed + factor * (crt_speed - prev_filtered_speed)
-    client->statistics.avg_file_transfer_speed = client->statistics.prev_file_transfer_speed + 0.0001 * (client->statistics.crt_file_transfer_speed - client->statistics.prev_file_transfer_speed);
-    //prev = current
-    client->statistics.prev_file_transfer_speed = client->statistics.avg_file_transfer_speed;
-
     //PROGRESS - update file transfer progress percentage
-    client->statistics.file_transfer_progress = (float)client->file_recv_slot[0].bytes_received / (float)client->file_recv_slot[0].file_size * 100.0;
+    client->statistics.file_transfer_progress = (float)client->recv_slot_file[0].bytes_received / (float)client->recv_slot_file[0].file_size * 100.0;
 
-    fprintf(stdout, "\rFile transfer progress: %.2f %% - Speed: %.2f MB/s", client->statistics.file_transfer_progress, client->statistics.avg_file_transfer_speed);
+    fprintf(stdout, "\rFile transfer progress: %.2f %% - Speed: %.2f MB/s", client->statistics.file_transfer_progress, client->statistics.file_transfer_speed);
     fflush(stdout);
 }
 // --- Receive Thread Function ---
@@ -893,7 +932,7 @@ unsigned int WINAPI ack_thread_func(void* ptr){
 
         if(pop_seq_num(&queue_seq_num_ctrl, &entry) == RET_VAL_SUCCESS){
 
-            fprintf(stdout, "Sending ctrl ack frame for session ID: %d, seq num: %zu, Ack op code: %d\n", entry.session_id, entry.seq_num, entry.op_code);
+            fprintf(stdout, "Sending ctrl ack frame for session ID: %d, seq num: %llu, Ack op code: %d\n", entry.session_id, entry.seq_num, entry.op_code);
         } else if(pop_seq_num(&queue_seq_num, &entry) == RET_VAL_SUCCESS){
  
         } else {
@@ -935,7 +974,7 @@ static int mesg_match_fragment(ClientData *client, UdpFrame *frame){
     uint32_t message_id = ntohl(frame->payload.long_text_msg.message_id);
 
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        if(client->recv_slot[i].message_id == message_id && client->recv_slot[i].buffer != NULL && client->recv_slot[i].bitmap != NULL){
+        if(client->recv_slot_mesg[i].message_id == message_id && client->recv_slot_mesg[i].buffer != NULL && client->recv_slot_mesg[i].bitmap != NULL){
             return i;
         }            
     }
@@ -948,8 +987,8 @@ static int mesg_validate_fragment(ClientData *client, const int index, UdpFrame 
     uint32_t recv_fragment_len = ntohl(frame->payload.long_text_msg.fragment_len);
     uint32_t recv_fragment_offset = ntohl(frame->payload.long_text_msg.fragment_offset);
 
-    BOOL is_duplicate_fragment = client->recv_slot[index].bitmap && client->recv_slot[index].buffer &&
-                                    check_fragment_received(client->recv_slot[index].bitmap, recv_fragment_offset, TEXT_FRAGMENT_SIZE);
+    BOOL is_duplicate_fragment = client->recv_slot_mesg[index].bitmap && client->recv_slot_mesg[index].buffer &&
+                                    check_fragment_received(client->recv_slot_mesg[index].bitmap, recv_fragment_offset, TEXT_FRAGMENT_SIZE);
     if (is_duplicate_fragment == TRUE) {
         //Client already has bitmap and message buffer allocated so fragment can be processed
         //if the message was already received send duplicate frame ack op_code
@@ -973,7 +1012,7 @@ static int mesg_validate_fragment(ClientData *client, const int index, UdpFrame 
 }
 static int mesg_get_available_slot(ClientData *client){
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        if(client->recv_slot[i].message_id == 0 && client->recv_slot[i].buffer == NULL && client->recv_slot[i].bitmap == NULL){
+        if(client->recv_slot_mesg[i].message_id == 0 && client->recv_slot_mesg[i].buffer == NULL && client->recv_slot_mesg[i].bitmap == NULL){
             return i;
         }
     }
@@ -1015,123 +1054,31 @@ static void mesg_attach_fragment(IncomingMessageEntry *entry, char *fragment_buf
     char *dest = entry->buffer + fragment_offset;
     char *src = fragment_buffer;                                              
     memcpy(dest, src, fragment_len);
-    entry->bytes_received += fragment_len;       
+    entry->chars_received += fragment_len;       
     mark_fragment_received(entry->bitmap, fragment_offset, TEXT_FRAGMENT_SIZE);
 }
 static int mesg_check_completion_and_record(IncomingMessageEntry *entry, const uint32_t session_id){
+   // Check if the message is fully received by verifying total bytes and the fragment bitmap.
+    BOOL message_is_complete = (entry->chars_received == entry->message_len) && check_bitmap(entry->bitmap, entry->fragment_count);
 
-    //check if received full message (bytes received is equal to total payload)
-    if(entry->bytes_received == entry->message_len && check_bitmap(entry->bitmap, entry->fragment_count)){       
-        entry->buffer[entry->message_len] = '\0';
-        
-        if(create_output_file(entry->buffer, entry->bytes_received, entry->file_name) != RET_VAL_SUCCESS){          
-            entry->message_id = 0;
-            entry->bytes_received = 0;
-            entry->fragment_count = 0;
-            entry->bitmap_entries_count = 0;
-            free(entry->buffer);
-            entry->buffer = NULL;
-            free(entry->bitmap);
-            entry->bitmap = NULL;
-            return RET_VAL_ERROR;
-            update_uid_status_hash_table(uid_hash_table, session_id, entry->message_id, UID_RECV_COMPLETE);
-        }
-        //fprintf(stdout, "Message Received: %s\n", entry->buffer);
-        entry->message_id = 0;
-        entry->bytes_received = 0;
-        entry->fragment_count = 0;
-        entry->bitmap_entries_count = 0;
-        free(entry->buffer);
-        entry->buffer = NULL;
-        free(entry->bitmap);
-        entry->bitmap = NULL;
-        update_uid_status_hash_table(uid_hash_table, session_id, entry->message_id, UID_RECV_COMPLETE);
-        return RET_VAL_SUCCESS;
-    }
-    return RET_VAL_SUCCESS;
-}
-// Handle file fragment helper functions
-static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t file_id){   
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        if(client->file_recv_slot[i].file_id == file_id && client->file_recv_slot[i].buffer != NULL && client->file_recv_slot[i].bitmap != NULL){
-            return i;
-        }            
-    }
-    return RET_VAL_ERROR;
-}
-static int file_get_available_slot(ClientData *client){
-    for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-        if(client->file_recv_slot[i].file_id == 0 && client->file_recv_slot[i].buffer == NULL && client->file_recv_slot[i].bitmap == NULL){
-            return i;
-        }
-    }
-    return RET_VAL_ERROR;
-}
-static void file_attach_fragment(IncomingFileEntry *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
-    char *dest = entry->buffer + fragment_offset;
-    char *src = fragment_buffer;                                              
-    memcpy(dest, src, fragment_size);
-    entry->bytes_received += fragment_size;
-    mark_fragment_received(entry->bitmap, fragment_offset, FILE_FRAGMENT_SIZE);
-}
-static int file_init_recv_slot(IncomingFileEntry *entry, const uint32_t file_id, const uint64_t file_size){
-
-
-    entry->file_id = file_id;
-    entry->file_size = file_size;
- 
-    entry->buffer = malloc(entry->file_size);   
-    if(entry->buffer == NULL){
-        fprintf(stderr, "Memory allocation fail for file buffer!!!\n");
-        return RET_VAL_ERROR;
-    }
-    //memset(entry->buffer, 0, file_size);
-
-    entry->fragment_count = entry->file_size / FILE_FRAGMENT_SIZE;
-    if(entry->file_size % FILE_FRAGMENT_SIZE > 0){
-        entry->fragment_count++;
-    }
-    fprintf(stdout, "Fragments count: %d\n", entry->fragment_count);
-
-    
-    entry->bitmap_entries_count = entry->fragment_count / 64;
-    if(entry->fragment_count % 64 > 0){
-        entry->bitmap_entries_count++;
-    }
-    fprintf(stdout, "Bitmap 64bits entries needed: %d\n", entry->bitmap_entries_count);
-
-    entry->bitmap = malloc(entry->bitmap_entries_count * sizeof(uint64_t));
-    if(entry->bitmap == NULL){
-        fprintf(stderr, "Memory allocation fail for file bitmap!!!\n");
-        return RET_VAL_ERROR;
-    }
-    memset(entry->bitmap, 0, entry->bitmap_entries_count * sizeof(uint64_t));
-    
-    return RET_VAL_SUCCESS;
-
-}
-static int file_check_completion_and_record(IncomingFileEntry *entry, const uint32_t session_id) {
-    // Check if the file is fully received by verifying total bytes and the fragment bitmap.
-    BOOL file_is_complete = (entry->bytes_received == entry->file_size) && check_bitmap(entry->bitmap, entry->fragment_count);
-
-    if (file_is_complete == FALSE) {
-        // The file is not yet complete. No action needed for now.
+    if (message_is_complete == FALSE) {
+        // The message is not yet complete. No action needed for now.
         return RET_VAL_SUCCESS;
     }
 
-    // --- File transfer is complete, proceed with finalization ---
-
+    // --- Null terminate the message ---
+    entry->buffer[entry->message_len] = '\0';
     // Attempt to write the in-memory buffer to a file on disk.
-    int file_creation_status = create_output_file(entry->buffer, entry->bytes_received, entry->file_name);
+    int mesg_creation_status = create_output_file(entry->buffer, entry->chars_received, entry->file_name);
     
     // Update the file status in the hash table to mark it as complete.
     // This is done regardless of the file save success, as we won't be receiving more fragments.
-    update_uid_status_hash_table(uid_hash_table, session_id, entry->file_id, UID_RECV_COMPLETE);
+    update_uid_status_hash_table(uid_hash_table, session_id, entry->message_id, UID_RECV_COMPLETE);
 
     // Clean up all dynamically allocated resources for the transfer entry.
     // This block is executed in both success and failure cases of file creation.
-    entry->file_id = 0;
-    entry->bytes_received = 0;
+    entry->message_id = 0;
+    entry->chars_received = 0;
     entry->fragment_count = 0;
     entry->bitmap_entries_count = 0;
     
@@ -1141,14 +1088,225 @@ static int file_check_completion_and_record(IncomingFileEntry *entry, const uint
     free(entry->bitmap);
     entry->bitmap = NULL;
 
-    if (file_creation_status != RET_VAL_SUCCESS) {
+    if (mesg_creation_status != RET_VAL_SUCCESS) {
         // If file creation failed, return an error.
-        fprintf(stderr, "Error: Failed to create output file for file_id %d\n", entry->file_id);
+        fprintf(stderr, "Error: Failed to create output message for file_id %d\n", entry->message_id);
         return RET_VAL_ERROR;
     }
     
     // File was successfully created and saved.
     return RET_VAL_SUCCESS;
+}
+
+// Handle file fragment helper functions
+static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){   
+    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
+        if(client->recv_slot_file[i].busy == TRUE && client->recv_slot_file[i].session_id == session_id && client->recv_slot_file[i].file_id == file_id){
+            return i;
+        }            
+    }
+    return RET_VAL_ERROR;
+}
+static int file_get_available_slot(ClientData *client){
+    for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
+        if(client->recv_slot_file[i].busy == FALSE){
+            client->recv_slot_file[i].busy = TRUE;
+            return i;
+        }
+    }
+    return RET_VAL_ERROR;
+}
+static void file_attach_fragment_to_chunk(IncomingFileEntry *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
+    
+    uint64_t entry_index = (fragment_offset / FILE_FRAGMENT_SIZE) / 64ULL;
+
+    EnterCriticalSection(&entry->mutex);
+
+    char *dest = entry->chunk_mem_block[entry_index] + (fragment_offset % (FILE_FRAGMENT_SIZE * 64ULL));
+    char *src = fragment_buffer;
+
+    memcpy(dest, src, fragment_size);
+    //fprintf(stdout, "Attaching fragment with offset: %llu to chunk: %llu at offset: %llu\n", fragment_offset, entry_index, (fragment_offset % (FILE_FRAGMENT_SIZE * 64ULL)));
+    entry->bytes_received += fragment_size;
+
+    if(entry->last_bitmap_is_partial == TRUE){
+        // mark flags for edge case last chunk
+        if(entry_index == entry->bitmap_entries_count - 1ULL){
+            entry->last_chunk_size += fragment_size;
+            entry->flag[entry_index] |= 0b10000000;
+            //fprintf(stdout, "Receiving last chunk bytes: %llu\n", entry->last_chunk_size);
+        }
+        if(entry->bytes_received == entry->file_size){
+            entry->last_chunk_bytes_received = TRUE;
+            fprintf(stdout, "\nReceived all bytes. Last chunk size is: %llu\n", entry->last_chunk_size);
+        }
+    }
+
+    mark_fragment_received(entry->bitmap_mem, fragment_offset, FILE_FRAGMENT_SIZE);
+
+    LeaveCriticalSection(&entry->mutex);
+
+}
+static int file_init_recv_slot(IncomingFileEntry *entry, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size){
+
+    entry->session_id = session_id;
+    entry->file_id = file_id;
+    entry->file_size = file_size;
+
+    entry->fragment_count = (entry->file_size + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
+    fprintf(stdout, "Fragments count: %llu\n", entry->fragment_count);
+
+    entry->bitmap_entries_count = (entry->fragment_count + 64ULL - 1ULL) / 64ULL;
+    fprintf(stdout, "Bitmap 64bits entries needed: %llu\n", entry->bitmap_entries_count);
+
+    //the file size needs to be a multiple of FILE_FRAGMENT_SIZE and nr of fragments needs to be a multiple of 64 due to bitmap entries being 64 bits
+    //otherwise the last bitmap entry will not be full of fragments (the mask will not be ~0ULL) and this needs to be treated separately 
+    entry->last_bitmap_is_partial = ((entry->file_size % FILE_FRAGMENT_SIZE) > 0ULL) || (((entry->file_size / FILE_FRAGMENT_SIZE) % 64ULL) > 0ULL);
+    entry->last_chunk_bytes_received = 0;
+    entry->last_chunk_size = 0;
+
+    fprintf(stdout, "Remainder FILE_SIZE modulo FILE_FRAGMENT_SIZE: %llu and FILE_FRAGMENTS modulo 64: %llu\n", entry->file_size % FILE_FRAGMENT_SIZE,(entry->file_size / FILE_FRAGMENT_SIZE) % 64ULL);
+
+    entry->bitmap_mem = malloc(entry->bitmap_entries_count * sizeof(uint64_t));
+    if(entry->bitmap_mem == NULL){
+        fprintf(stderr, "Memory allocation fail for file bitmap mem!!!\n");
+        return RET_VAL_ERROR;
+    }
+    memset(entry->bitmap_mem, 0, entry->bitmap_entries_count * sizeof(uint64_t));
+
+    entry->flag = malloc(entry->bitmap_entries_count * sizeof(uint8_t));
+    if(entry->flag == NULL){
+        fprintf(stderr, "Memory allocation fail for file entry flag!!!\n");
+        return RET_VAL_ERROR;
+    }
+    memset(entry->flag, 0, entry->bitmap_entries_count * sizeof(uint8_t));
+
+    entry->chunk_mem_block = malloc(entry->bitmap_entries_count * sizeof(char*));
+    if(entry->chunk_mem_block == NULL){
+        fprintf(stderr, "Memory allocation fail for chunk mem blocks!!!\n");
+        return RET_VAL_ERROR;
+    }   
+    memset(entry->chunk_mem_block, 0, entry->bitmap_entries_count * sizeof(char*));
+
+    entry->bytes_received = 0;
+    entry->bytes_written = 0;
+    InitializeCriticalSection(&entry->mutex);
+    
+    return RET_VAL_SUCCESS;
+}
+
+unsigned int WINAPI check_complete_blocks_in_bitmap_func(LPVOID lpParam){
+
+    while (server.status == SERVER_READY) {
+        
+        for(int i = 0; i < MAX_CLIENTS; i++){
+            if(list.client[i].connection_status == CLIENT_CONNECTED){
+                for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
+                    if(list.client[i].recv_slot_file[j].file_id != 0){
+                        for(long long k = 0; k < list.client[i].recv_slot_file[j].bitmap_entries_count; k++){
+
+                            IncomingFileEntry *entry = &list.client[i].recv_slot_file[j];
+                            EnterCriticalSection(&entry->mutex);
+                            FILE *fp = entry->test_file_fp;
+                            uint64_t file_offset = k * FILE_FRAGMENT_SIZE * 64;
+
+                            if (!fp) {
+                                LeaveCriticalSection(&entry->mutex);
+                                fprintf(stderr, "Error: FILE pointer is null for chunk %llu\n", k);
+                                return RET_VAL_ERROR; 
+                            }
+
+                            // edge case for last chunk if the chunk has less fragments - check the flags
+                            if (entry->last_bitmap_is_partial && entry->last_chunk_bytes_received && entry->flag[k] == 0b10000000){                              
+                                // (bit 7) - 128 - this bit is set if entry is last incomplete bitmap entry (last partial chunk)
+                                // (bit 0) - this bit is set after the chunk bytes are written to the file
+                                
+                                if (_fseeki64(fp, file_offset, SEEK_SET) != 0) {
+                                    LeaveCriticalSection(&entry->mutex);
+                                    fclose(fp);
+                                    fprintf(stderr, "Error: Failed to seek to offset %llu\n", file_offset);
+                                    return RET_VAL_ERROR;
+                                }
+
+                                // Write chunk to file
+                                char* buffer = entry->chunk_mem_block[k];
+                                uint64_t buffer_size = entry->last_chunk_size;
+                                
+                                fprintf(stdout, "Writing last chunk bytes: %llu, chunk index: %llu\n", buffer_size, k);
+
+                                size_t written = fwrite(buffer, 1, buffer_size, fp);
+                                if (written != buffer_size) {
+                                    LeaveCriticalSection(&entry->mutex);
+                                    fclose(fp);
+                                    fprintf(stderr, "Error: Failed to write data (expected %llu, wrote %llu)\n", buffer_size, written);
+                                    return RET_VAL_ERROR;
+                                }
+                                entry->bytes_written += written;
+                                entry->flag[k] = 0b10000001;
+
+                                LeaveCriticalSection(&entry->mutex);
+
+                                EnterCriticalSection(&mem_pool_file_chunk.mutex);
+                                pool_free_chunk(&mem_pool_file_chunk, entry->chunk_mem_block[k]);
+                                LeaveCriticalSection(&mem_pool_file_chunk.mutex);
+
+                                BOOL file_is_complete = (entry->bytes_received == entry->file_size) && (entry->bytes_written == entry->file_size);
+                                if(file_is_complete){
+                                    LeaveCriticalSection(&entry->mutex);
+                                    fclose(fp);
+                                    update_uid_status_hash_table(uid_hash_table, entry->session_id, entry->file_id, UID_RECV_COMPLETE);
+                                    fprintf(stdout, "Transfer finished created file: %s, bytes: %llu\n", entry->test_file_name, entry->bytes_written);
+                                    memset(entry, 0, sizeof(IncomingFileEntry));
+                                }
+
+                            // if all 64 bits are set in the bitmap entry then this chunk is complete and can be written to disk
+                            } else if(entry->bitmap_mem[k] == ~0ULL && entry->flag[k] == 0b00000000){
+ 
+                                if (_fseeki64(fp, file_offset, SEEK_SET) != 0) {
+                                    LeaveCriticalSection(&entry->mutex);
+                                    fclose(fp);
+                                    fprintf(stderr, "Error: Failed to seek to offset %llu\n", file_offset);
+                                    return RET_VAL_ERROR;
+                                }
+
+                                // Write chunk to file
+                                char* buffer = entry->chunk_mem_block[k];
+                                uint64_t buffer_size = FILE_FRAGMENT_SIZE * 64;
+
+                                size_t written = fwrite(buffer, 1, buffer_size, fp);
+                                if (written != buffer_size) {
+                                    LeaveCriticalSection(&entry->mutex);
+                                    fclose(fp);
+                                    fprintf(stderr, "Error: Failed to write data (expected %llu, wrote %llu)\n", buffer_size, written);
+                                    return RET_VAL_ERROR;
+                                }
+                                entry->bytes_written += written;
+                                entry->flag[k] = 1;
+
+                                LeaveCriticalSection(&entry->mutex);
+
+                                EnterCriticalSection(&mem_pool_file_chunk.mutex);
+                                pool_free_chunk(&mem_pool_file_chunk, entry->chunk_mem_block[k]);
+                                LeaveCriticalSection(&mem_pool_file_chunk.mutex);
+                                BOOL file_is_complete = (entry->bytes_received == entry->file_size) && (entry->bytes_written == entry->file_size);
+                                if(file_is_complete){
+                                    fclose(fp);
+                                    update_uid_status_hash_table(uid_hash_table, entry->session_id, entry->file_id, UID_RECV_COMPLETE);
+                                    fprintf(stdout, "Transfer finished created file: %s, bytes: %llu\n", entry->test_file_name, entry->bytes_written);
+                                    memset(entry, 0, sizeof(IncomingFileEntry));
+                                }                     
+                            } else {
+                                LeaveCriticalSection(&entry->mutex);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Sleep(200);
+    }
+    _endthreadex(0); // Properly exit the thread created by _beginthreadex
+    return 0;
 }
 
 

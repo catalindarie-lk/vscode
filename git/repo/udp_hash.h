@@ -180,7 +180,7 @@ SeqNumNode *search_seq_num(SeqNumNode *hash_table[], uint64_t seq_num, uint32_t 
     SeqNumNode *ptr = hash_table[index];
     while (ptr) {
         if (ptr->seq_num == seq_num && ptr->id == id){
-            fprintf(stdout, "Received double SeqNum: %zu for ID: %d\n", ptr->seq_num, ptr->id);
+            fprintf(stdout, "Received double SeqNum: %llu for ID: %d\n", ptr->seq_num, ptr->id);
             return ptr;
         }           
         ptr = ptr->next;
@@ -193,7 +193,7 @@ void print_seq_num_table(SeqNumNode *hash_table[]) {
             printf("BUCKET %d: \n", i);           
             SeqNumNode *ptr = hash_table[i];
             while (ptr) {     
-                    fprintf(stdout, "Bucket: %d - SeqNum: %zu\n", i, ptr->seq_num);                   
+                    fprintf(stdout, "Bucket: %d - SeqNum: %llu\n", i, ptr->seq_num);                   
                     ptr = ptr->next;
             }
         }     
