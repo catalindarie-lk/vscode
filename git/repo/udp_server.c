@@ -30,6 +30,13 @@ enum ClientConnection {
     CLIENT_CONNECTED = 1
 };
 
+typedef uint8_t StreamChannelError;
+enum StreamChannelError{
+    STREAM_ERR_FP = 1,
+    STREAM_ERR_FSEEK = 2,
+    STREAM_ERR_FWRITE = 3
+};
+
 typedef uint8_t ClientSlotStatus;
 enum ClientSlotStatus {
     SLOT_FREE = 0,
@@ -71,8 +78,10 @@ typedef struct{
 
 typedef struct{
     BOOL busy;
+    BOOL file_complete;
+    uint8_t stream_err;
 
-    uint64_t *bitmap_mem;
+    uint64_t *bitmap;
     uint8_t* flag;
     char** chunk_mem_block;
     uint32_t session_id;
@@ -88,10 +97,10 @@ typedef struct{
     uint64_t last_chunk_size;
 
     char test_file_name[PATH_SIZE];
-    FILE *test_file_fp;
+    FILE *fp;   
 
-    CRITICAL_SECTION mutex;
-}IncomingFileEntry;
+    CRITICAL_SECTION stream_spinlock;
+}StreamFileChannel;
 
 typedef struct {  
     struct sockaddr_in addr;                // Client's address
@@ -110,18 +119,19 @@ typedef struct {
     uint8_t slot_status;            //0->FREE; 1->BUSY
  
     IncomingMessageEntry recv_slot_mesg[MAX_CLIENT_MESSAGE_STREAMS];
-    IncomingFileEntry recv_slot_file[MAX_CLIENT_FILE_STREAMS];
-    
- 
+    StreamFileChannel file_stream[MAX_CLIENT_FILE_STREAMS];
+     
     volatile long long uid_count;
 
     Statistics statistics;
+
+    CRITICAL_SECTION client_spinlock;
 
 } ClientData;
 
 typedef struct{
     ClientData client[MAX_CLIENTS];      // Array of connected clients
-    CRITICAL_SECTION mutex;         // For thread-safe access to connected_clients
+    CRITICAL_SECTION list_spinlock;         // For thread-safe access to connected_clients
 }ClientList;
 
 
@@ -142,20 +152,24 @@ HANDLE server_command_thread;
 HANDLE check_complete_block_in_bitmap_thread;
 
 UniqueIdentifierNode *uid_hash_table[HASH_SIZE] = {NULL};
-MemPoolFileChunk mem_pool_file_chunk;
+MemPoolFileChunk pool_file_chunk;
 
 
-const char *server_ip = "127.0.0.1"; // IPv4 example
+const char *server_ip = "10.10.10.3"; // IPv4 example
 
 // Client management functions
 ClientData* find_client(ClientList *list, const uint32_t session_id);
 ClientData* add_client(ClientList *list, const UdpFrame *recv_frame, const struct sockaddr_in *client_addr);
 int remove_client(ClientList *list, const uint32_t session_id);
 
+void cleanup_stream_file_channel(StreamFileChannel *entry);
+void cleanup_client(ClientData *client);
+
 void update_statistics(ClientData *client);
 
-// Handle message fragment helper functions
 static void register_ack(QueueSeqNum *queue, ClientData *client, UdpFrame *frame, uint8_t op_code);
+
+// Handle message fragment helper functions
 static int mesg_match_fragment(ClientData *client, UdpFrame *frame);
 static int mesg_validate_fragment(ClientData *client, const int index, UdpFrame *frame);
 static int mesg_get_available_slot(ClientData *client);
@@ -165,8 +179,8 @@ static int mesg_check_completion_and_record(IncomingMessageEntry *entry, const u
 
 static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id);
 static int file_get_available_slot(ClientData *client);
-static void file_attach_fragment_to_chunk(IncomingFileEntry *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size);
-static int file_init_recv_slot(IncomingFileEntry *entry, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size);
+static void file_attach_fragment_to_chunk(StreamFileChannel *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size);
+static int file_init_recv_slot(StreamFileChannel *entry, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size);
 
 int handle_file_metadata(ClientData *client, UdpFrame *frame);
 int handle_file_fragment(ClientData *client, UdpFrame *frame);
@@ -296,10 +310,16 @@ int init_server(){
     server.session_id_counter = 0xFF;
     snprintf(server.name, NAME_SIZE, "%.*s", NAME_SIZE - 1, SERVER_NAME);
     server.status = SERVER_READY;
-    InitializeCriticalSection(&list.mutex);
 
-    pool_init_chunk(&mem_pool_file_chunk);
-    InitializeCriticalSection(&mem_pool_file_chunk.mutex);
+    for(int i = 0; i < MAX_CLIENTS; i++){
+        InitializeCriticalSection(&list.client[i].client_spinlock);
+        for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
+            InitializeCriticalSection(&list.client[i].file_stream[j].stream_spinlock);
+        }
+    }
+    InitializeCriticalSection(&list.list_spinlock);
+
+    pool_init_chunk(&pool_file_chunk);
 
     printf("Server listening on port %d...\n", SERVER_PORT);
     return RET_VAL_SUCCESS;
@@ -374,7 +394,14 @@ void shutdown_server() {
         CloseHandle(server_command_thread);
     }
     fprintf(stdout,"server command thread closed...\n");
-    DeleteCriticalSection(&list.mutex);
+
+    for(int i = 0; i < MAX_CLIENTS; i++){
+        DeleteCriticalSection(&list.client[i].client_spinlock);
+        for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
+            DeleteCriticalSection(&list.client[i].file_stream[j].stream_spinlock);
+        }
+    }
+    DeleteCriticalSection(&list.list_spinlock);
     DeleteCriticalSection(&queue_frame.mutex);
     DeleteCriticalSection(&queue_frame_ctrl.mutex);
     DeleteCriticalSection(&queue_seq_num.mutex);
@@ -404,6 +431,7 @@ int main() {
 // Find client by session ID
 ClientData* find_client(ClientList *list, const uint32_t session_id) {    
     // Search for the client with the given session ID
+
     for (int slot = 0; slot < MAX_CLIENTS; slot++) {
         if(list->client[slot].slot_status == SLOT_FREE) 
             continue;
@@ -415,8 +443,7 @@ ClientData* find_client(ClientList *list, const uint32_t session_id) {
 }
 // Add a new client
 ClientData* add_client(ClientList *list, const UdpFrame *recv_frame, const struct sockaddr_in *client_addr) {
-    // Assumes list_mutex is locked by caller
-
+    
     uint32_t free_slot = 0;
     while(free_slot < MAX_CLIENTS){
         if(list->client[free_slot].slot_status == SLOT_FREE) {
@@ -429,16 +456,9 @@ ClientData* add_client(ClientList *list, const UdpFrame *recv_frame, const struc
         return NULL;
     }
     ClientData *new_client = &list->client[free_slot];
-    memset(new_client, 0, sizeof(ClientData));
-
-    for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-        memset(&new_client->recv_slot_file[i], 0, sizeof(IncomingFileEntry));
-    }
-
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        memset(&new_client->recv_slot_mesg[i], 0, sizeof(IncomingMessageEntry));
-    }
     
+    EnterCriticalSection(&new_client->client_spinlock);
+
     new_client->slot_num = free_slot;
     new_client->slot_status = SLOT_BUSY;
     memcpy(&new_client->addr, client_addr, sizeof(struct sockaddr_in));
@@ -456,9 +476,8 @@ ClientData* add_client(ClientList *list, const UdpFrame *recv_frame, const struc
 
     fprintf(stdout, "\n[ADDING NEW CLIENT] %s:%d Session ID:%d\n", new_client->ip, new_client->port, new_client->session_id);
 
-    #ifdef ENABLE_FRAME_LOG
-        create_log_frame_file(0, new_client->session_id, new_client->log_path);
-    #endif
+    LeaveCriticalSection(&new_client->client_spinlock);
+
     return new_client;
 }
 // Remove a client
@@ -473,22 +492,13 @@ int remove_client(ClientList *list, const uint32_t slot) {
         return RET_VAL_ERROR; 
     }
     fprintf(stdout, "\nRemoving client with session ID: %d from slot %d\n", list->client[slot].session_id, list->client[slot].slot_num);
-
-    for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-        free(list->client[slot].recv_slot_file[i].bitmap_mem);
-        list->client[slot].recv_slot_file[i].bitmap_mem = NULL;
-    }
-
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        free(list->client[slot].recv_slot_mesg[i].bitmap);
-        list->client[slot].recv_slot_mesg[i].bitmap = NULL;
-    }
-
-
-    memset(&list->client[slot], 0, sizeof(ClientData));
+    EnterCriticalSection(&list->client[slot].client_spinlock);
+    cleanup_client(&list->client[slot]);
+    LeaveCriticalSection(&list->client[slot].client_spinlock);
     fprintf(stdout, "\nRemoved client successfully!\n");
     return RET_VAL_SUCCESS;
 }
+
 // Process received file metadata frame
 int handle_file_metadata(ClientData *client, UdpFrame *frame){
 
@@ -497,11 +507,11 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame){
         goto exit_error;
     }  
 
+    EnterCriticalSection(&client->client_spinlock);
+
     uint32_t recv_file_id = ntohl(frame->payload.file_metadata.file_id);
     uint64_t recv_file_size = ntohll(frame->payload.file_metadata.file_size);
-
-    EnterCriticalSection(&list.mutex);
-
+ 
     if(search_uid_hash_table(uid_hash_table, recv_file_id, client->session_id, UID_RECV_COMPLETE) == TRUE){
         register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
         goto exit_error;
@@ -516,24 +526,19 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame){
 
     fprintf(stdout, "Received metadata Session ID: %d, File ID: %d, File Size: %llu, Fragment Size: %d\n", client->session_id, recv_file_id, recv_file_size, FILE_FRAGMENT_SIZE);
 
-    if(file_init_recv_slot(&client->recv_slot_file[slot], client->session_id, recv_file_id, recv_file_size) == RET_VAL_ERROR){
+    if(file_init_recv_slot(&client->file_stream[slot], client->session_id, recv_file_id, recv_file_size) == RET_VAL_ERROR){
         goto exit_error;
     }
 
     add_uid_hash_table(uid_hash_table, recv_file_id, client->session_id, UID_WAITING_FRAGMENTS);
 
-    //snprintf(client->recv_slot_file[slot].file_name, PATH_SIZE, "E:\\file_SID_%d_UID_%d.txt", client->session_id, recv_file_id);
-    snprintf(client->recv_slot_file[slot].test_file_name, PATH_SIZE, "E:\\test_file_SID_%d_UID_%d.txt", client->session_id, recv_file_id);
-
-    client->recv_slot_file[slot].test_file_fp = fopen(client->recv_slot_file[slot].test_file_name, "wb+"); 
-
     register_ack(&queue_seq_num, client, frame, STS_ACK);
    
-    LeaveCriticalSection(&list.mutex);
+    LeaveCriticalSection(&client->client_spinlock);
     return RET_VAL_SUCCESS;
 
 exit_error:
-    LeaveCriticalSection(&list.mutex);
+    LeaveCriticalSection(&client->client_spinlock);
     return RET_VAL_ERROR;
 }
 // Process received file fragment frame
@@ -543,13 +548,14 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame){
         fprintf(stdout, "Received frame for non existing client context!\n");
         goto exit_error;
     }
+
+    EnterCriticalSection(&client->client_spinlock);
+
     uint32_t recv_session_id = ntohl(frame->header.session_id);
     uint32_t recv_file_id = ntohl(frame->payload.file_fragment.file_id);
     uint64_t recv_fragment_offset = ntohll(frame->payload.file_fragment.offset);
     uint32_t recv_fragment_size = ntohl(frame->payload.file_fragment.size);
  
-    EnterCriticalSection(&list.mutex);
-
     if(search_uid_hash_table(uid_hash_table, recv_file_id, client->session_id, UID_RECV_COMPLETE) == TRUE){
         register_ack(&queue_seq_num_ctrl, client, frame, STS_TRANSFER_COMPLETE);
         goto exit_error;
@@ -562,52 +568,47 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame){
         goto exit_error;
     }
 
-    if (client->recv_slot_file[slot].file_id != recv_file_id){
+    if (client->file_stream[slot].file_id != recv_file_id){
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_INVALID_FILE_ID);
         fprintf(stderr, "No file transfer in progress (no file buffer allocated)!!!\n");
         goto exit_error;
     }
     
-    if(check_fragment_received(client->recv_slot_file[slot].bitmap_mem, recv_fragment_offset, FILE_FRAGMENT_SIZE)){
+    if(check_fragment_received(client->file_stream[slot].bitmap, recv_fragment_offset, FILE_FRAGMENT_SIZE)){
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_DUPLICATE_FRAME);
         fprintf(stderr, "Received duplicate frame (offset: %llu)!!!\n", recv_fragment_offset);
         goto exit_error;
     }
 
-    if(recv_fragment_offset >= client->recv_slot_file[slot].file_size){
+    if(recv_fragment_offset >= client->file_stream[slot].file_size){
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);       
-        fprintf(stderr, "Received fragment with offset out of limits. File size: %llu, Received offset: %llu\n", client->recv_slot_file[slot].file_size, recv_fragment_offset);
+        fprintf(stderr, "Received fragment with offset out of limits. File size: %llu, Received offset: %llu\n", client->file_stream[slot].file_size, recv_fragment_offset);
         goto exit_error;
     }
-    if (recv_fragment_offset + recv_fragment_size > client->recv_slot_file[slot].file_size){
+    if (recv_fragment_offset + recv_fragment_size > client->file_stream[slot].file_size){
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME); 
         fprintf(stderr, "Fragment extends past file bounds\n");
         goto exit_error;
     }
 
     uint64_t entry_index = (recv_fragment_offset / FILE_FRAGMENT_SIZE) / 64ULL;
-    if(client->recv_slot_file[slot].bitmap_mem[entry_index] == 0ULL){
-
-        EnterCriticalSection(&mem_pool_file_chunk.mutex);
-        
-        client->recv_slot_file[slot].chunk_mem_block[entry_index] = pool_alloc_chunk(&mem_pool_file_chunk);
-        if(client->recv_slot_file[slot].chunk_mem_block[entry_index] == NULL){
-            LeaveCriticalSection(&mem_pool_file_chunk.mutex);
+    if(client->file_stream[slot].bitmap[entry_index] == 0ULL){
+        client->file_stream[slot].chunk_mem_block[entry_index] = pool_alloc_chunk(&pool_file_chunk);
+        if(client->file_stream[slot].chunk_mem_block[entry_index] == NULL){
             //fprintf(stdout, "Pool is full! Waiting for free block!\n");
-            return RET_VAL_ERROR;
+            goto exit_error;
         }
-        //fprintf(stdout, "Allocated free pool for index: %llu\n", entry_index);
     }
-    LeaveCriticalSection(&mem_pool_file_chunk.mutex);
-    file_attach_fragment_to_chunk(&client->recv_slot_file[slot], frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size);
+    
+    file_attach_fragment_to_chunk(&client->file_stream[slot], frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size);
     
     register_ack(&queue_seq_num, client, frame, STS_ACK);
  
-    LeaveCriticalSection(&list.mutex);
+    LeaveCriticalSection(&client->client_spinlock);
     return RET_VAL_SUCCESS;
 
 exit_error:
-    LeaveCriticalSection(&list.mutex);
+    LeaveCriticalSection(&client->client_spinlock);
     return RET_VAL_ERROR;
 }
 // HANDLE received message fragment frame
@@ -618,14 +619,14 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
         fprintf(stdout, "Received frame for non existing client context!\n");
         goto exit_error;
     }
+    update_statistics(client);
+
+    EnterCriticalSection(&client->client_spinlock);
 
     uint32_t recv_message_id = ntohl(frame->payload.long_text_msg.message_id);
     uint32_t recv_message_len = ntohl(frame->payload.long_text_msg.message_len);
     uint32_t recv_fragment_len = ntohl(frame->payload.long_text_msg.fragment_len);
     uint32_t recv_fragment_offset = ntohl(frame->payload.long_text_msg.fragment_offset);
-    update_statistics(client);
-
-    EnterCriticalSection(&list.mutex);    
 
     // Guard against fragments for already completed messages.
     if(search_uid_hash_table(uid_hash_table, recv_message_id, client->session_id, UID_RECV_COMPLETE) == TRUE){
@@ -647,8 +648,6 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
         register_ack(&queue_seq_num, client, frame, STS_ACK);
         if (mesg_check_completion_and_record(&client->recv_slot_mesg[slot], client->session_id) == RET_VAL_ERROR) 
             goto exit_error;
-        LeaveCriticalSection(&list.mutex);
-        return RET_VAL_SUCCESS;
     } else {
         // This is the first fragment of a new message.
         int slot = mesg_get_available_slot(client);
@@ -671,12 +670,12 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
         // Check if the message is complete and finalize it.
         if (mesg_check_completion_and_record(&client->recv_slot_mesg[slot], client->session_id) == RET_VAL_ERROR) 
             goto exit_error;
-        LeaveCriticalSection(&list.mutex);
+        LeaveCriticalSection(&client->client_spinlock);
         return RET_VAL_SUCCESS;
     }
 
 exit_error:
-    LeaveCriticalSection(&list.mutex);
+    LeaveCriticalSection(&client->client_spinlock);
     return RET_VAL_ERROR;
 }
 // update file transfer progress and speed in MBs
@@ -688,7 +687,7 @@ void update_statistics(ClientData * client){
     client->statistics.crt_uli.HighPart = client->statistics.ft.dwHighDateTime;
     client->statistics.crt_microseconds = client->statistics.crt_uli.QuadPart / 10;
 
-    client->statistics.crt_bytes_received = (float)client->recv_slot_file[0].bytes_received;
+    client->statistics.crt_bytes_received = (float)client->file_stream[0].bytes_received;
 
     //TRANSFER SPEED
     //current speed (1 cycle)
@@ -696,7 +695,7 @@ void update_statistics(ClientData * client){
     client->statistics.prev_bytes_received = client->statistics.crt_bytes_received;
     client->statistics.prev_microseconds = client->statistics.crt_microseconds;
     //PROGRESS - update file transfer progress percentage
-    client->statistics.file_transfer_progress = (float)client->recv_slot_file[0].bytes_received / (float)client->recv_slot_file[0].file_size * 100.0;
+    client->statistics.file_transfer_progress = (float)client->file_stream[0].bytes_received / (float)client->file_stream[0].file_size * 100.0;
 
     fprintf(stdout, "\rFile transfer progress: %.2f %% - Speed: %.2f MB/s", client->statistics.file_transfer_progress, client->statistics.file_transfer_speed);
     fflush(stdout);
@@ -818,19 +817,16 @@ unsigned int WINAPI process_frame_thread_func(void* ptr) {
 
         // Find or add new client
         client = NULL;
-        EnterCriticalSection(&list.mutex);
         if(header_frame_type == FRAME_TYPE_CONNECT_REQUEST){
             client = find_client(&list, header_session_id);
             if(client != NULL){
                 client->last_activity_time = time(NULL);
-                LeaveCriticalSection(&list.mutex);
                 fprintf(stdout, "Client already connected\n");
                 send_connect_response(header_seq_num, client->session_id, server.session_timeout, server.status, server.name, server.socket, &client->addr);
                 continue;
             }
             client = add_client(&list, frame, src_addr);
             if (client == NULL) {
-                LeaveCriticalSection(&list.mutex);
                 fprintf(stderr, "Failed to add new client from %s:%d. Max clients reached?\n", src_ip, src_port);
                 // Optionally send NACK indicating server full
                 continue; // Do not process further if client addition failed
@@ -839,12 +835,10 @@ unsigned int WINAPI process_frame_thread_func(void* ptr) {
         } else {
             client = find_client(&list, header_session_id);
             if(client == NULL){
-                LeaveCriticalSection(&list.mutex);
                 //fprintf(stdout, "Received frame from unknown %s:%d. Ignoring...\n", src_ip, src_port);
                 continue;
             }
         }
-        LeaveCriticalSection(&list.mutex);
         // 3. Process Payload based on Frame Type
         switch (header_frame_type) {
             case FRAME_TYPE_CONNECT_REQUEST:
@@ -880,18 +874,11 @@ unsigned int WINAPI process_frame_thread_func(void* ptr) {
 
             case FRAME_TYPE_DISCONNECT:
                 fprintf(stdout, "Client %s:%d with session ID %d requested disconnect...\n", client->ip, client->port, client->session_id);
-                EnterCriticalSection(&list.mutex);
                 remove_client(&list, client->slot_num);
-                LeaveCriticalSection(&list.mutex);
                 break;
             default:
                 break;
-        }
-        #ifdef ENABLE_FRAME_LOG
-        if(client != NULL){
-            log_frame(LOG_FRAME_RECV, frame, src_addr, client->log_path);
-        }           
-        #endif      
+        } 
     }
     return 0; // Properly exit the thread created by _beginthreadex
 }
@@ -912,9 +899,7 @@ unsigned int WINAPI client_timeout_thread_func(void* ptr){
             }
             fprintf(stdout, "\nClient with Session ID: %d disconnected due to timeout\n", list.client[slot].session_id);
             send_disconnect(list.client[slot].session_id, server.socket, &list.client[slot].addr);
-            EnterCriticalSection(&list.mutex);
             remove_client(&list, slot);
-            LeaveCriticalSection(&list.mutex);
         }
         Sleep(1000);
     }
@@ -932,7 +917,7 @@ unsigned int WINAPI ack_thread_func(void* ptr){
 
         if(pop_seq_num(&queue_seq_num_ctrl, &entry) == RET_VAL_SUCCESS){
 
-            fprintf(stdout, "Sending ctrl ack frame for session ID: %d, seq num: %llu, Ack op code: %d\n", entry.session_id, entry.seq_num, entry.op_code);
+            //fprintf(stdout, "Sending ctrl ack frame for session ID: %d, seq num: %llu, Ack op code: %d\n", entry.session_id, entry.seq_num, entry.op_code);
         } else if(pop_seq_num(&queue_seq_num, &entry) == RET_VAL_SUCCESS){
  
         } else {
@@ -1101,26 +1086,32 @@ static int mesg_check_completion_and_record(IncomingMessageEntry *entry, const u
 // Handle file fragment helper functions
 static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){   
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        if(client->recv_slot_file[i].busy == TRUE && client->recv_slot_file[i].session_id == session_id && client->recv_slot_file[i].file_id == file_id){
+        EnterCriticalSection(&client->file_stream[i].stream_spinlock);
+        if(client->file_stream[i].busy == TRUE && client->file_stream[i].session_id == session_id && client->file_stream[i].file_id == file_id){
+            LeaveCriticalSection(&client->file_stream[i].stream_spinlock);
             return i;
-        }            
+        }
+        LeaveCriticalSection(&client->file_stream[i].stream_spinlock);         
     }
     return RET_VAL_ERROR;
 }
 static int file_get_available_slot(ClientData *client){
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-        if(client->recv_slot_file[i].busy == FALSE){
-            client->recv_slot_file[i].busy = TRUE;
+        EnterCriticalSection(&client->file_stream[i].stream_spinlock);
+        if(client->file_stream[i].busy == FALSE){
+            client->file_stream[i].busy = TRUE;
+            LeaveCriticalSection(&client->file_stream[i].stream_spinlock);
             return i;
         }
+        LeaveCriticalSection(&client->file_stream[i].stream_spinlock);
     }
     return RET_VAL_ERROR;
 }
-static void file_attach_fragment_to_chunk(IncomingFileEntry *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
+static void file_attach_fragment_to_chunk(StreamFileChannel *entry, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
     
     uint64_t entry_index = (fragment_offset / FILE_FRAGMENT_SIZE) / 64ULL;
 
-    EnterCriticalSection(&entry->mutex);
+    EnterCriticalSection(&entry->stream_spinlock);
 
     char *dest = entry->chunk_mem_block[entry_index] + (fragment_offset % (FILE_FRAGMENT_SIZE * 64ULL));
     char *src = fragment_buffer;
@@ -1133,7 +1124,7 @@ static void file_attach_fragment_to_chunk(IncomingFileEntry *entry, char *fragme
         // mark flags for edge case last chunk
         if(entry_index == entry->bitmap_entries_count - 1ULL){
             entry->last_chunk_size += fragment_size;
-            entry->flag[entry_index] |= 0b10000000;
+            entry->flag[entry_index] = 0b10000000;
             //fprintf(stdout, "Receiving last chunk bytes: %llu\n", entry->last_chunk_size);
         }
         if(entry->bytes_received == entry->file_size){
@@ -1142,16 +1133,23 @@ static void file_attach_fragment_to_chunk(IncomingFileEntry *entry, char *fragme
         }
     }
 
-    mark_fragment_received(entry->bitmap_mem, fragment_offset, FILE_FRAGMENT_SIZE);
+    mark_fragment_received(entry->bitmap, fragment_offset, FILE_FRAGMENT_SIZE);
 
-    LeaveCriticalSection(&entry->mutex);
+    LeaveCriticalSection(&entry->stream_spinlock);
 
 }
-static int file_init_recv_slot(IncomingFileEntry *entry, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size){
+static int file_init_recv_slot(StreamFileChannel *entry, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size){
+
+    EnterCriticalSection(&entry->stream_spinlock);
+    entry->busy = TRUE;
+    entry->file_complete = FALSE;
+    entry->stream_err = 0;
 
     entry->session_id = session_id;
     entry->file_id = file_id;
     entry->file_size = file_size;
+    entry->bytes_received = 0;
+    entry->bytes_written = 0;
 
     entry->fragment_count = (entry->file_size + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
     fprintf(stdout, "Fragments count: %llu\n", entry->fragment_count);
@@ -1161,152 +1159,219 @@ static int file_init_recv_slot(IncomingFileEntry *entry, const uint32_t session_
 
     //the file size needs to be a multiple of FILE_FRAGMENT_SIZE and nr of fragments needs to be a multiple of 64 due to bitmap entries being 64 bits
     //otherwise the last bitmap entry will not be full of fragments (the mask will not be ~0ULL) and this needs to be treated separately 
+
     entry->last_bitmap_is_partial = ((entry->file_size % FILE_FRAGMENT_SIZE) > 0ULL) || (((entry->file_size / FILE_FRAGMENT_SIZE) % 64ULL) > 0ULL);
     entry->last_chunk_bytes_received = 0;
     entry->last_chunk_size = 0;
 
-    fprintf(stdout, "Remainder FILE_SIZE modulo FILE_FRAGMENT_SIZE: %llu and FILE_FRAGMENTS modulo 64: %llu\n", entry->file_size % FILE_FRAGMENT_SIZE,(entry->file_size / FILE_FRAGMENT_SIZE) % 64ULL);
-
-    entry->bitmap_mem = malloc(entry->bitmap_entries_count * sizeof(uint64_t));
-    if(entry->bitmap_mem == NULL){
+    entry->bitmap = malloc(entry->bitmap_entries_count * sizeof(uint64_t));
+    if(entry->bitmap == NULL){
         fprintf(stderr, "Memory allocation fail for file bitmap mem!!!\n");
-        return RET_VAL_ERROR;
+        goto exit_error;
     }
-    memset(entry->bitmap_mem, 0, entry->bitmap_entries_count * sizeof(uint64_t));
+    memset(entry->bitmap, 0, entry->bitmap_entries_count * sizeof(uint64_t));
 
     entry->flag = malloc(entry->bitmap_entries_count * sizeof(uint8_t));
     if(entry->flag == NULL){
         fprintf(stderr, "Memory allocation fail for file entry flag!!!\n");
-        return RET_VAL_ERROR;
+        goto exit_error;
     }
     memset(entry->flag, 0, entry->bitmap_entries_count * sizeof(uint8_t));
 
     entry->chunk_mem_block = malloc(entry->bitmap_entries_count * sizeof(char*));
     if(entry->chunk_mem_block == NULL){
         fprintf(stderr, "Memory allocation fail for chunk mem blocks!!!\n");
-        return RET_VAL_ERROR;
+        goto exit_error;
     }   
     memset(entry->chunk_mem_block, 0, entry->bitmap_entries_count * sizeof(char*));
 
-    entry->bytes_received = 0;
-    entry->bytes_written = 0;
-    InitializeCriticalSection(&entry->mutex);
-    
+    snprintf(entry->test_file_name, PATH_SIZE, "E:\\test_file_SID_%d_UID_%d.txt", session_id, file_id);
+    entry->fp = fopen(entry->test_file_name, "wb+");
+    if(entry->fp == NULL){
+        fprintf(stderr, "Error creating/opening file for write: %s", entry->test_file_name);
+        goto exit_error;
+    }
+
+    LeaveCriticalSection(&entry->stream_spinlock);
     return RET_VAL_SUCCESS;
+
+exit_error:
+    cleanup_stream_file_channel(entry);
+    LeaveCriticalSection(&entry->stream_spinlock);
+    return RET_VAL_ERROR;
+
 }
 
 unsigned int WINAPI check_complete_blocks_in_bitmap_func(LPVOID lpParam){
 
     while (server.status == SERVER_READY) {
-        
         for(int i = 0; i < MAX_CLIENTS; i++){
-            if(list.client[i].connection_status == CLIENT_CONNECTED){
+
+            ClientData *client = &list.client[i];
+            EnterCriticalSection(&client->client_spinlock);
+            
+            if(client->connection_status == CLIENT_CONNECTED){
                 for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
-                    if(list.client[i].recv_slot_file[j].file_id != 0){
-                        for(long long k = 0; k < list.client[i].recv_slot_file[j].bitmap_entries_count; k++){
-
-                            IncomingFileEntry *entry = &list.client[i].recv_slot_file[j];
-                            EnterCriticalSection(&entry->mutex);
-                            FILE *fp = entry->test_file_fp;
-                            uint64_t file_offset = k * FILE_FRAGMENT_SIZE * 64;
-
-                            if (!fp) {
-                                LeaveCriticalSection(&entry->mutex);
-                                fprintf(stderr, "Error: FILE pointer is null for chunk %llu\n", k);
-                                return RET_VAL_ERROR; 
-                            }
+                    
+                    StreamFileChannel *streamf = &list.client[i].file_stream[j];
+                    EnterCriticalSection(&streamf->stream_spinlock);
+                    
+                    if(streamf->busy){                    
+                        for(long long k = 0; k < streamf->bitmap_entries_count; k++){
 
                             // edge case for last chunk if the chunk has less fragments - check the flags
-                            if (entry->last_bitmap_is_partial && entry->last_chunk_bytes_received && entry->flag[k] == 0b10000000){                              
+                            if (streamf->last_bitmap_is_partial && streamf->last_chunk_bytes_received && streamf->flag[k] == 0b10000000){                              
                                 // (bit 7) - 128 - this bit is set if entry is last incomplete bitmap entry (last partial chunk)
                                 // (bit 0) - this bit is set after the chunk bytes are written to the file
-                                
-                                if (_fseeki64(fp, file_offset, SEEK_SET) != 0) {
-                                    LeaveCriticalSection(&entry->mutex);
-                                    fclose(fp);
+                                                                
+                                uint64_t file_offset = k * FILE_FRAGMENT_SIZE * 64;
+
+                                if (streamf->fp == NULL) {
+                                    fprintf(stderr, "Error: FILE pointer is null for chunk %llu\n", k);
+                                    streamf->stream_err = STREAM_ERR_FP;
+                                    cleanup_stream_file_channel(streamf);
+                                    break; 
+                                }
+
+                                if (_fseeki64(streamf->fp, file_offset, SEEK_SET) != 0) {
                                     fprintf(stderr, "Error: Failed to seek to offset %llu\n", file_offset);
-                                    return RET_VAL_ERROR;
+                                    streamf->stream_err = STREAM_ERR_FSEEK;
+                                    cleanup_stream_file_channel(streamf);                                
+                                    break;
                                 }
 
                                 // Write chunk to file
-                                char* buffer = entry->chunk_mem_block[k];
-                                uint64_t buffer_size = entry->last_chunk_size;
+                                char* buffer = streamf->chunk_mem_block[k];
+                                uint64_t buffer_size = streamf->last_chunk_size;
                                 
                                 fprintf(stdout, "Writing last chunk bytes: %llu, chunk index: %llu\n", buffer_size, k);
 
-                                size_t written = fwrite(buffer, 1, buffer_size, fp);
+                                size_t written = fwrite(buffer, 1, buffer_size, streamf->fp);
                                 if (written != buffer_size) {
-                                    LeaveCriticalSection(&entry->mutex);
-                                    fclose(fp);
                                     fprintf(stderr, "Error: Failed to write data (expected %llu, wrote %llu)\n", buffer_size, written);
-                                    return RET_VAL_ERROR;
+                                    streamf->stream_err = STREAM_ERR_FWRITE;
+                                    cleanup_stream_file_channel(streamf);
+                                    break;
                                 }
-                                entry->bytes_written += written;
-                                entry->flag[k] = 0b10000001;
-
-                                LeaveCriticalSection(&entry->mutex);
-
-                                EnterCriticalSection(&mem_pool_file_chunk.mutex);
-                                pool_free_chunk(&mem_pool_file_chunk, entry->chunk_mem_block[k]);
-                                LeaveCriticalSection(&mem_pool_file_chunk.mutex);
-
-                                BOOL file_is_complete = (entry->bytes_received == entry->file_size) && (entry->bytes_written == entry->file_size);
-                                if(file_is_complete){
-                                    LeaveCriticalSection(&entry->mutex);
-                                    fclose(fp);
-                                    update_uid_status_hash_table(uid_hash_table, entry->session_id, entry->file_id, UID_RECV_COMPLETE);
-                                    fprintf(stdout, "Transfer finished created file: %s, bytes: %llu\n", entry->test_file_name, entry->bytes_written);
-                                    memset(entry, 0, sizeof(IncomingFileEntry));
-                                }
-
+                                streamf->bytes_written += written;
+                                streamf->flag[k] = 0b10000001;                             
+                                
+                                pool_free_chunk(&pool_file_chunk, streamf->chunk_mem_block[k]);                                
+                                
                             // if all 64 bits are set in the bitmap entry then this chunk is complete and can be written to disk
-                            } else if(entry->bitmap_mem[k] == ~0ULL && entry->flag[k] == 0b00000000){
- 
-                                if (_fseeki64(fp, file_offset, SEEK_SET) != 0) {
-                                    LeaveCriticalSection(&entry->mutex);
-                                    fclose(fp);
+                            } else if(streamf->bitmap[k] == ~0ULL && streamf->flag[k] == 0b00000000){
+                                                                
+                                uint64_t file_offset = k * FILE_FRAGMENT_SIZE * 64;
+
+                                if (streamf->fp == NULL) {
+                                    fprintf(stderr, "Error: FILE pointer is null for chunk %llu\n", k);
+                                    streamf->stream_err = STREAM_ERR_FP;
+                                    cleanup_stream_file_channel(streamf);
+                                    break; 
+                                }
+
+                                if (_fseeki64(streamf->fp, file_offset, SEEK_SET) != 0) {
                                     fprintf(stderr, "Error: Failed to seek to offset %llu\n", file_offset);
-                                    return RET_VAL_ERROR;
+                                    streamf->stream_err = STREAM_ERR_FSEEK;
+                                    cleanup_stream_file_channel(streamf);                                
+                                    break;
                                 }
 
                                 // Write chunk to file
-                                char* buffer = entry->chunk_mem_block[k];
+                                char* buffer = streamf->chunk_mem_block[k];
                                 uint64_t buffer_size = FILE_FRAGMENT_SIZE * 64;
 
-                                size_t written = fwrite(buffer, 1, buffer_size, fp);
+                                size_t written = fwrite(buffer, 1, buffer_size, streamf->fp);
                                 if (written != buffer_size) {
-                                    LeaveCriticalSection(&entry->mutex);
-                                    fclose(fp);
                                     fprintf(stderr, "Error: Failed to write data (expected %llu, wrote %llu)\n", buffer_size, written);
-                                    return RET_VAL_ERROR;
+                                    streamf->stream_err = STREAM_ERR_FWRITE;
+                                    cleanup_stream_file_channel(streamf);
+                                    break;
                                 }
-                                entry->bytes_written += written;
-                                entry->flag[k] = 1;
+                                streamf->bytes_written += written;
+                                streamf->flag[k] = 1;
 
-                                LeaveCriticalSection(&entry->mutex);
+                                pool_free_chunk(&pool_file_chunk, streamf->chunk_mem_block[k]);
 
-                                EnterCriticalSection(&mem_pool_file_chunk.mutex);
-                                pool_free_chunk(&mem_pool_file_chunk, entry->chunk_mem_block[k]);
-                                LeaveCriticalSection(&mem_pool_file_chunk.mutex);
-                                BOOL file_is_complete = (entry->bytes_received == entry->file_size) && (entry->bytes_written == entry->file_size);
-                                if(file_is_complete){
-                                    fclose(fp);
-                                    update_uid_status_hash_table(uid_hash_table, entry->session_id, entry->file_id, UID_RECV_COMPLETE);
-                                    fprintf(stdout, "Transfer finished created file: %s, bytes: %llu\n", entry->test_file_name, entry->bytes_written);
-                                    memset(entry, 0, sizeof(IncomingFileEntry));
-                                }                     
-                            } else {
-                                LeaveCriticalSection(&entry->mutex);
                             }
-                        }
-                    }
-                }
-            }
-        }
-        Sleep(200);
+                        } //end of looping through BITMAP ENTRIES
+
+                        streamf->file_complete = (streamf->bytes_received == streamf->file_size) && (streamf->bytes_written == streamf->file_size);
+                        if(streamf->file_complete){
+                            update_uid_status_hash_table(uid_hash_table, streamf->session_id, streamf->file_id, UID_RECV_COMPLETE);
+                            fprintf(stdout, "Transfer finished created file: %s, bytes: %llu\n", streamf->test_file_name, streamf->bytes_written);
+                            cleanup_stream_file_channel(streamf);                                    
+                        }                    
+                    }// check busy
+                    LeaveCriticalSection(&streamf->stream_spinlock);
+                }// END of looping through FILE STREAMS
+            }//check client is connected
+            LeaveCriticalSection(&client->client_spinlock);
+        }// END of looping through CLIENTS
+        Sleep(100);
     }
     _endthreadex(0); // Properly exit the thread created by _beginthreadex
     return 0;
 }
 
+void cleanup_stream_file_channel(StreamFileChannel *streamf){
 
+    for(long long k = 0; k < streamf->bitmap_entries_count; k++){
+        pool_free_chunk(&pool_file_chunk, streamf->chunk_mem_block[k]);
+    }
+    if(streamf->fp && streamf->busy && !streamf->file_complete){
+        fclose(streamf->fp);
+        remove(streamf->test_file_name);
+        streamf->fp = NULL;
+    }
+    if(streamf->fp){
+        fclose(streamf->fp);
+        streamf->fp = NULL;
+    }
+    if(streamf->bitmap != NULL){
+        free(streamf->bitmap);
+        streamf->bitmap = NULL;
+    }
+    if(streamf->flag != NULL){
+        free(streamf->flag);
+        streamf->flag = NULL;
+    }
+    if(streamf->chunk_mem_block != NULL){
+        free(streamf->chunk_mem_block);
+        streamf->chunk_mem_block = NULL;
+    }
+    streamf->busy = FALSE;
+    streamf->file_complete = FALSE;
+    streamf->stream_err = 0;
+    streamf->session_id = 0;
+    streamf->file_id = 0;
+    streamf->file_size = 0;
+    streamf->fragment_count = 0;
+    streamf->bytes_received = 0;
+    streamf->bytes_written = 0;
+    streamf->bitmap_entries_count = 0;
+    streamf->last_bitmap_is_partial = FALSE;
+    streamf->last_chunk_bytes_received = FALSE;
+    streamf->last_chunk_size = 0;
+    memset(streamf->test_file_name, 0, PATH_SIZE);
+}
+
+void cleanup_client(ClientData *client){
+
+    for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
+        EnterCriticalSection(&client->file_stream[i].stream_spinlock);
+        cleanup_stream_file_channel(&client->file_stream[i]);
+        LeaveCriticalSection(&client->file_stream[i].stream_spinlock);
+    }
+
+    memset(&client->addr, 0, sizeof(struct sockaddr_in));
+    memset(&client->ip, 0, INET_ADDRSTRLEN);
+    client->port = 0;
+    client->client_id = 0;
+    memset(&client->name, 0, NAME_SIZE);
+    client->flag = 0;
+    client->connection_status = CLIENT_DISCONNECTED;
+    client->last_activity_time = time(NULL);
+    client->slot_num = 0;
+    client->slot_status = SLOT_FREE;
+}

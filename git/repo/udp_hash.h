@@ -5,8 +5,8 @@
 
 #define HASH_SIZE               65536
 #define HASH_SIZE_UID           1024
-#define HASH_HIGH_WATERMARK     65536
-#define HASH_LOW_WATERMARK      32768
+#define HASH_HIGH_WATERMARK     16384
+#define HASH_LOW_WATERMARK      8192
 
 #define BLOCK_SIZE              (sizeof(AckHashNode))
 #define BLOCK_COUNT             (HASH_HIGH_WATERMARK * 2)
@@ -124,7 +124,7 @@ void remove_frame(AckHashNode *hash_table[], uint64_t seq_num, uint32_t *count, 
         curr = curr->next;
     }
 }
-void clean_frame_hash_table(AckHashNode *hash_table[], uint32_t *count){
+void clean_frame_hash_table(AckHashNode *hash_table[], uint32_t *count, MemPool *pool){
     AckHashNode *head = NULL;
     for (int i = 0; i < HASH_SIZE; i++) {
         if(hash_table[i]){       
@@ -133,10 +133,12 @@ void clean_frame_hash_table(AckHashNode *hash_table[], uint32_t *count){
                     head = ptr;
                     //fprintf(stdout, "Bucket: %d - Freeing SeqNum: %d\n", i, head->seq_num);                   
                     ptr = ptr->next;
-                    free(head);
+                    pool_free(pool, head);
+                    //free(head);
                     (*count)--;
             }
-            free(ptr);
+            pool_free(pool, ptr);
+            //free(ptr);
             hash_table[i] = NULL;
         }     
     }

@@ -100,8 +100,8 @@ HANDLE send_message_event;
 AckHashNode *hash_table[HASH_SIZE] = {NULL};
 MemPool frame_mem_pool;
 
-const char *server_ip = "127.0.0.1"; // loopback address
-const char *client_ip = "127.0.0.1";
+const char *server_ip = "10.10.10.3"; // loopback address
+const char *client_ip = "10.10.10.1";
 
 unsigned int WINAPI command_thread_func(void* ptr);
 unsigned int WINAPI receive_frame_thread_func(void* ptr);
@@ -725,7 +725,7 @@ unsigned int WINAPI resend_thread_func(void *ptr){
     while(client.client_status == CLIENT_READY){
         if(client.session_status != SESSION_CONNECTED){
             EnterCriticalSection(&hash_table_mutex);
-            clean_frame_hash_table(hash_table, &client.hash_count);
+            clean_frame_hash_table(hash_table, &client.hash_count, &frame_mem_pool);
             LeaveCriticalSection(&hash_table_mutex);
             Sleep(1000);
             continue;
