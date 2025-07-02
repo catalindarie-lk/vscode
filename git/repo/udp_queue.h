@@ -3,8 +3,8 @@
 
 #include "udp_lib.h"
 
-#define SEQ_NUM_QUEUE_SIZE                      65536     // Queue buffer size
-#define FRAME_QUEUE_SIZE                        32768
+#define SEQ_NUM_QUEUE_SIZE                      131072     // Queue buffer size
+#define FRAME_QUEUE_SIZE                        65536
 
 #pragma pack(push, 1)
 typedef struct{

@@ -1,0 +1,11 @@
+{
+    "git.enableSmartCommit": true,
+    "editor.tokenColors": [
+        {
+            "scope": "comment",
+            "settings": {
+                "foreground": "#626262"
+            }
+        }
+    ]
+}

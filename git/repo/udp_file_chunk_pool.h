@@ -43,9 +43,22 @@ void* pool_alloc_chunk(MemPoolFileChunk* pool) {
 }
 
 void pool_free_chunk(MemPoolFileChunk* pool, void* ptr) {
+    if(ptr == NULL){
+        return;
+    }
     EnterCriticalSection(&pool->mutex);
     int index = ((uint8_t*)ptr - pool->memory) / BLOCK_SIZE_CHUNK;
     if (index < 0 || index >= BLOCK_COUNT_CHUNK || !pool->used[index]){
+        // Log critical errors with maximum detail
+        fprintf(stderr, "CRITICAL ERROR: Attempt to free invalid or already freed chunk!\n");
+        fprintf(stderr, "  Pointer to free: %p\n", ptr);
+        fprintf(stderr, "  Calculated index: %d\n", index);
+        fprintf(stderr, "  Pool base address: %p\n", pool->memory);
+        fprintf(stderr, "  Block size: %d bytes\n", BLOCK_SIZE_CHUNK);
+        fprintf(stderr, "  Total block count: %d\n", BLOCK_COUNT_CHUNK);
+        fprintf(stderr, "  Is within bounds (0 to %d)? %s\n", BLOCK_COUNT_CHUNK - 1,
+                (index >= 0 && index < BLOCK_COUNT_CHUNK) ? "Yes" : "No");
+        fprintf(stderr, "  Was block marked as used? %s\n", (index >= 0 && index < BLOCK_COUNT_CHUNK && pool->used[index]) ? "Yes" : "No (Double-Free/Corruption)\n");
         LeaveCriticalSection(&pool->mutex);
         return;
     }
