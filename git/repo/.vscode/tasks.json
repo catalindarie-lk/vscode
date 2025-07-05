@@ -5,15 +5,24 @@
             "label": "C/C++: cl.exe build active file",
             "command": "cl.exe",
             "args": [
-                "/Zi",      // Generate debugging information (.pdb)
+                //"/Zi",      // Generate debugging information (.pdb)
                 "/EHsc",    // Enable exception handling (C++ standard)
                 "/favor:AMD64",
                 "${file}",
+                // "${workspaceFolder}\\src\\frames.c",
+                "${workspaceFolder}\\src\\mem_pool.c",
+                "${workspaceFolder}\\src\\bitmap.c",
+                "${workspaceFolder}\\src\\queue.c",
+                "${workspaceFolder}\\src\\hash.c",
+                "${workspaceFolder}\\src\\checksum.c",
+                // "${workspaceFolder}\\src\\safefileio.c",                
+                "/I${workspaceFolder}\\include", // Include directory for headers
+                //"/I${workspaceFolder}\\src",     // Additional include directory
+                //"/I${workspaceFolder}\\lib",     // Library include directory
                 "/O2",
                 "/Fe${workspaceFolder}\\bin\\${fileBasenameNoExtension}.exe",
-                "/Fo${workspaceFolder}\\obj\\${fileBasenameNoExtension}.obj",
-                "/Fd${workspaceFolder}\\pdb\\${fileBasenameNoExtension}.pdb",
-                "/Fd${workspaceFolder}\\pdb\\${fileBasenameNoExtension}.ilk",
+                "/Fo${workspaceFolder}\\bin\\obj\\",
+                "/Fd${workspaceFolder}\\bin\\pdb\\",
                 "/link",
                 "/MACHINE:X64",
             ],

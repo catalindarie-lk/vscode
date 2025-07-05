@@ -1,11 +1,12 @@
 #define _CRT_SECURE_NO_WARNINGS // Suppress warnings for strcpy, strncpy, etc.
 
 #include "udp_lib.h"
-#include "udp_queue.h"
-#include "udp_bitmap.h"
-#include "udp_hash.h"
-#include "udp_file_chunk_pool.h"
+#include "checksum.h"
+#include "queue.h"
+#include "bitmap.h"
+#include "mem_pool.h"
 #include "safefileio.h"
+#include "hash.h"
 
 // --- Constants 
 #define SERVER_PORT                     12345       // Port the server listens on
@@ -20,6 +21,9 @@
 #define CHUNK_BODY                      (1u << 6) // 0b01000000
 #define CHUNK_WRITTEN                   (1u << 0) // 0b00000001
 #define CHUNK_NONE                      (0)       // 0b00000000
+
+#define BLOCK_SIZE_CHUNK                ((uint64_t)(FILE_FRAGMENT_SIZE * 64))
+#define BLOCK_COUNT_CHUNK               ((uint64_t)(2048))
 
 typedef uint8_t ServerStatus;
 enum ServerStatus {
@@ -60,7 +64,7 @@ typedef struct{
     struct sockaddr_in addr;            // Server address structure
     ServerStatus status;                // Status of the server (e.g., busy, ready, error)
     uint32_t session_timeout;           // Timeout period for client inactivity
-    volatile long session_id_counter;        // Global counter for unique session IDs
+    volatile long session_id_counter;   // Global counter for unique session IDs
     char name[NAME_SIZE];               // Human-readable server name
 }ServerData;
 
@@ -80,13 +84,16 @@ typedef struct{
 typedef struct{
     char *buffer;
     uint64_t *bitmap;
-    uint32_t message_id;
-    uint32_t message_len;
+    uint32_t s_id;
+    uint32_t m_id;
+    uint32_t m_len;
     uint32_t chars_received;
-    uint32_t fragment_count;
-    uint32_t bitmap_entries_count;
+    uint64_t fragment_count;
+    uint64_t bitmap_entries_count;
 
     char file_name[PATH_SIZE];
+
+    CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
 }MsgStream;
 
 typedef struct{
@@ -98,11 +105,11 @@ typedef struct{
                                         // A bit set to 1 means the fragment has been received.
     uint8_t* flag;                      // Pointer to an array of uint8_t, used for custom flags per chunk/bitmap entry.
                                         // (e.g., 0b10000000 for last partial, 0b00000001 for written, etc.)
-    char** chunk_mem_block;             // Pointer to an array of char pointers, where each char* points to a
+    char** pool_block_file_chunk;             // Pointer to an array of char pointers, where each char* points to a
                                         // memory block holding a complete chunk of data (64 fragments).
-    uint32_t sid;                       // Session ID associated with this file stream.
-    uint32_t fid;                       // File ID, unique identifier for the file associated with this file stream.
-    uint64_t fsize;                     // Total size of the file being transferred.
+    uint32_t s_id;                       // Session ID associated with this file stream.
+    uint32_t f_id;                       // File ID, unique identifier for the file associated with this file stream.
+    uint64_t f_size;                     // Total size of the file being transferred.
     uint64_t fragment_count;            // Total number of fragments in the entire file.
     uint64_t bytes_received;            // Total bytes received for this file so far.
     uint64_t bytes_written;             // Total bytes written to disk for this file so far.
@@ -133,13 +140,11 @@ typedef struct {
     volatile time_t last_activity_time; // Last time the client sent a frame (for timeout checks)             
 
     uint32_t slot_num;                  // Index of the slot the client is connected to [0..MAX_CLIENTS-1]
-    uint8_t slot_status;                //0->FREE; 1->BUSY
+    uint8_t slot_status;                // 0->FREE; 1->BUSY
  
     MsgStream msg_stream[MAX_CLIENT_MESSAGE_STREAMS];
     FileStream file_stream[MAX_CLIENT_FILE_STREAMS];
      
-    volatile long long uid_count;
-
     Statistics statistics;
 
     CRITICAL_SECTION lock;
@@ -161,25 +166,24 @@ QueueSeqNum queue_seq_num;
 QueueSeqNum queue_seq_num_ctrl;
 
 HANDLE receive_frame_thread;
-HANDLE ack_thread;
-HANDLE process_frame_thread;  
+HANDLE process_frame_thread; 
+HANDLE ack_thread; 
 HANDLE client_timeout_thread;
 HANDLE server_command_thread;
-
 HANDLE check_complete_block_in_bitmap_thread;
 
-UniqueIdentifierNode *uid_hash_table[HASH_SIZE] = {NULL};
-MemPoolFileChunk pool_file_chunk;
+UniqueIdentifierNode *uid_hash_table[HASH_SIZE_UID] = {NULL};
+MemPool pool_file_chunk;
 
 
-const char *server_ip = "10.10.10.3"; // IPv4 example
+const char *server_ip = "10.10.10.2"; // IPv4 example
 
 // Client management functions
 ClientData* find_client(ClientList *list, const uint32_t session_id);
 ClientData* add_client(ClientList *list, const UdpFrame *recv_frame, const struct sockaddr_in *client_addr);
 int remove_client(ClientList *list, const uint32_t session_id);
 
-void cleanup_file_stream(FileStream *entry);
+void file_cleanup_stream(FileStream *entry);
 void cleanup_client(ClientData *client);
 
 void update_statistics(ClientData *client);
@@ -187,15 +191,16 @@ void update_statistics(ClientData *client);
 static void register_ack(QueueSeqNum *queue, ClientData *client, UdpFrame *frame, uint8_t op_code);
 
 // Handle message fragment helper functions
-static int mesg_match_fragment(ClientData *client, UdpFrame *frame);
-static int mesg_validate_fragment(ClientData *client, const int index, UdpFrame *frame);
-static int mesg_get_available_slot(ClientData *client);
-static int mesg_init_recv_slot(MsgStream *entry, const uint32_t message_id, const uint32_t message_len);
-static void mesg_attach_fragment(MsgStream *entry, char *fragment_buffer, const uint32_t fragment_offset, const uint32_t fragment_len);
-static int mesg_check_completion_and_record(MsgStream *entry, const uint32_t session_id);
+static int msg_match_fragment(ClientData *client, UdpFrame *frame);
+static int msg_validate_fragment(ClientData *client, const int index, UdpFrame *frame);
+static int msg_get_available_stream_channel(ClientData *client);
+static int msg_init_stream(MsgStream *mstream, const uint32_t session_id, const uint32_t message_id, const uint32_t message_len);
+static void msg_attach_fragment(MsgStream *entry, char *fragment_buffer, const uint32_t fragment_offset, const uint32_t fragment_len);
+static int msg_check_completion_and_record(MsgStream *entry, const uint32_t session_id);
 
+static int file_check_metadata(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id);
 static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id);
-static int file_get_available_slot(ClientData *client);
+static int file_get_available_stream_channel(ClientData *client);
 static void file_attach_fragment_to_chunk(FileStream *fstream, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size);
 static int file_stream_init(FileStream *fstream, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size);
 
@@ -204,11 +209,11 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame);
 int handle_message_fragment(ClientData *client, UdpFrame *frame);
 
 // Thread functions
-unsigned int WINAPI receive_frame_thread_func(void* ptr);
-unsigned int WINAPI process_frame_thread_func(void* ptr);
-unsigned int WINAPI ack_thread_func(void* ptr);
-unsigned int WINAPI client_timeout_thread_func(void* ptr);
-unsigned int WINAPI server_command_thread_func(void* ptr);
+unsigned int WINAPI receive_frame_thread_func(LPVOID lpParam);
+unsigned int WINAPI process_frame_thread_func(LPVOID lpParam);
+unsigned int WINAPI ack_thread_func(LPVOID lpParam);
+unsigned int WINAPI client_timeout_thread_func(LPVOID lpParam);
+unsigned int WINAPI server_command_thread_func(LPVOID lpParam);
 unsigned int WINAPI check_complete_blocks_in_bitmap_func(LPVOID lpParam);
 
 
@@ -332,11 +337,14 @@ int init_server(){
         InitializeCriticalSection(&client_list.client[i].lock);
         for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
             InitializeCriticalSection(&client_list.client[i].file_stream[j].lock);
+            InitializeCriticalSection(&client_list.client[i].msg_stream[j].lock);
         }
     }
     InitializeCriticalSection(&client_list.lock);
 
-    pool_init_chunk(&pool_file_chunk);
+    pool_file_chunk.block_size = BLOCK_SIZE_CHUNK;
+    pool_file_chunk.block_count = BLOCK_COUNT_CHUNK;
+    pool_init(&pool_file_chunk);
 
     printf("Server listening on port %d...\n", SERVER_PORT);
     return RET_VAL_SUCCESS;
@@ -416,6 +424,7 @@ void shutdown_server() {
         DeleteCriticalSection(&client_list.client[i].lock);
         for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
             DeleteCriticalSection(&client_list.client[i].file_stream[j].lock);
+            DeleteCriticalSection(&client_list.client[i].msg_stream[j].lock);
         }
     }
     DeleteCriticalSection(&client_list.lock);
@@ -574,14 +583,17 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame){
     // Update the `last_activity_time` for the client.
     client->last_activity_time = time(NULL);
 
-    // Extract the file ID from the UDP frame's payload.
-    // `ntohl` (network to host long) converts the 32-bit file ID from network byte order
-    // (big-endian) to the host's native byte order, ensuring correct interpretation.
+    uint32_t recv_session_id = ntohl(frame->header.session_id);
     uint32_t recv_file_id = ntohl(frame->payload.file_metadata.file_id);
-    // Extract the file size from the UDP frame's payload.
-    // `ntohll` (network to host long long) converts the 64-bit file size from network
-    // byte order to the host's native byte order.
     uint64_t recv_file_size = ntohll(frame->payload.file_metadata.file_size);
+
+
+    if(file_check_metadata(client, frame, recv_session_id, recv_file_id) == RET_VAL_ERROR){
+        fprintf(stderr, "Duplicated file metadata received!\n");
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_DUPLICATE_FRAME);
+        // If the metadata is invalid or duplicated, register an acknowledgment (ACK)
+        goto exit_error;
+    }
 
     // Check if the specific file transfer (identified by `recv_file_id` and `client->session_id`)
     // has already been marked as `UID_RECV_COMPLETE` in the unique ID hash table.
@@ -598,8 +610,8 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame){
 
     // Attempt to get an available slot within the client's file stream management structure.
     // This is typically used when a client can handle multiple concurrent file transfers.
-    int slot = file_get_available_slot(client);
-    // If `file_get_available_slot` returns `RET_VAL_ERROR`, it means no free slot is available.
+    int slot = file_get_available_stream_channel(client);
+    // If `file_get_available_stream_channel` returns `RET_VAL_ERROR`, it means no free slot is available.
     if(slot == RET_VAL_ERROR){
         // Log an error message indicating that the maximum number of concurrent file transfers has been reached.
         fprintf(stderr, "Maximum file transfers reached!\n");
@@ -701,7 +713,7 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame){
 
     // Additional check to ensure the file ID in the selected slot matches the received file ID.
     // This acts as a double-check against `file_match_fragment` and potential race conditions.
-    if (client->file_stream[slot].fid != recv_file_id){
+    if (client->file_stream[slot].f_id != recv_file_id){
         // This scenario should ideally be caught by `file_match_fragment`, but serves as a safeguard.
         // It indicates an inconsistency or a frame for a file not properly set up in the slot.
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_INVALID_FILE_ID);
@@ -723,22 +735,22 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame){
 
     // Validate if the received fragment's offset is within the bounds of the expected file size.
     // A fragment starting beyond the file size indicates a malformed or erroneous frame.
-    if(recv_fragment_offset >= client->file_stream[slot].fsize){
+    if(recv_fragment_offset >= client->file_stream[slot].f_size){
         // Register an ACK with `ERR_MALFORMED_FRAME` status.
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);
         // Log an error message providing details about the out-of-bounds offset.
-        fprintf(stderr, "Received fragment with offset out of limits. File size: %llu, Received offset: %llu\n", client->file_stream[slot].fsize, recv_fragment_offset);
+        fprintf(stderr, "Received fragment with offset out of limits. File size: %llu, Received offset: %llu\n", client->file_stream[slot].f_size, recv_fragment_offset);
         // Jump to the error handling block.
         goto exit_error;
     }
     // Validate if the fragment, given its offset and size, extends beyond the file's total size.
     // This catches fragments that start within bounds but are too large for the remaining file.
-    if (recv_fragment_offset + recv_fragment_size > client->file_stream[slot].fsize){
+    if (recv_fragment_offset + recv_fragment_size > client->file_stream[slot].f_size){
         // Register an ACK with `ERR_MALFORMED_FRAME` status.
         register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);
         // Log an error message indicating that the fragment extends past the file boundaries.
         fprintf(stderr, "Fragment extends past file bounds (file ID: %u, offset: %llu, size: %u). File size: %llu\n",
-                recv_file_id, recv_fragment_offset, recv_fragment_size, client->file_stream[slot].fsize);
+                recv_file_id, recv_fragment_offset, recv_fragment_size, client->file_stream[slot].f_size);
         // Jump to the error handling block.
         goto exit_error;
     }
@@ -750,9 +762,9 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame){
     // If the corresponding bitmap entry is 0, it means no memory chunk has been allocated for this section of the file yet.
     if(client->file_stream[slot].bitmap[entry_index] == 0ULL){
         // Allocate a new memory chunk from the `pool_file_chunk` memory pool.
-        client->file_stream[slot].chunk_mem_block[entry_index] = pool_alloc_chunk(&pool_file_chunk);
+        client->file_stream[slot].pool_block_file_chunk[entry_index] = pool_alloc(&pool_file_chunk);
         // Check if the memory chunk allocation was successful.
-        if(client->file_stream[slot].chunk_mem_block[entry_index] == NULL){
+        if(client->file_stream[slot].pool_block_file_chunk[entry_index] == NULL){
             // If the memory pool is full and allocation fails, log a message (commented out in original).
             // This suggests a resource limitation that might need to be addressed.
             // fprintf(stdout, "Pool is full! Waiting for free block!\n");
@@ -816,24 +828,24 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
 
     // Handle either an existing or a new message stream.
     // Attempts to find an existing message handling slot that matches the incoming fragment.
-    slot = mesg_match_fragment(client, frame);
+    slot = msg_match_fragment(client, frame);
     if (slot != RET_VAL_ERROR) {
         // This block is executed if the 'slot' is found, meaning this is a fragment for an existing message.
         // Validates the incoming fragment against the state of the message stream in the identified slot.
-        if (mesg_validate_fragment(client, slot, frame) == RET_VAL_ERROR) {
+        if (msg_validate_fragment(client, slot, frame) == RET_VAL_ERROR) {
             goto exit_error; // If fragment validation fails, jumps to the 'exit_error' label.
         }
         // Attaches the fragment's data to the appropriate position within the message buffer managed by the 'message_stream' structure.
-        mesg_attach_fragment(&client->msg_stream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
+        msg_attach_fragment(&client->msg_stream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
         // Acknowledges the successful receipt of the fragment.
         register_ack(&queue_seq_num, client, frame, STS_ACK);
         // Checks if all fragments for the message have been received and, if so, finalizes the message (e.g., writes to disk).
-        if (mesg_check_completion_and_record(&client->msg_stream[slot], client->session_id) == RET_VAL_ERROR)
+        if (msg_check_completion_and_record(&client->msg_stream[slot], client->session_id) == RET_VAL_ERROR)
             goto exit_error; // If completion check or recording fails, jumps to the 'exit_error' label.
     } else {
         // This block is executed if no matching slot is found, suggesting this is the first fragment of a new message.
         // Attempts to obtain an available slot for a new message stream.
-        int slot = mesg_get_available_slot(client);
+        int slot = msg_get_available_stream_channel(client);
         if (slot == RET_VAL_ERROR){ // Checks if an available slot could not be obtained (e.g., maximum streams reached).
             fprintf(stderr, "Maximum message streams reached for client ID: %d\n", client->client_id); // Logs an error message.
             // Registers an ACK with 'ERR_RESOURCE_LIMIT' status, informing the sender of the resource constraint.
@@ -841,21 +853,21 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame){
             goto exit_error; // Jumps to the 'exit_error' label.
         }
         // Validates the fragment. This is particularly important for the first fragment, which often contains total message length.
-        if (mesg_validate_fragment(client, slot, frame) == RET_VAL_ERROR)
+        if (msg_validate_fragment(client, slot, frame) == RET_VAL_ERROR)
             goto exit_error; // If validation fails, jumps to the 'exit_error' label.
         // Initializes the message receiving slot with the message ID and its total expected length.
-        if (mesg_init_recv_slot(&client->msg_stream[slot], recv_message_id, recv_message_len) == RET_VAL_ERROR)
+        if (msg_init_stream(&client->msg_stream[slot], client->session_id, recv_message_id, recv_message_len) == RET_VAL_ERROR)
             goto exit_error; // If slot initialization fails, jumps to the 'exit_error' label.
         // Attaches the first fragment's data to the newly initialized message buffer.
-        mesg_attach_fragment(&client->msg_stream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
-        // Constructs a filename for storing the received message, incorporating session and message IDs for uniqueness.
-        snprintf(client->msg_stream[slot].file_name, PATH_SIZE, "E:\\msg_SID_%d_UID%d.txt", client->session_id, recv_message_id);
+        
+        msg_attach_fragment(&client->msg_stream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
+        
         // Adds an entry to the unique ID hash table, marking the message as awaiting further fragments.
         add_uid_hash_table(uid_hash_table, recv_message_id, client->session_id, UID_WAITING_FRAGMENTS);
         // Acknowledges the successful receipt of this initial fragment.
         register_ack(&queue_seq_num, client, frame, STS_ACK);
         // Checks if the message is now complete (e.g., if it was a single-fragment message) and finalizes it.
-        if (mesg_check_completion_and_record(&client->msg_stream[slot], client->session_id) == RET_VAL_ERROR)
+        if (msg_check_completion_and_record(&client->msg_stream[slot], client->session_id) == RET_VAL_ERROR)
             goto exit_error; // If completion check or recording fails, jumps to the 'exit_error' label.
         LeaveCriticalSection(&client->lock); // Releases the critical section lock.
         return RET_VAL_SUCCESS; // Returns success, indicating the message fragment was handled.
@@ -882,13 +894,13 @@ void update_statistics(ClientData * client){
     client->statistics.prev_bytes_received = client->statistics.crt_bytes_received;
     client->statistics.prev_microseconds = client->statistics.crt_microseconds;
     //PROGRESS - update file transfer progress percentage
-    client->statistics.file_transfer_progress = (float)client->file_stream[0].bytes_received / (float)client->file_stream[0].fsize * 100.0;
+    client->statistics.file_transfer_progress = (float)client->file_stream[0].bytes_received / (float)client->file_stream[0].f_size * 100.0;
 
     fprintf(stdout, "\rFile transfer progress: %.2f %% - Speed: %.2f MB/s", client->statistics.file_transfer_progress, client->statistics.file_transfer_speed);
     fflush(stdout);
 }
 // --- Receive Thread Function ---
-unsigned int WINAPI receive_frame_thread_func(void* ptr) {
+unsigned int WINAPI receive_frame_thread_func(LPVOID lpParam) {
     // Declare a UdpFrame structure to hold the raw incoming UDP datagram.
     UdpFrame received_frame;
     // Declare a QueueFrameEntry structure to prepare the received data for queuing.
@@ -1031,7 +1043,7 @@ unsigned int WINAPI receive_frame_thread_func(void* ptr) {
     return 0; // Return 0 to indicate successful thread termination.
 }
 // --- Processes a received frame ---
-unsigned int WINAPI process_frame_thread_func(void* ptr) {
+unsigned int WINAPI process_frame_thread_func(LPVOID lpParam) {
 
     uint16_t header_delimiter;      // Stores the extracted start delimiter from the frame header.
     uint8_t  header_frame_type;     // Stores the extracted frame type from the frame header.
@@ -1243,7 +1255,7 @@ unsigned int WINAPI process_frame_thread_func(void* ptr) {
     return 0;
 }
 // --- Client timeout thread function ---
-unsigned int WINAPI client_timeout_thread_func(void* ptr){
+unsigned int WINAPI client_timeout_thread_func(LPVOID lpParam){
 
     time_t time_now; // Declares a variable to store the current timestamp.
 
@@ -1299,7 +1311,7 @@ unsigned int WINAPI client_timeout_thread_func(void* ptr){
     return 0; // Return 0 to indicate that the thread terminated successfully.
 }
 // --- SendAck Thread Function ---
-unsigned int WINAPI ack_thread_func(void* ptr){
+unsigned int WINAPI ack_thread_func(LPVOID lpParam){
 
     QueueSeqNumEntry entry;
 
@@ -1327,363 +1339,10 @@ unsigned int WINAPI ack_thread_func(void* ptr){
     return 0;
 }
 // --- Process server command ---
-unsigned int WINAPI server_command_thread_func(void* ptr){
+unsigned int WINAPI server_command_thread_func(LPVOID lpParam){
 
     _endthreadex(0);
     return 0;
-}
-
-static void register_ack(QueueSeqNum *queue, ClientData *client, UdpFrame *frame, uint8_t op_code) {
-    // Create a new QueueSeqNumEntry structure to store the ACK/NAK details.
-    QueueSeqNumEntry entry = {
-        // Extract the sequence number from the frame header, converting from network to host byte order.
-        .seq_num = ntohll(frame->header.seq_num),
-        // Set the operation code (e.g., ACK or NAK) as provided by the caller.
-        .op_code = op_code,
-        // Extract the session ID from the frame header, converting from network to host byte order.
-        .session_id = ntohl(frame->header.session_id)
-    };
-    // Copy the client's address (destination for the ACK/NAK) into the entry.
-    // This is where the client's `addr` member is accessed.
-    memcpy(&entry.addr, &client->addr, sizeof(struct sockaddr_in));
-    // Push the constructed entry into the specified sequence number queue.
-    // This function (push_seq_num) is expected to handle its own locking for the queue.
-    push_seq_num(queue, &entry);
-}
-// Handle message fragment helper functions
-static int mesg_match_fragment(ClientData *client, UdpFrame *frame){
-    
-    uint32_t message_id = ntohl(frame->payload.long_text_msg.message_id);
-
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        if(client->msg_stream[i].message_id == message_id && client->msg_stream[i].buffer != NULL && client->msg_stream[i].bitmap != NULL){
-            return i;
-        }            
-    }
-    return RET_VAL_ERROR;
-}
-static int mesg_validate_fragment(ClientData *client, const int index, UdpFrame *frame){
-
-    uint32_t recv_message_id = ntohl(frame->payload.long_text_msg.message_id);
-    uint32_t recv_message_len = ntohl(frame->payload.long_text_msg.message_len);
-    uint32_t recv_fragment_len = ntohl(frame->payload.long_text_msg.fragment_len);
-    uint32_t recv_fragment_offset = ntohl(frame->payload.long_text_msg.fragment_offset);
-
-    BOOL is_duplicate_fragment = client->msg_stream[index].bitmap && client->msg_stream[index].buffer &&
-                                    check_fragment_received(client->msg_stream[index].bitmap, recv_fragment_offset, TEXT_FRAGMENT_SIZE);
-    if (is_duplicate_fragment == TRUE) {
-        //Client already has bitmap and message buffer allocated so fragment can be processed
-        //if the message was already received send duplicate frame ack op_code
-        register_ack(&queue_seq_num_ctrl, client, frame, ERR_DUPLICATE_FRAME);
-        fprintf(stderr, "Received duplicate text message fragment! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
-        return RET_VAL_ERROR;
-    }
-    if(recv_fragment_offset >= recv_message_len){
-        //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code
-        register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);
-        fprintf(stderr, "Fragment offset past message bounds! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
-        return RET_VAL_ERROR;
-    }
-    if (recv_fragment_offset + recv_fragment_len > recv_message_len || recv_fragment_len > TEXT_FRAGMENT_SIZE) {
-        //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code 
-        register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);
-        fprintf(stderr, "Fragment len past message bounds! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
-        return RET_VAL_ERROR;
-    }
-    return RET_VAL_SUCCESS;
-}
-static int mesg_get_available_slot(ClientData *client){
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        if(client->msg_stream[i].message_id == 0 && client->msg_stream[i].buffer == NULL && client->msg_stream[i].bitmap == NULL){
-            return i;
-        }
-    }
-    return RET_VAL_ERROR;
-}
-static int mesg_init_recv_slot(MsgStream *entry, const uint32_t message_id, const uint32_t message_len){
-
-    entry->message_id = message_id;
-    entry->message_len = message_len;
-
-    entry->fragment_count = message_len / TEXT_FRAGMENT_SIZE;
-    if((message_len % TEXT_FRAGMENT_SIZE) > 0){
-        entry->fragment_count++;
-    }
-    entry->bitmap_entries_count = entry->fragment_count / 64;  
-    if(entry->fragment_count % 64 > 0){
-        entry->bitmap_entries_count++;
-    }
-    entry->bitmap = malloc(entry->bitmap_entries_count * sizeof(uint64_t));
-    if(entry->bitmap == NULL){
-        fprintf(stderr, "Memory allocation fail for file bitmap!!!\n");
-        return RET_VAL_ERROR;        
-    }
-    memset(entry->bitmap, 0, entry->bitmap_entries_count * sizeof(uint64_t));
-    
-    //copy the received fragment text to the buffer            
-    entry->message_id = message_id;
-    entry->buffer = malloc(message_len);
-    if(entry->buffer == NULL){
-        fprintf(stdout, "Error allocating memory!!!\n");
-        return RET_VAL_ERROR;
-    }
-    memset(entry->buffer, 0, message_len);
-
-    return RET_VAL_SUCCESS;
-
-}
-static void mesg_attach_fragment(MsgStream *entry, char *fragment_buffer, const uint32_t fragment_offset, const uint32_t fragment_len){
-    char *dest = entry->buffer + fragment_offset;
-    char *src = fragment_buffer;                                              
-    memcpy(dest, src, fragment_len);
-    entry->chars_received += fragment_len;       
-    mark_fragment_received(entry->bitmap, fragment_offset, TEXT_FRAGMENT_SIZE);
-}
-static int mesg_check_completion_and_record(MsgStream *entry, const uint32_t session_id){
-   // Check if the message is fully received by verifying total bytes and the fragment bitmap.
-    BOOL message_is_complete = (entry->chars_received == entry->message_len) && check_bitmap(entry->bitmap, entry->fragment_count);
-
-    if (message_is_complete == FALSE) {
-        // The message is not yet complete. No action needed for now.
-        return RET_VAL_SUCCESS;
-    }
-
-    // --- Null terminate the message ---
-    entry->buffer[entry->message_len] = '\0';
-    // Attempt to write the in-memory buffer to a file on disk.
-    int mesg_creation_status = create_output_file(entry->buffer, entry->chars_received, entry->file_name);
-    
-    // Update the file status in the hash table to mark it as complete.
-    // This is done regardless of the file save success, as we won't be receiving more fragments.
-    update_uid_status_hash_table(uid_hash_table, session_id, entry->message_id, UID_RECV_COMPLETE);
-
-    // Clean up all dynamically allocated resources for the transfer entry.
-    // This block is executed in both success and failure cases of file creation.
-    entry->message_id = 0;
-    entry->chars_received = 0;
-    entry->fragment_count = 0;
-    entry->bitmap_entries_count = 0;
-    
-    free(entry->buffer);
-    entry->buffer = NULL;
-    
-    free(entry->bitmap);
-    entry->bitmap = NULL;
-
-    if (mesg_creation_status != RET_VAL_SUCCESS) {
-        // If file creation failed, return an error.
-        fprintf(stderr, "Error: Failed to create output message for file_id %d\n", entry->message_id);
-        return RET_VAL_ERROR;
-    }
-    
-    // File was successfully created and saved.
-    return RET_VAL_SUCCESS;
-}
-
-// Handle file fragment helper functions
-static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){
-    // Iterate through all possible file stream slots associated with this client.
-    // MAX_CLIENT_MESSAGE_STREAMS seems like a potential typo here; it should likely be MAX_CLIENT_FILE_STREAMS
-    // to match the array size in ClientData. Assuming it resolves to the same value or is intended for streams.
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        // Acquire the critical section lock for the current file stream slot.
-        // This prevents other threads from modifying or accessing this specific file stream's data
-        // (like its busy status, session ID, or file ID) while this function is checking it.
-        EnterCriticalSection(&client->file_stream[i].lock);
-        // Check if the current file stream slot matches the incoming fragment:
-        // 1. client->file_stream[i].busy == TRUE: Ensure the slot is currently active and in use for a transfer.
-        // 2. client->file_stream[i].sid == session_id: Match the session ID from the incoming fragment.
-        // 3. client->file_stream[i].fid == file_id: Match the file ID from the incoming fragment.
-        if(client->file_stream[i].busy == TRUE && client->file_stream[i].sid == session_id && client->file_stream[i].fid == file_id){
-            // If a matching file stream slot is found, release its lock.
-            LeaveCriticalSection(&client->file_stream[i].lock);
-            // Return the index of the matching slot.
-            return i;
-        }
-        // If the current file stream slot does not match the fragment, release its lock
-        // before proceeding to check the next slot. This is crucial to avoid deadlocks.
-        LeaveCriticalSection(&client->file_stream[i].lock);
-    }
-    // If the loop completes without finding any file stream slot that matches the session_id and file_id,
-    // it means no active transfer for this client corresponds to the incoming fragment.
-    return RET_VAL_ERROR; // Return an error value to indicate no match was found.
-}
-static int file_get_available_slot(ClientData *client){
-    // Iterate through all possible file stream slots allocated for this client.
-    // MAX_CLIENT_FILE_STREAMS defines the maximum number of concurrent file transfers a single client can handle.
-    for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-        // Acquire the critical section lock for the current file stream slot.
-        EnterCriticalSection(&client->file_stream[i].lock);
-        // Check if the current file stream slot is not busy.
-        // A 'busy' status of FALSE indicates that this slot is currently free and available.
-        if(client->file_stream[i].busy == FALSE){
-            // If an available slot is found, immediately mark it as busy.
-            // This claims the slot for the current operation and prevents other threads
-            // from simultaneously claiming the same slot.
-            client->file_stream[i].busy = TRUE;
-            // Release the critical section lock for this file stream, as its state has been updated.
-            LeaveCriticalSection(&client->file_stream[i].lock);
-            // Return the index of the newly claimed (and now busy) slot.
-            return i;
-        }
-        // If the current file stream slot is busy, release its lock before checking the next slot.
-        // It's important to release the lock for a busy slot so other threads can still access it.
-        LeaveCriticalSection(&client->file_stream[i].lock);
-    }
-    // If the loop completes without finding any available (non-busy) file stream slots,
-    // it means all slots are currently in use.
-    return RET_VAL_ERROR; // Return an error value to indicate no slot was found.
-}
-static void file_attach_fragment_to_chunk(FileStream *fstream, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
-    // Calculate the index of the 64-bit bitmap entry (which corresponds to a "chunk" of 64 fragments)
-    // to which this incoming fragment belongs.
-    // fragment_offset / FILE_FRAGMENT_SIZE gives the fragment number.
-    // Dividing by 64ULL (FRAGMENTS_PER_CHUNK) then gives the chunk index.
-    uint64_t fstream_index = (fragment_offset / FILE_FRAGMENT_SIZE) / FRAGMENTS_PER_CHUNK;
-
-    // Acquire the critical section lock for the specific FileStream.
-    // This ensures thread-safe access to the fstream's data members (bitmap, flags, counters, chunk_mem_block)
-    // while this fragment is being processed and attached.
-    EnterCriticalSection(&fstream->lock);
-
-    // Calculate the destination address within the target memory chunk where the fragment data will be copied.
-    // fstream->chunk_mem_block[fstream_index] gives the base address of the chunk.
-    // (fragment_offset % (FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK)) calculates the offset *within that chunk*.
-    // This accounts for multiple fragments being part of one chunk.
-    char *dest = fstream->chunk_mem_block[fstream_index] + (fragment_offset % (FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK));
-    char *src = fragment_buffer; // The source buffer containing the incoming fragment data.
-
-    // Copy the fragment data from the source buffer to its calculated destination within the chunk's memory block.
-    memcpy(dest, src, fragment_size);
-    // Mark the flag for this chunk as CHUNK_BODY.
-    // This assumes that by default, chunks are considered 'body' chunks unless specifically identified as 'trailing'.
-    fstream->flag[fstream_index] = CHUNK_BODY;
-    // fprintf(stdout, "Attaching fragment with offset: %llu to chunk: %llu at offset: %llu\n", fragment_offset, fstream_index, (fragment_offset % (FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK)));
-    // Increment the total number of bytes received for this file stream.
-    fstream->bytes_received += fragment_size;
-
-    // Check if this file stream is expected to have a trailing (potentially partial) chunk.
-    if(fstream->trailing_chunk == TRUE){
-        // Special handling for the last chunk, which might be the trailing chunk.
-        // Check if the current fragment belongs to the last bitmap entry (chunk).
-        if(fstream_index == fstream->bitmap_entries_count - 1ULL){
-            // If it's the last chunk, accumulate the size of the received fragments for this chunk.
-            fstream->trailing_chunk_size += fragment_size;
-            // Mark the flag for this last chunk specifically as CHUNK_TRAILING.
-            // This flag differentiates it from regular CHUNK_BODY entries for writing logic.
-            fstream->flag[fstream_index] = CHUNK_TRAILING;
-            // Note: The `CHUNK_BODY` set above will be immediately overwritten if this condition is true.
-            //fprintf(stdout, "Receiving last chunk bytes: %llu\n", entry->last_chunk_size); // Original comment used 'entry', should be 'fstream'
-        }
-        // Check if all expected bytes for the entire file have been received.
-        if(fstream->bytes_received == fstream->fsize){
-            // If all bytes are received, mark the trailing chunk as complete.
-            // This signals that the last chunk is fully assembled (even if partial in size).
-            fstream->trailing_chunk_complete = TRUE;
-            fprintf(stdout, "\nReceived all bytes. Last chunk size is: %llu\n", fstream->trailing_chunk_size);
-        }
-    }
-
-    // Update the bitmap to mark this specific fragment as received.
-    // This function manipulates the bits within the uint64_t bitmap entry.
-    mark_fragment_received(fstream->bitmap, fragment_offset, FILE_FRAGMENT_SIZE);
-
-    // Release the critical section lock for the file stream.
-    LeaveCriticalSection(&fstream->lock);
-
-}
-static int file_stream_init(FileStream *fstream, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size){
-
-    // Acquire stream channel lock
-    EnterCriticalSection(&fstream->lock);
-
-    // Initialize stream channel context data
-    fstream->busy = TRUE;
-    fstream->file_complete = FALSE;
-    fstream->stream_err = 0;
-
-    fstream->sid = session_id;
-    fstream->fid = file_id;
-    fstream->fsize = file_size;
-    fstream->bytes_received = 0;
-    fstream->bytes_written = 0;
-
-    // Calculate total fragments
-    fstream->fragment_count = (fstream->fsize + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
-    fprintf(stdout, "Fragments count: %llu\n", fstream->fragment_count);
-
-    // Calculate number of 64-bit bitmap entries (chunks)
-    fstream->bitmap_entries_count = (fstream->fragment_count + FRAGMENTS_PER_CHUNK - 1ULL) / FRAGMENTS_PER_CHUNK;
-    fprintf(stdout, "Bitmap 64bits entries needed: %llu\n", fstream->bitmap_entries_count);
-
- 
-    //the file size needs to be a multiple of FILE_FRAGMENT_SIZE and nr of fragments needs to be a multiple of 64 due to bitmap entries being 64 bits
-    //otherwise the trailing bitmap entry will not be full of fragments (the mask will not be ~0ULL) and this needs to be treated separately 
-
-    // Determine if there's a trailing chunk
-    // A trailing chunk exists if:
-    // 1. The total file size is not a perfect multiple of FILE_FRAGMENT_SIZE
-    // OR
-    // 2. The total number of fragments is not a perfect multiple of FRAGMENTS_PER_CHUNK (64)
-    fstream->trailing_chunk = ((fstream->fsize % FILE_FRAGMENT_SIZE) != 0) || (((fstream->fsize / FILE_FRAGMENT_SIZE) % 64ULL) != 0);
-
-    // Initialize trailing chunk status
-    fstream->trailing_chunk_complete = FALSE;
-    fstream->trailing_chunk_size = 0;
-
-    // Allocate memory for bitmap
-    fstream->bitmap = malloc(fstream->bitmap_entries_count * sizeof(uint64_t));
-    if(fstream->bitmap == NULL){
-        fstream->stream_err = STREAM_ERR_BITMAP_MALLOC;
-        fprintf(stderr, "Memory allocation fail for file bitmap mem!!!\n");
-        goto exit_error;
-    }
-    memset(fstream->bitmap, 0, fstream->bitmap_entries_count * sizeof(uint64_t));
-
-    // Allocate memory for flags
-    fstream->flag = malloc(fstream->bitmap_entries_count * sizeof(uint8_t));
-    if(fstream->flag == NULL){
-        fstream->stream_err = STREAM_ERR_FLAG_MALLOC;
-        fprintf(stderr, "Memory allocation fail for file entry flag!!!\n");
-        goto exit_error;
-    }
-    memset(fstream->flag, CHUNK_NONE, fstream->bitmap_entries_count * sizeof(uint8_t));
-
-    // Allocate memory for chunk memory block pointers
-    fstream->chunk_mem_block = malloc(fstream->bitmap_entries_count * sizeof(char*));
-    if(fstream->chunk_mem_block == NULL){
-        fstream->stream_err = STREAM_ERR_CHUNK_PTR_MALLOC;
-        fprintf(stderr, "Memory allocation fail for chunk mem blocks!!!\n");
-        goto exit_error;
-    }   
-    memset(fstream->chunk_mem_block, 0, fstream->bitmap_entries_count * sizeof(char*));
-
-    // Construct file name and open file
-    // Using snprintf for buffer overflow safety
-    int snprintf_res = snprintf(fstream->fn, PATH_SIZE, "E:\\test_file_SID_%d_UID_%d.txt", session_id, file_id);
-    if (snprintf_res < 0 || snprintf_res >= PATH_SIZE) {
-        fprintf(stderr, "Error: File name construction failed or buffer too small.\n");
-        fstream->stream_err = STREAM_ERR_FILENAME; // Suggest adding this error code
-        goto exit_error;
-    }
-    //creating output file
-    fstream->fp = fopen(fstream->fn, "wb+"); // "wb+" allows writing and reading, creates or truncates
-    if(fstream->fp == NULL){
-        fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fn, errno);
-        fstream->stream_err = STREAM_ERR_FP;
-        goto exit_error;
-    }
-
-    // Success path
-    LeaveCriticalSection(&fstream->lock);
-    return RET_VAL_SUCCESS;
-
-exit_error:
-    //Call cleanup_file_stream to free any partially allocated resources
-    cleanup_file_stream(fstream);
-    LeaveCriticalSection(&fstream->lock);
-    return RET_VAL_ERROR;
-
 }
 
 unsigned int WINAPI check_complete_blocks_in_bitmap_func(LPVOID lpParam){
@@ -1720,7 +1379,7 @@ unsigned int WINAPI check_complete_blocks_in_bitmap_func(LPVOID lpParam){
                             // Calculate the absolute file offset where this chunk should be written.
                             uint64_t file_offset = k * FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK; // Use constant
                             // Get the memory buffer associated with this chunk.
-                            char* buffer = fstream->chunk_mem_block[k];
+                            char* buffer = fstream->pool_block_file_chunk[k];
                             uint64_t buffer_size;    // Variable to store the actual size of the chunk to write.
                             uint8_t new_flag_value; // Variable to store the new flag status after writing.
 
@@ -1755,17 +1414,17 @@ unsigned int WINAPI check_complete_blocks_in_bitmap_func(LPVOID lpParam){
                             // --- FILE WRITE OPERATIONS ---
                             // Check if the file pointer is valid. If NULL, something went wrong during file opening.
                             if (fstream->fp == NULL) {
-                                fprintf(stderr, "Error: FILE pointer is null for chunk %llu. Session ID: %u, File ID: %u\n", k, fstream->sid, fstream->fid);
+                                fprintf(stderr, "Error: FILE pointer is null for chunk %llu. Session ID: %u, File ID: %u\n", k, fstream->s_id, fstream->f_id);
                                 fstream->stream_err = STREAM_ERR_FP; // Set a specific error code.
-                                cleanup_file_stream(fstream); // Clean up the entire file stream due to the error.
+                                file_cleanup_stream(fstream); // Clean up the entire file stream due to the error.
                                 break; // Exit the 'k' loop (current file's chunks) and move to the next file stream.
                             }
 
                             // Attempt to seek to the correct offset in the file.
                             if (_fseeki64(fstream->fp, file_offset, SEEK_SET) != 0) {
-                                fprintf(stderr, "Error: Failed to seek to offset %llu for chunk %llu. Session ID: %u, File ID: %u\n", file_offset, k, fstream->sid, fstream->fid);
+                                fprintf(stderr, "Error: Failed to seek to offset %llu for chunk %llu. Session ID: %u, File ID: %u\n", file_offset, k, fstream->s_id, fstream->f_id);
                                 fstream->stream_err = STREAM_ERR_FSEEK; // Set a specific error code.
-                                cleanup_file_stream(fstream); // Clean up the entire file stream.
+                                file_cleanup_stream(fstream); // Clean up the entire file stream.
                                 break; // Exit the 'k' loop.
                             }
 
@@ -1773,34 +1432,36 @@ unsigned int WINAPI check_complete_blocks_in_bitmap_func(LPVOID lpParam){
                             size_t written = fwrite(buffer, 1, buffer_size, fstream->fp);
                             // Check if the number of bytes written matches the expected buffer size.
                             if (written != buffer_size) {
-                                fprintf(stderr, "Error: Failed to write data (expected %llu, wrote %llu) for chunk %llu. Session ID: %u, File ID: %u\n", buffer_size, written, k, fstream->sid, fstream->fid);
+                                fprintf(stderr, "Error: Failed to write data (expected %llu, wrote %llu) for chunk %llu. Session ID: %u, File ID: %u\n", buffer_size, written, k, fstream->s_id, fstream->f_id);
                                 fstream->stream_err = STREAM_ERR_FWRITE; // Set a specific error code.
-                                cleanup_file_stream(fstream); // Clean up the entire file stream.
+                                file_cleanup_stream(fstream); // Clean up the entire file stream.
                                 break; // Exit the 'k' loop.
                             }
                             fstream->bytes_written += written; // Accumulate the total bytes written to disk.
                             fstream->flag[k] = new_flag_value; // Update the chunk's flag to reflect it has been written.
 
                             // Return the memory buffer for this chunk back to the pre-allocated pool.
-                            pool_free_chunk(&pool_file_chunk, fstream->chunk_mem_block[k]);
+                            pool_free(&pool_file_chunk, fstream->pool_block_file_chunk[k]);
                             // Set the pointer in the FileStream structure to NULL to prevent dangling pointers
                             // and to indicate that this chunk's buffer has been released.
-                            fstream->chunk_mem_block[k] = NULL;
+                            fstream->pool_block_file_chunk[k] = NULL;
+
+                            // After attempting to write all available chunks for this file stream:
+                            // Check if the total bytes received equals the total file size AND
+                            // if the total bytes written to disk also equals the total file size.
+                            fstream->file_complete = (fstream->bytes_received == fstream->f_size) && (fstream->bytes_written == fstream->f_size);
+
+                            // If the file is now completely received and written:
+                            if(fstream->file_complete){
+                                // Update the status in the UID hash table (if used for tracking file transfer status).
+                                update_uid_status_hash_table(uid_hash_table, fstream->s_id, fstream->f_id, UID_RECV_COMPLETE);
+                                fprintf(stdout, "[INFO] Transfer finished, created file: %s, bytes: %llu\n", fstream->fn, fstream->bytes_written);
+                                file_cleanup_stream(fstream); // Perform final cleanup for the completed file stream.
+                                break;
+                            }
 
                         } //end of looping through BITMAP ENTRIES
 
-                        // After attempting to write all available chunks for this file stream:
-                        // Check if the total bytes received equals the total file size AND
-                        // if the total bytes written to disk also equals the total file size.
-                        fstream->file_complete = (fstream->bytes_received == fstream->fsize) && (fstream->bytes_written == fstream->fsize);
-
-                        // If the file is now completely received and written:
-                        if(fstream->file_complete){
-                            // Update the status in the UID hash table (if used for tracking file transfer status).
-                            update_uid_status_hash_table(uid_hash_table, fstream->sid, fstream->fid, UID_RECV_COMPLETE);
-                            fprintf(stdout, "[INFO] Transfer finished, created file: %s, bytes: %llu\n", fstream->fn, fstream->bytes_written);
-                            cleanup_file_stream(fstream); // Perform final cleanup for the completed file stream.
-                        }
                     } // check busy
                     // Release the critical section lock for the current file stream.
                     LeaveCriticalSection(&fstream->lock);
@@ -1817,7 +1478,411 @@ unsigned int WINAPI check_complete_blocks_in_bitmap_func(LPVOID lpParam){
     return 0; // Return 0 indicating successful thread termination.
 }
 
-void cleanup_file_stream(FileStream *fstream){
+
+
+
+
+
+
+static void register_ack(QueueSeqNum *queue, ClientData *client, UdpFrame *frame, uint8_t op_code) {
+    // Create a new QueueSeqNumEntry structure to store the ACK/NAK details.
+    QueueSeqNumEntry entry = {
+        // Extract the sequence number from the frame header, converting from network to host byte order.
+        .seq_num = ntohll(frame->header.seq_num),
+        // Set the operation code (e.g., ACK or NAK) as provided by the caller.
+        .op_code = op_code,
+        // Extract the session ID from the frame header, converting from network to host byte order.
+        .session_id = ntohl(frame->header.session_id)
+    };
+    // Copy the client's address (destination for the ACK/NAK) into the entry.
+    // This is where the client's `addr` member is accessed.
+    memcpy(&entry.addr, &client->addr, sizeof(struct sockaddr_in));
+    // Push the constructed entry into the specified sequence number queue.
+    // This function (push_seq_num) is expected to handle its own locking for the queue.
+    push_seq_num(queue, &entry);
+}
+// Handle message fragment helper functions
+static int msg_match_fragment(ClientData *client, UdpFrame *frame){
+    
+    uint32_t message_id = ntohl(frame->payload.long_text_msg.message_id);
+
+    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
+        EnterCriticalSection(&client->msg_stream[i].lock);
+        if(client->msg_stream[i].m_id == message_id && client->msg_stream[i].buffer != NULL && client->msg_stream[i].bitmap != NULL){
+            LeaveCriticalSection(&client->msg_stream[i].lock);
+            return i;
+        }
+        LeaveCriticalSection(&client->msg_stream[i].lock);        
+    }
+    return RET_VAL_ERROR;
+}
+static int msg_validate_fragment(ClientData *client, const int index, UdpFrame *frame){
+
+    EnterCriticalSection(&client->msg_stream[index].lock);
+
+    uint32_t recv_message_id = ntohl(frame->payload.long_text_msg.message_id);
+    uint32_t recv_message_len = ntohl(frame->payload.long_text_msg.message_len);
+    uint32_t recv_fragment_len = ntohl(frame->payload.long_text_msg.fragment_len);
+    uint32_t recv_fragment_offset = ntohl(frame->payload.long_text_msg.fragment_offset);
+
+    BOOL is_duplicate_fragment = client->msg_stream[index].bitmap && client->msg_stream[index].buffer &&
+                                    check_fragment_received(client->msg_stream[index].bitmap, recv_fragment_offset, TEXT_FRAGMENT_SIZE);
+    if (is_duplicate_fragment == TRUE) {
+        //Client already has bitmap and message buffer allocated so fragment can be processed
+        //if the message was already received send duplicate frame ack op_code
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_DUPLICATE_FRAME);
+        fprintf(stderr, "Received duplicate text message fragment! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
+        goto exit_error;
+    }
+    if(recv_fragment_offset >= recv_message_len){
+        //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);
+        fprintf(stderr, "Fragment offset past message bounds! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
+        goto exit_error;
+    }
+    if ((recv_fragment_offset + recv_fragment_len) > recv_message_len || recv_fragment_len > TEXT_FRAGMENT_SIZE) {
+        //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code 
+        register_ack(&queue_seq_num_ctrl, client, frame, ERR_MALFORMED_FRAME);
+        fprintf(stderr, "Fragment len past message bounds! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
+        goto exit_error;
+    }
+    //Success path
+    LeaveCriticalSection(&client->msg_stream[index].lock);
+    return RET_VAL_SUCCESS;
+
+exit_error:
+    LeaveCriticalSection(&client->msg_stream[index].lock);
+    return RET_VAL_ERROR;
+
+}
+static int msg_get_available_stream_channel(ClientData *client){
+    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
+        EnterCriticalSection(&client->msg_stream[i].lock);
+        if(client->msg_stream[i].m_id == 0 && client->msg_stream[i].buffer == NULL && client->msg_stream[i].bitmap == NULL){
+            LeaveCriticalSection(&client->msg_stream[i].lock);
+            return i;
+        }
+        LeaveCriticalSection(&client->msg_stream[i].lock);
+    }
+    return RET_VAL_ERROR;
+}
+static int msg_init_stream(MsgStream *mstream, const uint32_t session_id, const uint32_t message_id, const uint32_t message_len){
+
+    EnterCriticalSection(&mstream->lock);
+
+    mstream->s_id = session_id;
+    mstream->m_id = message_id;
+    mstream->m_len = message_len;
+
+    // Calculate total fragments
+    mstream->fragment_count = (mstream->m_len + (uint64_t)TEXT_FRAGMENT_SIZE - 1ULL) / (uint64_t)TEXT_FRAGMENT_SIZE;
+    fprintf(stdout, "Fragments count for message: %llu\n", mstream->fragment_count);
+
+    // Calculate number of 64-bit bitmap entries (chunks)
+    mstream->bitmap_entries_count = (mstream->fragment_count + FRAGMENTS_PER_CHUNK - 1ULL) / FRAGMENTS_PER_CHUNK;  
+    fprintf(stdout, "Bitmap 64bits entries needed: %llu\n", mstream->bitmap_entries_count);
+
+    mstream->bitmap = malloc(mstream->bitmap_entries_count * sizeof(uint64_t));
+    if(mstream->bitmap == NULL){
+        fprintf(stderr, "Memory allocation fail for file bitmap!!!\n");
+        goto exit_error;
+    }
+    memset(mstream->bitmap, 0, mstream->bitmap_entries_count * sizeof(uint64_t));
+    
+    //copy the received fragment text to the buffer            
+    mstream->m_id = message_id;
+    mstream->buffer = malloc(message_len);
+    if(mstream->buffer == NULL){
+        fprintf(stdout, "Error allocating memory!!!\n");
+        goto exit_error;
+    }
+    memset(mstream->buffer, 0, message_len);
+
+    // Constructs a filename for storing the received message, incorporating session and message IDs for uniqueness.
+    snprintf(mstream->file_name, PATH_SIZE, "E:\\msg_SID_%d_UID%d.txt", session_id, message_id);
+
+    LeaveCriticalSection(&mstream->lock);
+    return RET_VAL_SUCCESS;
+
+exit_error:
+    LeaveCriticalSection(&mstream->lock);
+    return RET_VAL_ERROR;
+
+}
+static void msg_attach_fragment(MsgStream *mstream, char *fragment_buffer, const uint32_t fragment_offset, const uint32_t fragment_len){
+    EnterCriticalSection(&mstream->lock);
+    char *dest = mstream->buffer + fragment_offset;
+    char *src = fragment_buffer;                                              
+    memcpy(dest, src, fragment_len);
+    mstream->chars_received += fragment_len;       
+    mark_fragment_received(mstream->bitmap, fragment_offset, TEXT_FRAGMENT_SIZE);
+    LeaveCriticalSection(&mstream->lock);
+}
+static int msg_check_completion_and_record(MsgStream *mstream, const uint32_t session_id){
+    // Check if the message is fully received by verifying total bytes and the fragment bitmap.
+    EnterCriticalSection(&mstream->lock);
+
+    BOOL message_is_complete = (mstream->chars_received == mstream->m_len) && check_bitmap(mstream->bitmap, mstream->fragment_count);
+
+    if (message_is_complete == FALSE) {
+        // The message is not yet complete. No action needed for now.
+        LeaveCriticalSection(&mstream->lock);
+        return RET_VAL_SUCCESS;
+    }
+
+    // --- Null terminate the message ---
+    mstream->buffer[mstream->m_len] = '\0';
+    // Attempt to write the in-memory buffer to a file on disk.
+    int msg_creation_status = create_output_file(mstream->buffer, mstream->chars_received, mstream->file_name);
+    
+    // Update the file status in the hash table to mark it as complete.
+    // This is done regardless of the file save success, as we won't be receiving more fragments.
+    update_uid_status_hash_table(uid_hash_table, session_id, mstream->m_id, UID_RECV_COMPLETE);
+
+    // Clean up all dynamically allocated resources for the transfer entry.
+    // This block is executed in both success and failure cases of file creation.
+    mstream->s_id = 0;
+    mstream->m_id = 0;
+    mstream->chars_received = 0;
+    mstream->fragment_count = 0;
+    mstream->bitmap_entries_count = 0;
+    
+    if(mstream->buffer != NULL){
+        free(mstream->buffer);
+        mstream->buffer = NULL;
+    }
+    if(mstream->bitmap != NULL){
+        free(mstream->bitmap);
+        mstream->bitmap = NULL;
+    }
+    if (msg_creation_status != RET_VAL_SUCCESS) {
+        // If file creation failed, return an error.
+        fprintf(stderr, "Error: Failed to create output message for file_id %d\n", mstream->m_id);
+        remove(mstream->file_name);
+        LeaveCriticalSection(&mstream->lock);
+        return RET_VAL_ERROR;
+    }
+    // File was successfully created and saved.
+    LeaveCriticalSection(&mstream->lock);
+    return RET_VAL_SUCCESS;
+}
+
+// Handle file fragment helper functions
+static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){
+    // Iterate through all possible file stream slots associated with this client.
+    for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
+        // Acquire the critical section lock for the current file stream slot.
+        // This prevents other threads from modifying or accessing this specific file stream's data
+        // (like its busy status, session ID, or file ID) while this function is checking it.
+        EnterCriticalSection(&client->file_stream[i].lock);
+        // Check if the current file stream slot matches the incoming fragment:
+        // 1. client->file_stream[i].busy == TRUE: Ensure the slot is currently active and in use for a transfer.
+        // 2. client->file_stream[i].s_id == session_id: Match the session ID from the incoming fragment.
+        // 3. client->file_stream[i].fid == file_id: Match the file ID from the incoming fragment.
+        if(client->file_stream[i].busy == TRUE && client->file_stream[i].s_id == session_id && client->file_stream[i].f_id == file_id){
+            // If a matching file stream slot is found, release its lock.
+            LeaveCriticalSection(&client->file_stream[i].lock);
+            // Return the index of the matching slot.
+            return i;
+        }
+        // If the current file stream slot does not match the fragment, release its lock
+        // before proceeding to check the next slot. This is crucial to avoid deadlocks.
+        LeaveCriticalSection(&client->file_stream[i].lock);
+    }
+    // If the loop completes without finding any file stream slot that matches the session_id and file_id,
+    // it means no active transfer for this client corresponds to the incoming fragment.
+    return RET_VAL_ERROR; // Return an error value to indicate no match was found.
+}
+static int file_check_metadata(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){
+    // This function checks if a file stream with the given session_id and file_id already exists for the client. 
+    for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){      
+        EnterCriticalSection(&client->file_stream[i].lock);       
+        if(client->file_stream[i].s_id == session_id && client->file_stream[i].f_id == file_id){          
+            LeaveCriticalSection(&client->file_stream[i].lock);          
+            return RET_VAL_ERROR;
+        }      
+        LeaveCriticalSection(&client->file_stream[i].lock);
+    }  
+    return RET_VAL_SUCCESS; 
+}
+static int file_get_available_stream_channel(ClientData *client){
+    // Iterate through all possible file stream slots allocated for this client.
+    // MAX_CLIENT_FILE_STREAMS defines the maximum number of concurrent file transfers a single client can handle.
+    for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
+        // Acquire the critical section lock for the current file stream slot.
+        EnterCriticalSection(&client->file_stream[i].lock);
+        // Check if the current file stream slot is not busy.
+        // A 'busy' status of FALSE indicates that this slot is currently free and available.
+        if(client->file_stream[i].busy == FALSE){
+            // If an available slot is found, immediately mark it as busy.
+            // This claims the slot for the current operation and prevents other threads
+            // from simultaneously claiming the same slot.
+            client->file_stream[i].busy = TRUE;
+            // Release the critical section lock for this file stream, as its state has been updated.
+            LeaveCriticalSection(&client->file_stream[i].lock);
+            // Return the index of the newly claimed (and now busy) slot.
+            return i;
+        }
+        // If the current file stream slot is busy, release its lock before checking the next slot.
+        // It's important to release the lock for a busy slot so other threads can still access it.
+        LeaveCriticalSection(&client->file_stream[i].lock);
+    }
+    // If the loop completes without finding any available (non-busy) file stream slots,
+    // it means all slots are currently in use.
+    return RET_VAL_ERROR; // Return an error value to indicate no slot was found.
+}
+static void file_attach_fragment_to_chunk(FileStream *fstream, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
+    // Calculate the index of the 64-bit bitmap entry (which corresponds to a "chunk" of 64 fragments)
+    // to which this incoming fragment belongs.
+    // fragment_offset / FILE_FRAGMENT_SIZE gives the fragment number.
+    // Dividing by 64ULL (FRAGMENTS_PER_CHUNK) then gives the chunk index.
+    uint64_t fstream_index = (fragment_offset / FILE_FRAGMENT_SIZE) / FRAGMENTS_PER_CHUNK;
+
+    // Acquire the critical section lock for the specific FileStream.
+    // This ensures thread-safe access to the fstream's data members (bitmap, flags, counters, pool_block_file_chunk)
+    // while this fragment is being processed and attached.
+    EnterCriticalSection(&fstream->lock);
+
+    // Calculate the destination address within the target memory chunk where the fragment data will be copied.
+    // fstream->pool_block_file_chunk[fstream_index] gives the base address of the chunk.
+    // (fragment_offset % (FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK)) calculates the offset *within that chunk*.
+    // This accounts for multiple fragments being part of one chunk.
+    char *dest = fstream->pool_block_file_chunk[fstream_index] + (fragment_offset % (FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK));
+    char *src = fragment_buffer; // The source buffer containing the incoming fragment data.
+
+    // Copy the fragment data from the source buffer to its calculated destination within the chunk's memory block.
+    memcpy(dest, src, fragment_size);
+    // Mark the flag for this chunk as CHUNK_BODY.
+    // This assumes that by default, chunks are considered 'body' chunks unless specifically identified as 'trailing'.
+    fstream->flag[fstream_index] = CHUNK_BODY;
+    // fprintf(stdout, "Attaching fragment with offset: %llu to chunk: %llu at offset: %llu\n", fragment_offset, fstream_index, (fragment_offset % (FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK)));
+    // Increment the total number of bytes received for this file stream.
+    fstream->bytes_received += fragment_size;
+
+    // Check if this file stream is expected to have a trailing (potentially partial) chunk.
+    if(fstream->trailing_chunk == TRUE){
+        // Special handling for the last chunk, which might be the trailing chunk.
+        // Check if the current fragment belongs to the last bitmap entry (chunk).
+        if(fstream_index == fstream->bitmap_entries_count - 1ULL){
+            // If it's the last chunk, accumulate the size of the received fragments for this chunk.
+            fstream->trailing_chunk_size += fragment_size;
+            // Mark the flag for this last chunk specifically as CHUNK_TRAILING.
+            // This flag differentiates it from regular CHUNK_BODY entries for writing logic.
+            fstream->flag[fstream_index] = CHUNK_TRAILING;
+            // Note: The `CHUNK_BODY` set above will be immediately overwritten if this condition is true.
+            //fprintf(stdout, "Receiving last chunk bytes: %llu\n", entry->last_chunk_size); // Original comment used 'entry', should be 'fstream'
+        }
+        // Check if all expected bytes for the entire file have been received.
+        if(fstream->bytes_received == fstream->f_size){
+            // If all bytes are received, mark the trailing chunk as complete.
+            // This signals that the last chunk is fully assembled (even if partial in size).
+            fstream->trailing_chunk_complete = TRUE;
+            fprintf(stdout, "\nReceived all bytes. Last chunk size is: %llu\n", fstream->trailing_chunk_size);
+        }
+    }
+
+    // Update the bitmap to mark this specific fragment as received.
+    // This function manipulates the bits within the uint64_t bitmap entry.
+    mark_fragment_received(fstream->bitmap, fragment_offset, FILE_FRAGMENT_SIZE);
+
+    // Release the critical section lock for the file stream.
+    LeaveCriticalSection(&fstream->lock);
+
+}
+static int file_stream_init(FileStream *fstream, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size){
+
+    // Acquire stream channel lock
+    EnterCriticalSection(&fstream->lock);
+
+    // Initialize stream channel context data
+    fstream->busy = TRUE;
+    fstream->file_complete = FALSE;
+    fstream->stream_err = 0;
+
+    fstream->s_id = session_id;
+    fstream->f_id = file_id;
+    fstream->f_size = file_size;
+    fstream->bytes_received = 0;
+    fstream->bytes_written = 0;
+
+    // Calculate total fragments
+    fstream->fragment_count = (fstream->f_size + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
+    fprintf(stdout, "Fragments count: %llu\n", fstream->fragment_count);
+
+    // Calculate number of 64-bit bitmap entries (chunks)
+    fstream->bitmap_entries_count = (fstream->fragment_count + FRAGMENTS_PER_CHUNK - 1ULL) / FRAGMENTS_PER_CHUNK;
+    fprintf(stdout, "Bitmap 64bits entries needed: %llu\n", fstream->bitmap_entries_count);
+
+ 
+    //the file size needs to be a multiple of FILE_FRAGMENT_SIZE and nr of fragments needs to be a multiple of 64 due to bitmap entries being 64 bits
+    //otherwise the trailing bitmap entry will not be full of fragments (the mask will not be ~0ULL) and this needs to be treated separately 
+
+    // Determine if there's a trailing chunk
+    // A trailing chunk exists if:
+    // 1. The total file size is not a perfect multiple of FILE_FRAGMENT_SIZE
+    // OR
+    // 2. The total number of fragments is not a perfect multiple of FRAGMENTS_PER_CHUNK (64)
+    fstream->trailing_chunk = ((fstream->f_size % FILE_FRAGMENT_SIZE) != 0) || (((fstream->f_size / FILE_FRAGMENT_SIZE) % 64ULL) != 0);
+
+    // Initialize trailing chunk status
+    fstream->trailing_chunk_complete = FALSE;
+    fstream->trailing_chunk_size = 0;
+
+    // Allocate memory for bitmap
+    fstream->bitmap = malloc(fstream->bitmap_entries_count * sizeof(uint64_t));
+    if(fstream->bitmap == NULL){
+        fstream->stream_err = STREAM_ERR_BITMAP_MALLOC;
+        fprintf(stderr, "Memory allocation fail for file bitmap mem!!!\n");
+        goto exit_error;
+    }
+    memset(fstream->bitmap, 0, fstream->bitmap_entries_count * sizeof(uint64_t));
+
+    // Allocate memory for flags
+    fstream->flag = malloc(fstream->bitmap_entries_count * sizeof(uint8_t));
+    if(fstream->flag == NULL){
+        fstream->stream_err = STREAM_ERR_FLAG_MALLOC;
+        fprintf(stderr, "Memory allocation fail for file entry flag!!!\n");
+        goto exit_error;
+    }
+    memset(fstream->flag, CHUNK_NONE, fstream->bitmap_entries_count * sizeof(uint8_t));
+
+    // Allocate memory for chunk memory block pointers
+    fstream->pool_block_file_chunk = malloc(fstream->bitmap_entries_count * sizeof(char*));
+    if(fstream->pool_block_file_chunk == NULL){
+        fstream->stream_err = STREAM_ERR_CHUNK_PTR_MALLOC;
+        fprintf(stderr, "Memory allocation fail for chunk mem blocks!!!\n");
+        goto exit_error;
+    }   
+    memset(fstream->pool_block_file_chunk, 0, fstream->bitmap_entries_count * sizeof(char*));
+
+    // Construct file name and open file
+    // Using snprintf for buffer overflow safety
+    int snprintf_res = snprintf(fstream->fn, PATH_SIZE, "E:\\test_file_SID_%d_UID_%d.txt", session_id, file_id);
+    if (snprintf_res < 0 || snprintf_res >= PATH_SIZE) {
+        fprintf(stderr, "Error: File name construction failed or buffer too small.\n");
+        fstream->stream_err = STREAM_ERR_FILENAME; // Suggest adding this error code
+        goto exit_error;
+    }
+    //creating output file
+    fstream->fp = fopen(fstream->fn, "wb+"); // "wb+" allows writing and reading, creates or truncates
+    if(fstream->fp == NULL){
+        fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fn, errno);
+        fstream->stream_err = STREAM_ERR_FP;
+        goto exit_error;
+    }
+
+    // Success path
+    LeaveCriticalSection(&fstream->lock);
+    return RET_VAL_SUCCESS;
+
+exit_error:
+    //Call file_cleanup_stream to free any partially allocated resources
+    file_cleanup_stream(fstream);
+    LeaveCriticalSection(&fstream->lock);
+    return RET_VAL_ERROR;
+
+}
+void file_cleanup_stream(FileStream *fstream){
 
     // Check if the file pointer is valid (not NULL) AND if the stream was busy
     // AND if the file transfer was NOT completed successfully.
@@ -1827,13 +1892,26 @@ void cleanup_file_stream(FileStream *fstream){
         remove(fstream->fn); // Delete the partially written file from disk.
         fstream->fp = NULL;  // Set the file pointer to NULL after closing/removing.
     }
-    // Check if the file pointer is still valid (not NULL).
-    // This catches cases where the file was successfully completed (file_complete is TRUE)
-    // or if the stream was not busy, but the file was still open.
-    if(fstream->fp){
-        fclose(fstream->fp); // Close the file stream.
-        fstream->fp = NULL;  // Set the file pointer to NULL after closing.
+
+    // Ensure all buffered data is written to disk before closing.
+    if(fstream->fp != NULL){
+        // If the file pointer is valid and the file transfer was completed successfully,
+        // we still need to ensure all data is flushed to disk before closing.
+        if(fflush(fstream->fp) != 0){
+            fprintf(stderr, "Error flushing the file to disk. File is still in use.\n");
+        } else {
+            // If the flush was successful, close the file.
+            int fclosed = fclose(fstream->fp);
+            Sleep(50); // Sleep for 50 milliseconds to ensure the file is properly closed before proceeding.
+            if(fclosed != 0){
+                fprintf(stderr, "Error closing the file stream: %s (errno: %d)\n", fstream->fn, errno);
+            } else {
+                fprintf(stdout, "File stream closed successfully: %s\n", fstream->fn);
+            }
+            fstream->fp = NULL; // Set the file pointer to NULL after closing.
+        }
     }
+
     // Check if the bitmap array was allocated.
     if(fstream->bitmap != NULL){
         free(fstream->bitmap); // Free the memory allocated for the bitmap.
@@ -1841,30 +1919,37 @@ void cleanup_file_stream(FileStream *fstream){
     }
     // Check if the flag array was allocated.
     if(fstream->flag != NULL){
+        fprintf(stdout, "Freeing flags memory block for file stream: %s\n", fstream->fn);
         free(fstream->flag); // Free the memory allocated for the flags.
-        fstream->flag = NULL; // Set the pointer to NULL to prevent dangling pointers.
     }
+    fstream->flag = NULL; // Set the pointer to NULL to prevent dangling pointers.
     // Loop through all possible chunk memory blocks that might have been allocated.
     // The `fstream->bitmap_entries_count` determines the valid range of indices.
     for(long long k = 0; k < fstream->bitmap_entries_count; k++){
         // Return each individual chunk memory block back to the global memory pool.
-        // The pool_free_chunk function will handle checking for NULL pointers internally.
-        pool_free_chunk(&pool_file_chunk, fstream->chunk_mem_block[k]);
+        // The pool_free function will handle checking for NULL pointers internally.
+        if(fstream->pool_block_file_chunk[k] != NULL){
+            // Free the memory allocated for each chunk back to the pool.
+            // This is necessary to avoid memory leaks and to reuse memory efficiently.
+            fprintf(stdout, "Freeing chunk memory block at index: %llu\n", k);
+            pool_free(&pool_file_chunk, fstream->pool_block_file_chunk[k]);
+        }
+        fstream->pool_block_file_chunk[k] = NULL;
     }
     // Check if the array of chunk memory block pointers was allocated.
-    if(fstream->chunk_mem_block != NULL){
+    if(fstream->pool_block_file_chunk != NULL){
         // Free the memory allocated for the array of char* pointers itself.
         // This must be done AFTER all individual chunks pointed to by this array have been freed to the pool.
-        free(fstream->chunk_mem_block);
-        fstream->chunk_mem_block = NULL; // Set the pointer to NULL.
+        free(fstream->pool_block_file_chunk);
     }
+    fstream->pool_block_file_chunk = NULL; // Set the pointer to NULL.
     // Reset the stream's state variables to their default/initial values.
     fstream->busy = FALSE;
     fstream->file_complete = FALSE;
     fstream->stream_err = STREAM_ERR_NONE; // Reset error status.
-    fstream->sid = 0; // Reset session ID.
-    fstream->fid = 0; // Reset file ID.
-    fstream->fsize = 0; // Reset total file size.
+    fstream->s_id = 0; // Reset session ID.
+    fstream->f_id = 0; // Reset file ID.
+    fstream->f_size = 0; // Reset total file size.
     fstream->fragment_count = 0; // Reset fragment count.
     fstream->bytes_received = 0; // Reset bytes received counter.
     fstream->bytes_written = 0; // Reset bytes written counter.
@@ -1875,6 +1960,8 @@ void cleanup_file_stream(FileStream *fstream){
     memset(fstream->fn, 0, PATH_SIZE); // Clear the file name buffer by filling it with zeros.
 }
 
+
+// Clean client resources
 void cleanup_client(ClientData *client){
 
     // Iterate through all possible file stream slots associated with this client.
@@ -1884,7 +1971,7 @@ void cleanup_client(ClientData *client){
         EnterCriticalSection(&client->file_stream[i].lock);
         // Call the dedicated cleanup function for the current file stream.
         // This function will free memory, close files, and reset the file stream's state.
-        cleanup_file_stream(&client->file_stream[i]);
+        file_cleanup_stream(&client->file_stream[i]);
         // Release the critical section lock for the current file stream.
         LeaveCriticalSection(&client->file_stream[i].lock);
     }

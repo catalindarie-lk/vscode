@@ -7,5 +7,22 @@
                 "foreground": "#626262"
             }
         }
-    ]
+    ],
+    "editor.tokenColorCustomizations": {
+        "comments": "",
+        "textMateRules": []
+    },
+    "files.associations": {
+        "stdint.h": "c",
+        "bitmap.h": "c",
+        "frames.h": "c",
+        "hash.h": "c",
+        "safefileio.h": "c",
+        "windows.h": "c",
+        "memory": "c",
+        "udp_server.h": "c",
+        "queue.h": "c",
+        "udp_hash.h": "c",
+        "stdio.h": "c"
+    }
 }
