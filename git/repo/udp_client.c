@@ -1,6 +1,18 @@
-#define _CRT_SECURE_NO_WARNINGS // Suppress warnings for strcpy, strncpy, etc.
+// --- udp_client.c ---
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>   // For modern IP address functions (inet_pton, inet_ntop)
+#include <time.h>
+#include <process.h>    // For _beginthreadex
+#include <windows.h>    // For Windows-specific functions like CreateThread, Sleep
+#include <iphlpapi.h>
 
-#include "udp_lib.h"
+#pragma comment(lib, "Ws2_32.lib") // Link against Winsock library
+#pragma comment(lib, "iphlpapi.lib")
+
+#include "frames.h"
 #include "checksum.h"
 #include "queue.h"
 #include "hash.h"

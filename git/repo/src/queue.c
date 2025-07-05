@@ -4,7 +4,7 @@
 #include <stdint.h>             // For uint64_t and uint8_t types
 #include <string.h>             // For memset
 #include <stdbool.h>            // For BOOL type
-#include <windows.h>            // Required for CRITICAL_SECTION and related functions
+
 #include "frames.h"             // For UdpFrame structure
 #include "queue.h"
 

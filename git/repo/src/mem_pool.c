@@ -3,7 +3,7 @@
 #include <stdlib.h>             // For malloc, free, etc.
 #include <stdint.h>             // For uint64_t and uint8_t types
 #include <string.h>             // For memset
-#include <windows.h>            // Required for CRITICAL_SECTION and related functions
+
 #include "mem_pool.h"
 
 //--------------------------------------------------------------------------------------------------------------------------

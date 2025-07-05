@@ -2,9 +2,12 @@
 #define FRAMES_H
 
 #include <stdint.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
 #define MAX_PAYLOAD_SIZE                1400                // Max size of data within a frame payload (adjust as needed)
 #define FRAME_DELIMITER                 0xAABB              // A magic number to identify valid frames
+
 #define TEXT_FRAGMENT_SIZE              ((uint32_t)(MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4))
 #define FILE_FRAGMENT_SIZE              ((uint32_t)(MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t)))
 
@@ -117,21 +120,21 @@ typedef struct {
 #pragma pack(pop)
 
 
-// // Send frame function
-// int send_frame(const UdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
 
-// int send_ack_nak(const uint64_t seq_num, const uint32_t session_id, const uint8_t op_code, 
-//                                                     const SOCKET src_socket, const struct sockaddr_in *dest_addr);
+int send_frame(const UdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
 
-// int send_disconnect(const uint32_t session_id, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
+int send_ack_nak(const uint64_t seq_num, const uint32_t session_id, const uint8_t op_code, 
+                                                    const SOCKET src_socket, const struct sockaddr_in *dest_addr);
 
-// int send_connect_response(const uint64_t seq_num, const uint32_t session_id, const uint32_t session_timeout, const uint8_t status, 
-//                                                     const char *server_name, SOCKET src_socket, const struct sockaddr_in *dest_addr);
+int send_disconnect(const uint32_t session_id, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
 
-// int send_connect_request(const uint64_t seq_num, const uint32_t session_id, const uint32_t client_id, const uint32_t flag, 
-//                                                     const char *client_name, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
+int send_connect_response(const uint64_t seq_num, const uint32_t session_id, const uint32_t session_timeout, const uint8_t status, 
+                                                    const char *server_name, SOCKET src_socket, const struct sockaddr_in *dest_addr);
 
-// int send_keep_alive(const uint64_t seq_num, const uint32_t session_id, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
+int send_connect_request(const uint64_t seq_num, const uint32_t session_id, const uint32_t client_id, const uint32_t flag, 
+                                                    const char *client_name, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
+
+int send_keep_alive(const uint64_t seq_num, const uint32_t session_id, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
 
 
 

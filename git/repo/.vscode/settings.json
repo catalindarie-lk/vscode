@@ -23,6 +23,9 @@
         "udp_server.h": "c",
         "queue.h": "c",
         "udp_hash.h": "c",
-        "stdio.h": "c"
+        "stdio.h": "c",
+        "bit": "c",
+        "iphlpapi.h": "c",
+        "winsock2.h": "c"
     }
 }
