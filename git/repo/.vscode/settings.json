@@ -1,15 +1,9 @@
 {
     "git.enableSmartCommit": true,
-    "editor.tokenColors": [
-        {
-            "scope": "comment",
-            "settings": {
-                "foreground": "#626262"
-            }
-        }
-    ],
+    "git.confirmSync": false,
+    "git.autofetch": true,
     "editor.tokenColorCustomizations": {
-        "comments": "",
+        "comments": "#626262",
         "textMateRules": []
     },
     "files.associations": {
@@ -26,6 +20,7 @@
         "stdio.h": "c",
         "bit": "c",
         "iphlpapi.h": "c",
-        "winsock2.h": "c"
+        "winsock2.h": "c",
+        "mem_pool.h": "c"
     }
 }

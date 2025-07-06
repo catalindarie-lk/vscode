@@ -125,8 +125,8 @@ CRITICAL_SECTION frame_hash_table_mutex;
 
 MemPool frame_mem_pool;
 
-const char *server_ip = "10.10.10.2"; // loopback address
-const char *client_ip = "10.10.10.3";
+const char *server_ip = "10.10.10.3"; // loopback address
+const char *client_ip = "10.10.10.1";
 
 
 unsigned int WINAPI receive_frame_thread_func(LPVOID lpParam);

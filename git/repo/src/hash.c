@@ -11,7 +11,7 @@
 
 //--------------------------------------------------------------------------------------------------------------------------
 
-uint64_t get_hash_frame(const uint64_t key){
+uint64_t get_hash_frame(const uint64_t key) {
     return (key % HASH_SIZE_FRAME);
 }
 int insert_frame(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, UdpFrame *frame, uint32_t *count, MemPool *pool) {
@@ -65,7 +65,7 @@ void remove_frame(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, uint64_t s
     }
     LeaveCriticalSection(mutex);
 }
-void clean_frame_hash_table(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, uint32_t *count, MemPool *pool){
+void clean_frame_hash_table(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, uint32_t *count, MemPool *pool) {
     
     EnterCriticalSection(mutex);
     
@@ -93,28 +93,29 @@ void clean_frame_hash_table(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, 
 
 //--------------------------------------------------------------------------------------------------------------------------
 
-uint64_t get_hash_uid(uint32_t uid){
-    return (uid % HASH_SIZE_UID);
+uint64_t get_hash_uid(uint32_t u_id) {
+    return (u_id % HASH_SIZE_UID);
 }
-void add_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid, uint32_t session_id, uint8_t status){
-    uint64_t index = get_hash_uid(uid);
+void add_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+    uint64_t index = get_hash_uid(u_id);
     
     UniqueIdentifierNode *head = (UniqueIdentifierNode *)malloc(sizeof(UniqueIdentifierNode));
-    head->uid = uid;
-    head->session_id = session_id;
+    head->u_id = u_id;
+    head->s_id = s_id;
     head->status = UID_WAITING_FRAGMENTS;
-    fprintf(stdout, "Added to hash table SID: %d - UID: %d\n", head->session_id, head->uid);
+    fprintf(stdout, "Added to hash table SID: %d - UID: %d\n", head->s_id, head->u_id);
     head->next = (UniqueIdentifierNode *)hash_table[index];  // Insert at the head (linked list)
     hash_table[index] = head;
     return;
 }
-void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid) {
-    uint64_t index = get_hash_uid(uid); 
+void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id) {
+    uint64_t index = get_hash_uid(u_id); 
     UniqueIdentifierNode *curr = hash_table[index];
     UniqueIdentifierNode *prev = NULL;
     while (curr) {     
-        if (curr->uid == uid) {
-//            fprintf(stdout, "Removing seq num: %d from index: %d\n", seq_num, index);
+        if (curr->u_id == u_id && curr->s_id == s_id) {
+            // Found it
+            //fprintf(stdout, "Removing UID: %d, SID: %d from hash table\n", curr->u_id, curr->s_id);
             if (prev) {
                 prev->next = curr->next;
             } else {
@@ -128,25 +129,25 @@ void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid) {
     }
     return;
 }
-BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid, uint32_t session_id, uint8_t status) {
-    uint64_t index = get_hash_uid(uid);
+BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+    uint64_t index = get_hash_uid(u_id);
     UniqueIdentifierNode *node = hash_table[index];
     while (node) {
-        if (node->uid == uid && node->session_id == session_id && node->status == status){
-            //fprintf(stdout, "Found in hash table UID: %d, session ID: %d, status %d\n", node->uid, node->session_id, node->status);
+        if (node->u_id == u_id && node->s_id == s_id && node->status == status){
+            //fprintf(stdout, "Found in hash table UID: %d, session ID: %d, status %d\n", node->u_id, node->s_id, node->status);
             return TRUE;
         }           
         node = node->next;
     }
     return FALSE;
 }
-int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t session_id, uint32_t uid, uint8_t status){
-    uint64_t index = get_hash_uid(uid);
+int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+    uint64_t index = get_hash_uid(u_id);
     UniqueIdentifierNode *node = hash_table[index];
     while (node) {
-        if (node->uid == uid && node->session_id == session_id){
+        if (node->u_id == u_id && node->s_id == s_id){
             node->status = status;
-            //fprintf(stdout, "Updated in hash table SID: %d UID: %d, new status %d\n", node->session_id, node->uid, node->status);
+            //fprintf(stdout, "Updated in hash table SID: %d UID: %d, new status %d\n", node->session_id, node->u_id, node->status);
             return RET_VAL_SUCCESS;
         }           
         node = node->next;
@@ -154,7 +155,7 @@ int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], const uint3
     return RET_VAL_ERROR;
 
 }
-void clean_uid_hash_table(UniqueIdentifierNode *hash_table[]){
+void clean_uid_hash_table(UniqueIdentifierNode *hash_table[]) {
     UniqueIdentifierNode *head = NULL;
     for (int i = 0; i < HASH_SIZE_UID; i++) {
         if(hash_table[i]){       
@@ -177,7 +178,7 @@ void print_uid_hash_table(UniqueIdentifierNode *hash_table[]) {
             printf("BUCKET %d: \n", i);           
             UniqueIdentifierNode *node = hash_table[i];
             while (node) {
-                    fprintf(stdout, "SID: %d - UID: %d\n", node->session_id, node->uid);                   
+                    fprintf(stdout, "SID: %d - UID: %d\n", node->s_id, node->u_id);                   
                     node = node->next;
             }
         }     

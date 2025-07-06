@@ -1,35 +1,17 @@
-#ifndef _UDP_LIB_H
-#define _UDP_LIB_H
+#ifndef LOGGING_H
+#define LOGGING_H
 
-//#define _WINSOCK_DEPRECATED_NO_WARNINGS
 
 #include <stdint.h>    // For fixed-width integer types
 #include <stdio.h>     // For printf and fprintf
 #include <string.h>    // For string manipulation functions
 #include <time.h>       // For time functions
-#include <winsock2.h>   // Primary Winsock header
-#include <ws2tcpip.h>   // For modern IP address functions (inet_pton, inet_ntop)
-#include <process.h>    // For _beginthreadex (preferred over CreateThread for CRT safety)
-#include <windows.h>    // For Windows-specific functions like CreateThread, Sleep
-#include <iphlpapi.h>
+#include <winsock2.h> // For Winsock functions
+#include <ws2tcpip.h> // For modern IP address functions (inet_pton,
 
 #include "frames.h"
 
-#pragma comment(lib, "Ws2_32.lib") // Link against Winsock library
-#pragma comment(lib, "iphlpapi.lib")
-
-// #define MAX_PAYLOAD_SIZE                1400        // Max size of data within a frame payload (adjust as needed)
-// #define FRAME_DELIMITER                 0xAABB      // A magic number to identify valid frames
-// #define NAME_SIZE                       255
-// #define PATH_SIZE                       255
 //#define ENABLE_FRAME_LOG              1
-
-// #define TEXT_FRAGMENT_SIZE              ((uint32_t)(MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4))
-// #define FILE_FRAGMENT_SIZE              ((uint32_t)(MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t)))
-
-// #define MAX_CLIENT_MESSAGE_STREAMS      10
-// #define MAX_CLIENT_FILE_STREAMS         10
-
 // #define SERVER_LOG_FILE                 "E:\\server_log"
 // #define CLIENT_LOG_FILE                 "E:\\client_log.txt"
 
@@ -179,17 +161,17 @@ void create_log_frame_file(uint8_t type, const uint32_t session_id, char buffer[
         snprintf(file_name, PATH_SIZE, "cli_%d.txt", session_id);
     } 
     
-    if (CreateDirectory(log_folder, NULL)) {
-        printf("Created folder '%s' for logs: \n", log_folder);
-    } else {
-        DWORD folder_create_error = GetLastError();
-        if (folder_create_error == ERROR_ALREADY_EXISTS) {
-            //printf("Folder '%s' already existed from a previous run. Good for testing.\n", client_folder_path);
-        } else {
-            fprintf(stderr, "Error creating log folder: %lu\n", folder_create_error);
-            return; // Exit if we can't even set up the test
-        }
-    }
+    // if (CreateDirectory(log_folder, NULL)) {
+    //     printf("Created folder '%s' for logs: \n", log_folder);
+    // } else {
+    //     DWORD folder_create_error = GetLastError();
+    //     if (folder_create_error == ERROR_ALREADY_EXISTS) {
+    //         //printf("Folder '%s' already existed from a previous run. Good for testing.\n", client_folder_path);
+    //     } else {
+    //         fprintf(stderr, "Error creating log folder: %lu\n", folder_create_error);
+    //         return; // Exit if we can't even set up the test
+    //     }
+    // }
 
     strncpy(buffer, log_folder, strlen(log_folder));
     strncpy(buffer + strlen(log_folder), file_name, strlen(file_name));
@@ -215,4 +197,4 @@ void create_log_frame_file(uint8_t type, const uint32_t session_id, char buffer[
 
 
 
-#endif // _UDP_LIB_H
+#endif // LOGGING_H

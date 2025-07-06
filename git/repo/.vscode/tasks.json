@@ -15,7 +15,8 @@
                 "${workspaceFolder}\\src\\queue.c",
                 "${workspaceFolder}\\src\\hash.c",
                 "${workspaceFolder}\\src\\checksum.c",
-                "${workspaceFolder}\\src\\safefileio.c",                
+                "${workspaceFolder}\\src\\safefileio.c", 
+                "${workspaceFolder}\\src\\frame_handlers.c",               
                 "/I${workspaceFolder}\\include", // Include directory for headers
                 //"/I${workspaceFolder}\\src",     // Additional include directory
                 //"/I${workspaceFolder}\\lib",     // Library include directory

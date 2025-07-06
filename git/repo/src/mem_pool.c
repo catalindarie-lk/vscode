@@ -14,6 +14,7 @@ void pool_init(MemPool* pool) {
         fprintf(stderr, "Memory allocation failed for next indices in pool_init.\n");
         return;
     }
+    memset(pool->next, 0, pool->block_count * sizeof(uint64_t)); // Initialize to 0
 
     // Allocate memory for 'used' array
     pool->used = (uint8_t*)malloc(pool->block_count * sizeof(uint8_t));
@@ -22,6 +23,7 @@ void pool_init(MemPool* pool) {
         free(pool->next); // Clean up previously allocated memory
         return;
     }
+    memset(pool->used, 0, pool->block_count * sizeof(uint8_t)); // Initialize to 0 (unused)
 
     // Allocate the main memory buffer for the pool
     pool->memory = (char*)malloc(pool->block_count * pool->block_size);
@@ -31,6 +33,7 @@ void pool_init(MemPool* pool) {
         free(pool->used);
         return;
     }
+    memset(pool->memory, 0, pool->block_count * pool->block_size); // Initialize memory to 0
 
     // Initialize the free list: all blocks are initially free
     pool->free_head = 0; // The first block is the head of the free list
@@ -72,6 +75,7 @@ void* pool_alloc(MemPool* pool) {
     LeaveCriticalSection(&pool->mutex);
 
     // Return the memory address of the allocated block
+    //memset(pool->memory + index * pool->block_size, 0, pool->block_size); // Optional: clear memory for safety
     return (void *)(pool->memory + index * pool->block_size);
 }
 //--------------------------------------------------------------------------------------------------------------------------

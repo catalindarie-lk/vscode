@@ -31,17 +31,17 @@ enum HashMessageStatus{
 };
 
 typedef struct UniqueIdentifierNode{
-    uint32_t uid;
-    uint32_t session_id;
+    uint32_t u_id;
+    uint32_t s_id;
     uint8_t status;                         //1 - Pending; 2 - Finished
     struct UniqueIdentifierNode *next;
 }UniqueIdentifierNode;
 
-uint64_t get_hash_uid(uint32_t uid);
-void add_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid, uint32_t session_id, uint8_t status);
-void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid);
-BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], uint32_t uid, uint32_t session_id, uint8_t status);
-int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t session_id, uint32_t uid, uint8_t status);
+uint64_t get_hash_uid(uint32_t u_id);
+void add_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status);
+void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id);
+BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status);
+int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status);
 void clean_uid_hash_table(UniqueIdentifierNode *hash_table[]);
 void print_uid_hash_table(UniqueIdentifierNode *hash_table[]);
 
