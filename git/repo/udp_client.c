@@ -1,26 +1,26 @@
 // --- udp_client.c ---
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
+#include <stdio.h>                      // For printf, fprintf
+#include <string.h>                     // For memset, memcpy
+#include <stdint.h>                     // For fixed-width integer types
 //#include <winsock2.h>
-#include <ws2tcpip.h>   // For modern IP address functions (inet_pton, inet_ntop)
-#include <time.h>
-#include <process.h>    // For _beginthreadex
-#include <windows.h>    // For Windows-specific functions like CreateThread, Sleep
-#include <iphlpapi.h>
+#include <ws2tcpip.h>                   // For modern IP address functions (inet_pton, inet_ntop)
+#include <time.h>                       // For time functions
+#include <process.h>                    // For _beginthreadex
+#include <windows.h>                    // For Windows-specific functions like CreateThread, Sleep
+#include <iphlpapi.h>                   // For IP Helper API functions
 
-#pragma comment(lib, "Ws2_32.lib") // Link against Winsock library
-#pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "Ws2_32.lib")      // Link against Winsock library
+#pragma comment(lib, "iphlpapi.lib")    // Link against IP Helper API library
 
 #include "include/client.h"
-#include "include/protocol_frames.h"
-#include "include/netendians.h"
-#include "include/checksum.h"
-#include "include/mem_pool.h"
-#include "include/fileio.h"
-#include "include/queue.h"
-#include "include/bitmap.h"
-#include "include/hash.h"
+#include "include/protocol_frames.h"    // For protocol frame definitions
+#include "include/netendians.h"         // For network byte order conversions
+#include "include/checksum.h"           // For checksum validation
+#include "include/mem_pool.h"           // For memory pool management
+#include "include/fileio.h"             // For file transfer functions
+#include "include/queue.h"              // For queue management
+#include "include/bitmap.h"             // For bitmap management
+#include "include/hash.h"               // For hash table management
 
 ClientData client;
 ClientIOManager io_manager;
@@ -38,7 +38,6 @@ HANDLE hthread_message_send[MAX_CLIENT_MESSAGE_STREAMS];
 HANDLE hevent_start_file_transfer[MAX_CLIENT_FILE_STREAMS];
 HANDLE hevent_stop_file_transfer[MAX_CLIENT_FILE_STREAMS];
 HANDLE hevent_file_metadata[MAX_CLIENT_FILE_STREAMS];
-uint64_t pending_metadata_seq_num[MAX_CLIENT_FILE_STREAMS];
 HANDLE hevent_start_message_send[MAX_CLIENT_MESSAGE_STREAMS];
 HANDLE hevent_stop_message_send[MAX_CLIENT_MESSAGE_STREAMS];
 
@@ -50,65 +49,6 @@ const char *server_ip = "10.10.10.1"; // loopback address
 const char *client_ip = "10.10.10.3";
 
 
-// long get_text_file_size(const char *filepath){
-//     FILE *fp = fopen(filepath, "rb"); // Open in binary mode
-//     if (fp == NULL) {
-//          fprintf(stderr, "Error: Could not open file!\n");
-//         return RET_VAL_ERROR;
-//     }
-//     // Seek to end to determine file size
-//     if(fseek(fp, 0, SEEK_END)){
-//        fprintf(stderr, "Failed to seek");
-//         fclose(fp);
-//         return RET_VAL_ERROR;
-//     }
-//     long size = ftell(fp);
-//     if(size == RET_VAL_ERROR){
-//         fprintf(stdout, "Error reading text file size! ftell()\n");
-//         fclose(fp);
-//         return RET_VAL_ERROR;
-//     }
-//     fclose(fp);
-//     return(size);
-// }
-// read file size (big files)
-
-// int read_text_file(const char *filepath, char *buffer, long size) {
-//     FILE *file = fopen(filepath, "rb"); // Open in binary mode
-//     if (file == NULL) {
-//         printf("Error: Could not open file.\n");
-//         return -1;
-//     }
-//    if (buffer == NULL) {
-//         printf("Buffer error.\n");
-//         return -1;
-//     }
-//     memset(buffer, 0, size);
-//     // Read file into buffer
-//     fread(buffer, size, 1, file);
-//     buffer[size] = '\0'; // Null-terminate the buffer
-
-//     fclose(file);
-//     return 0;
-// }
-// int read_file(const char *filepath, char *buffer, long size) {
-//     FILE *file = fopen(filepath, "rb"); // Open in binary mode
-//     if (file == NULL) {
-//         fprintf(stderr,"Error: Could not open file!!!\n");
-//         return -1;
-//     }
-//    if (buffer == NULL) {
-//         fprintf(stderr, "Buffer error!!!\n");
-//         return -1;
-//     }
-//     memset(buffer, 0, size);
-//     // Read file into buffer
-//     fread(buffer, size, 1, file);
-    
-//     fclose(file);
-//     return 0;
-// }
-
 DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_process_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_keep_alive(LPVOID lpParam);
@@ -118,12 +58,7 @@ DWORD WINAPI thread_proc_message_send(LPVOID lpParam);
 DWORD WINAPI thread_proc_client_command(LPVOID lpParam);
 
 
-// get new sequence num
-uint64_t get_new_seq_num(){
-    return InterlockedIncrement64(&client.frame_count);
-}
-// initialize client
-int init_client(){
+int init_client_config(){
     
     WSADATA wsaData;
     int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -134,8 +69,9 @@ int init_client(){
     }
 
     memset(&client, 0, sizeof(ClientData));
-
+    
     client.client_status = CLIENT_BUSY;
+    client.session_status = SESSION_DISCONNECTED; // Initial status is disconnected
 
     client.socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (client.socket == INVALID_SOCKET) {
@@ -165,30 +101,35 @@ int init_client(){
         return RET_VAL_ERROR;
     };
 
-    //Initialize frame buffers (queue)
+    return RET_VAL_SUCCESS;
+}
+
+int init_client_buffers(){
+
+    // Initialize queues
     io_manager.queue_frame.head = 0;
     io_manager.queue_frame.tail = 0;
     InitializeCriticalSection(&io_manager.queue_frame.mutex);
-
     io_manager.queue_priority_frame.head = 0;
     io_manager.queue_priority_frame.tail = 0;
     InitializeCriticalSection(&io_manager.queue_priority_frame.mutex);
-    
-    client.frame_count = (uint64_t)UINT32_MAX;
-    client.uid = 0xCC;
-    snprintf(client.client_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, CLIENT_NAME);
-    client.client_id = CLIENT_ID;
-    client.log_path[0] = '\0';
-    InitializeCriticalSection(&client.frame_count_mutex);
 
+    // Initialize frame hash table
     for(int i = 0; i < HASH_SIZE_FRAME; i++){
         io_manager.frame_ht[i] = NULL;
     }
     InitializeCriticalSection(&io_manager.frame_ht_mutex); 
+    io_manager.frame_ht_count = 0;
 
+    // Initialize memory pool for frames
     io_manager.frame_mem_pool.block_size = BLOCK_SIZE_FRAME;
     io_manager.frame_mem_pool.block_count = BLOCK_COUNT_FRAME;
     pool_init(&io_manager.frame_mem_pool);
+
+    return RET_VAL_SUCCESS;
+}
+
+int create_client_events(){
 
     hevent_connection_successfull = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (hevent_connection_successfull == NULL) {
@@ -196,11 +137,50 @@ int init_client(){
         return RET_VAL_ERROR;
     }
 
-    client.client_status = CLIENT_READY;
-    client.session_status = SESSION_DISCONNECTED;
-
+    for(int index = 0; index < MAX_CLIENT_FILE_STREAMS; index++){
+        hevent_start_file_transfer[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
+        hevent_stop_file_transfer[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
+        hevent_file_metadata[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (hevent_start_file_transfer[index] == NULL || hevent_stop_file_transfer[index] == NULL || hevent_file_metadata[index] == NULL) {
+            fprintf(stderr, "Failed to create file transfer events. Error: %d\n", GetLastError());
+            client.session_status = SESSION_DISCONNECTED;
+            client.client_status = CLIENT_STOP; // Signal immediate shutdown
+            return RET_VAL_ERROR;
+        }
+    }
+    for(int index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
+        hevent_start_message_send[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
+        hevent_stop_message_send[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (hevent_start_message_send[index] == NULL || hevent_stop_message_send[index] == NULL) {
+            fprintf(stderr, "Failed to create message send events. Error: %d\n", GetLastError());
+            client.session_status = SESSION_DISCONNECTED;
+            client.client_status = CLIENT_STOP; // Signal immediate shutdown
+            return RET_VAL_ERROR;
+        }
+    }
     return RET_VAL_SUCCESS;
+}   
+
+int init_client_session_data(){
+
+    client.client_id = CLIENT_ID;
+    
+    client.flags = 0; // No special flags set
+    snprintf(client.client_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, CLIENT_NAME);
+    client.last_active_time = time(NULL); // Set current time as last active time
+
+    client.frame_count = (uint64_t)UINT32_MAX;
+    client.uid_count = 0;
+
+    client.session_id = 0; // Session ID will be assigned by the server
+    client.server_status = SERVER_STATUS_NONE; // Initial server status is ready
+    client.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC; // Default session timeout
+    // Initialize client data
+    memset(client.server_name, 0, NAME_SIZE);
+    return RET_VAL_SUCCESS;     
 }
+
+
 // start client threads
 void start_threads(){
 
@@ -223,28 +203,22 @@ void start_threads(){
         client.client_status = CLIENT_STOP; // Signal immediate shutdown
     }
     for(int index = 0; index < MAX_CLIENT_FILE_STREAMS; index++){
-        hevent_start_file_transfer[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
-        hevent_stop_file_transfer[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
-        hevent_file_metadata[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
         hthread_file_transfer[index] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_transfer, (LPVOID)(intptr_t)index, 0, NULL);
-
-        if (hevent_start_file_transfer[index] == NULL || hthread_file_transfer[index] == NULL){
+        if (hthread_file_transfer[index] == NULL){
             fprintf(stderr, "Failed to create file send thread. Error: %d\n", GetLastError());
             client.session_status = SESSION_DISCONNECTED;
             client.client_status = CLIENT_STOP; // Signal immediate shutdown
         }
     }
    for(int index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-        hevent_start_message_send[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
-        hevent_stop_message_send[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
         hthread_message_send[index] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_message_send, (LPVOID)(intptr_t)index, 0, NULL);
-
-        if (hevent_start_message_send[index] == NULL || hthread_message_send[index] == NULL){
+        if (hthread_message_send[index] == NULL){
             fprintf(stderr, "Failed to create message send thread. Error: %d\n", GetLastError());
             client.session_status = SESSION_DISCONNECTED;
             client.client_status = CLIENT_STOP; // Signal immediate shutdown
         }
     }
+    client.client_status = CLIENT_READY;
 }
 // shutdown client
 void shutdown_client(){
@@ -315,13 +289,11 @@ void shutdown_client(){
 
     DeleteCriticalSection(&io_manager.queue_frame.mutex);
     DeleteCriticalSection(&io_manager.queue_priority_frame.mutex);
-    DeleteCriticalSection(&client.frame_count_mutex);
     CloseHandle(hevent_connection_successfull);
     CloseHandle(hevent_start_message_send);
     closesocket(client.socket);
     WSACleanup();
 }
-
 
 
 // --- Receive frame ---
@@ -410,10 +382,10 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
     while(client.client_status == CLIENT_READY){
         // Pop a frame from the queue (prioritize control queue)
         if (pop_frame(&io_manager.queue_priority_frame, &frame_entry) == RET_VAL_SUCCESS) {
-            //fprintf(stdout, "Processing control frame type: %d, opcode: %d, seq num: %llu\n", frame_entry.frame.header.frame_type, frame_entry.frame.payload.ack.op_code, _ntohll(frame_entry.frame.header.seq_num));
+            // fprintf(stdout, "Processing control frame type: %d, opcode: %d, seq num: %llu\n", frame_entry.frame.header.frame_type, frame_entry.frame.payload.ack.op_code, _ntohll(frame_entry.frame.header.seq_num));
             // Successfully popped from queue_frame_ctrl
         } else if (pop_frame(&io_manager.queue_frame, &frame_entry) == RET_VAL_SUCCESS) {
-            //fprintf(stdout, "Processing frame type: %d, opcode: %d, seq num: %llu\n", frame_entry.frame.header.frame_type, frame_entry.frame.payload.ack.op_code, _ntohll(frame_entry.frame.header.seq_num));
+            // fprintf(stdout, "Processing frame type: %d, opcode: %d, seq num: %llu\n", frame_entry.frame.header.frame_type, frame_entry.frame.payload.ack.op_code, _ntohll(frame_entry.frame.header.seq_num));
             // Successfully popped from queue_frame
         } else {
             Sleep(100); // No frames to process, yield CPU
@@ -425,6 +397,9 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
         frame = &frame_entry.frame;
         src_addr = &frame_entry.src_addr;
         recvfrom_bytes_received = frame_entry.frame_size;
+
+        // fprintf(stdout, "Processing frame from %s:%d, type: %d, seq num: %llu, size: %d bytes\n", 
+        //         inet_ntoa(src_addr->sin_addr), _ntohs(src_addr->sin_port), frame->header.frame_type, _ntohll(frame->header.seq_num), recvfrom_bytes_received);
 
         // Extract header fields   
         received_delimiter = _ntohs(frame->header.start_delimiter);
@@ -449,7 +424,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
             case FRAME_TYPE_CONNECT_RESPONSE:
                 received_server_status = frame->payload.response.server_status;
                 received_session_timeout = _ntohl(frame->payload.response.session_timeout);               
-                if(received_session_id == 0 || received_server_status == 0){
+                if(received_session_id == 0 || received_server_status != SERVER_STATUS_READY){
                     fprintf(stderr, "Session ID invalid or server not ready. Connection not established!\n");
                     client.session_status = SESSION_DISCONNECTED;
                     break;
@@ -458,7 +433,9 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                     fprintf(stderr, "Session timeout invalid. Connection not established!\n");
                     client.session_status = SESSION_DISCONNECTED;
                     break;
-                }                
+                }
+                fprintf(stdout, "Received connect response from %s:%d with session ID: %d, timeout: %d seconds, server status: %d\n", 
+                        src_ip, src_port, received_session_id, received_session_timeout, received_server_status);
                 client.server_status = received_server_status;
                 client.session_timeout = received_session_timeout;
                 client.session_id = received_session_id;
@@ -486,7 +463,8 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 client.last_active_time = time(NULL);
                 uint8_t op_code = frame->payload.ack.op_code;
                 for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-                    if(received_seq_num == pending_metadata_seq_num[i] && op_code == STS_ACK){
+                    if(received_seq_num == client.pending_metadata_seq_num[i] && op_code == STS_ACK){
+                        client.pending_metadata_seq_num[i] = UINT64_MAX; // Reset pending metadata sequence number  
                         SetEvent(hevent_file_metadata[i]);
                     }
                 }
@@ -602,10 +580,10 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
         }
         client.file_size[index] = file_size;
 
-        file_id = (uint32_t)InterlockedIncrement(&client.uid);
+        file_id = InterlockedIncrement(&client.uid_count);
 
-        pending_metadata_seq_num[index] = get_new_seq_num();
-        int metadata_bytes_sent = send_file_metadata(pending_metadata_seq_num[index], 
+        client.pending_metadata_seq_num[index] = get_new_seq_num();
+        int metadata_bytes_sent = send_file_metadata(client.pending_metadata_seq_num[index], 
                                                         client.session_id, 
                                                         file_id, 
                                                         file_size, 
@@ -771,7 +749,7 @@ DWORD WINAPI thread_proc_message_send(LPVOID lpParam){
             continue;
         }
 
-        message_id = (uint32_t)InterlockedIncrement(&client.uid);
+        message_id = InterlockedIncrement(&client.uid_count);
         frame_fragment_offset = 0;
 
         message_buffer = malloc(message_len + 1);
@@ -1040,41 +1018,29 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
     return 0;
 }
 
-
-
+// --- Get new sequence number ---
+uint64_t get_new_seq_num(){
+    return InterlockedIncrement64(&client.frame_count);
+}
 // --- Main function ---
 int main() {
 
-    init_client();   
+    init_client_config();
+    init_client_buffers();
+    create_client_events();
+    init_client_session_data();
     start_threads();
 
-        while(client.client_status == CLIENT_BUSY || client.client_status == CLIENT_READY){
-        fprintf(stdout, "\033[1A\r\033[2K-- File: %.2f, Text: %.2f, Hash F: %d, Recv F: %llu, Sent F: %llu, Pop F: %llu --\n", 
+    while(client.client_status == CLIENT_READY){
+        fprintf(stdout, "\r\033[2K-- File: %.2f perc, Text: %.2f perc, Hash Frames: %u", 
                             (float)(client.file_size[0] - client.file_bytes_to_send[0]) / (float)client.file_size[0] * 100.0, 
                             (float)(client.message_len[0] - client.message_bytes_to_send[0]) / (float)client.message_len[0] * 100.0,
-                            io_manager.frame_ht_count,
-                            frame_counters.total_recv,
-                            frame_counters.total_sent,
-                            frame_counters.queue_pop
-                        );
+                            io_manager.frame_ht_count
+                            );
         fflush(stdout);
 
         if(client.session_status == SESSION_DISCONNECTED){
-            EnterCriticalSection(&client.frame_count_mutex);
-            client.frame_count = (uint64_t)UINT32_MAX;       // this will be sent as seq_num
-            LeaveCriticalSection(&client.frame_count_mutex);
-            client.uid = 0xCC;
-            client.log_path[0] = '\0'; 
-            client.session_id = 0;
-            client.server_status = 0;
-            client.session_timeout = 0;     
-            
-            frame_counters.total_sent = 0;
-            frame_counters.total_recv = 0;
-            frame_counters.ack_sent = 0;
-            frame_counters.ack_recv = 0;
-            frame_counters.queue_pop = 0;
-
+            init_client_session_data();
         }     
         Sleep(100); // Simulate some delay between messages        
     }

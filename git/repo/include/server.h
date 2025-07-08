@@ -21,10 +21,25 @@
 #define MAX_CLIENT_FILE_STREAMS         10
 #endif
 
+#ifndef SERVER_STATUS_NONE
+#define SERVER_STATUS_NONE              0
+#endif
+#ifndef SERVER_STATUS_BUSY
+#define SERVER_STATUS_BUSY              1
+#endif
+#ifndef SERVER_STATUS_READY
+#define SERVER_STATUS_READY             2
+#endif
+#ifndef SERVER_STATUS_ERROR
+#define SERVER_STATUS_ERROR             3
+#endif
+#ifndef DEFAULT_SESSION_TIMEOUT_SEC
+#define DEFAULT_SESSION_TIMEOUT_SEC     120          // Default session timeout in seconds
+#endif
+
 // --- Constants 
 #define SERVER_PORT                     12345       // Port the server listens on
 #define RECVFROM_TIMEOUT_MS             100         // Timeout for recvfrom in milliseconds in the receive thread
-#define CLIENT_SESSION_TIMEOUT_SEC      120       // Seconds after which an inactive client is considered disconnected
 #define SERVER_NAME                     "lkdc UDP Text/File Transfer Server"
 #define MAX_CLIENTS                     20
 #define FILE_PATH                       "E:\\out_file.txt"
@@ -39,13 +54,6 @@
 #define BLOCK_COUNT_CHUNK               ((uint64_t)(2048))
 
 
-typedef uint8_t ServerStatus;
-enum ServerStatus {
-    SERVER_STOP = 0,
-    SERVER_BUSY = 2,
-    SERVER_READY = 3,
-    SERVER_ERROR = 4    
-};
 
 typedef uint8_t ClientConnection;
 enum ClientConnection {
@@ -76,9 +84,9 @@ enum ClientSlotStatus {
 typedef struct{
     SOCKET socket;
     struct sockaddr_in server_addr;            // Server address structure
-    ServerStatus server_status;                // Status of the server (e.g., busy, ready, error)
+    uint8_t server_status;                // Status of the server (e.g., busy, ready, error)
     uint32_t session_timeout;           // Timeout period for client inactivity
-    volatile long session_id_counter;   // Global counter for unique session IDs
+    volatile uint32_t session_id_counter;   // Global counter for unique session IDs
     char name[NAME_SIZE];               // Human-readable server name
    
 }ServerData;
@@ -110,6 +118,8 @@ typedef struct{
 }Statistics;
 
 typedef struct {
+    BOOL busy;                          // Indicates if this message stream is currently in use.
+    uint8_t stream_err;                 // Stores an error code if something goes wrong with the stream.
     char *buffer;                       // Pointer to the buffer holding the message data.
     uint64_t *bitmap;                   // Pointer to a bitmap used for tracking received fragments. Each bit represents a fragment.
     uint32_t s_id;                      // Sender ID: Unique identifier for the sender of the message.
@@ -187,6 +197,7 @@ typedef struct{
 
 void register_ack(QueueSeqNum *queue, Client *client, UdpFrame *frame, uint8_t op_code);
 void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager);
+void message_cleanup_stream(MsgStream *mstream, ServerIOManager* io_manager);
 void cleanup_client(Client *client, ServerIOManager* io_manager);
 
 int create_output_file(const char *buffer, const uint64_t size, const char *path);

@@ -23,12 +23,31 @@
 #endif
 
 
+#ifndef SERVER_STATUS_NONE
+#define SERVER_STATUS_NONE              0
+#endif
+#ifndef SERVER_STATUS_BUSY
+#define SERVER_STATUS_BUSY              1
+#endif
+#ifndef SERVER_STATUS_READY
+#define SERVER_STATUS_READY             2
+#endif
+#ifndef SERVER_STATUS_ERROR
+#define SERVER_STATUS_ERROR             3
+#endif
+#ifndef DEFAULT_SESSION_TIMEOUT_SEC
+#define DEFAULT_SESSION_TIMEOUT_SEC     120          // Default session timeout in seconds
+#endif
+
+
 // --- Constants ---
 #define SERVER_PORT                     12345       // Port the server listens on
 #define FRAME_DELIMITER                 0xAABB      // A magic number to identify valid frames
 #define RECV_TIMEOUT_MS                 100         // Timeout for recvfrom in milliseconds in the receive thread
 #define CLIENT_ID                       0xAA        // Example client ID, can be set dynamically
 #define CLIENT_NAME                     "lkdc UDP Text/File Transfer Client"
+
+
 
 #define TEXT_CHUNK_SIZE                 (TEXT_FRAGMENT_SIZE * 128)
 #define FILE_CHUNK_SIZE                 (FILE_FRAGMENT_SIZE * 128)
@@ -47,8 +66,6 @@
 
 #define TIMEOUT_METADATA_RESPONSE_MS    (5000)      //wait for 5 sec after sending a metadata fragment for response
 #define MAX_RETRIES_STOP_TRANSFER       (5)         //max retries to stop file/message transfer
-
-
 
 
 typedef uint8_t SessionStatus;
@@ -72,15 +89,15 @@ typedef struct{
     struct sockaddr_in client_addr;
     struct sockaddr_in server_addr;
 
+    uint8_t client_status;         
+    uint8_t session_status;     // 0-DISCONNECTED; 1-CONNECTED
     uint32_t client_id;
     uint8_t flags;
     char client_name[NAME_SIZE];
-    ClientStatus client_status;         
-    SessionStatus session_status;     // 0-DISCONNECTED; 1-CONNECTED
     time_t last_active_time;
    
     volatile uint64_t frame_count;       // this will be sent as seq_num
-    CRITICAL_SECTION frame_count_mutex;
+    volatile uint32_t uid_count;      // file id counter for the current session
 
     uint32_t session_id;        // session id received from the server after connection accepted
     uint8_t server_status;      // 0-NOK; 1-OK (connection confirmed by server)
@@ -90,13 +107,13 @@ typedef struct{
     //uint32_t file_id_count;  
     uint64_t file_size[MAX_CLIENT_FILE_STREAMS];
     uint64_t file_bytes_to_send[MAX_CLIENT_FILE_STREAMS];
+    uint64_t pending_metadata_seq_num[MAX_CLIENT_FILE_STREAMS]; // seq num of the file metadata frame sent to the server, waiting for ACK
 
     //uint32_t message_id_count;
     long message_len[MAX_CLIENT_MESSAGE_STREAMS];
     uint32_t message_bytes_to_send[MAX_CLIENT_MESSAGE_STREAMS];
 
-    volatile long uid;
-
+ 
     BOOL file_throttle;
 
     char log_path[PATH_SIZE];
@@ -115,6 +132,6 @@ typedef struct {
 
 }ClientIOManager;
 
-
+uint64_t get_new_seq_num();
 
 #endif

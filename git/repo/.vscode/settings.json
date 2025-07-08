@@ -27,6 +27,7 @@
         "netendians.h": "c",
         "client.h": "c",
         "protocol_frames.h": "c",
-        "process.h": "c"
+        "process.h": "c",
+        "iosfwd": "c"
     }
 }

@@ -234,10 +234,10 @@ int send_file_metadata(const uint64_t seq_num,
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));  
     
-    if(insert_frame(io_manager->frame_ht, &io_manager->frame_ht_mutex, &frame, &io_manager->frame_ht_count, &io_manager->frame_mem_pool) == RET_VAL_ERROR){
-        fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
-        return RET_VAL_ERROR;
-    }
+    // if(insert_frame(io_manager->frame_ht, &io_manager->frame_ht_mutex, &frame, &io_manager->frame_ht_count, &io_manager->frame_mem_pool) == RET_VAL_ERROR){
+    //     fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
+    //     return RET_VAL_ERROR;
+    // }
 
     int bytes_sent = send_frame(&frame, src_socket, dest_addr, frame_counters);
     if(bytes_sent == SOCKET_ERROR){

@@ -145,7 +145,7 @@ BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION 
     uint64_t index = get_hash_uid(u_id);
     UniqueIdentifierNode *node = hash_table[index];
     while (node) {
-        if (node->u_id == u_id && node->s_id == s_id && node->status == status){
+        if (node->s_id == s_id && node->u_id == u_id && node->status == status){
             //fprintf(stdout, "Found in hash table UID: %d, session ID: %d, status %d\n", node->u_id, node->s_id, node->status);
             LeaveCriticalSection(mutex);
             return TRUE;

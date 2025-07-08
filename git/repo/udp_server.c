@@ -1,27 +1,27 @@
 
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
+#include <stdio.h>                      // For printf, fprintf
+#include <string.h>                     // For memset, memcpy
+#include <stdint.h>                     // For fixed-width integer types    
 //#include <winsock2.h>
-#include <ws2tcpip.h>   // For modern IP address functions (inet_pton, inet_ntop)
-#include <time.h>
-#include <process.h>    // For _beginthreadex
-#include <windows.h>    // For Windows-specific functions like CreateThread, Sleep
-#include <iphlpapi.h>
+#include <ws2tcpip.h>                   // For modern IP address functions (inet_pton, inet_ntop)
+#include <time.h>                       // For time functions
+#include <process.h>                    // For _beginthreadex
+#include <windows.h>                    // For Windows-specific functions like CreateThread, Sleep
+#include <iphlpapi.h>                   // For IP Helper API functions
 
-#pragma comment(lib, "Ws2_32.lib") // Link against Winsock library
-#pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "Ws2_32.lib")      // Link against Winsock library
+#pragma comment(lib, "iphlpapi.lib")    // Link against IP Helper API library
 
-#include "include/server.h"
-#include "include/protocol_frames.h"
-#include "include/netendians.h"
-#include "include/checksum.h"
-#include "include/mem_pool.h"
-#include "include/fileio.h"
-#include "include/queue.h"
-#include "include/bitmap.h"
-#include "include/hash.h"
-#include "include/frame_handlers.h"
+#include "include/server.h"             // For server data structures and definitions
+#include "include/protocol_frames.h"    // For protocol frame definitions
+#include "include/netendians.h"         // For network byte order conversions
+#include "include/checksum.h"           // For checksum validation
+#include "include/mem_pool.h"           // For memory pool management
+#include "include/fileio.h"             // For file transfer functions
+#include "include/queue.h"              // For queue management
+#include "include/bitmap.h"             // For bitmap management
+#include "include/hash.h"               // For hash table management
+#include "include/frame_handlers.h"     // For frame handling functions
 
 ServerData server;
 ServerIOManager io_manager;
@@ -44,9 +44,7 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
 static int remove_client(ClientList *client_list, ServerIOManager* io_manager, const uint32_t slot);
 void check_open_file_stream(ClientList *client_list);
 
-
 static void update_statistics(Client *client);
-
 
 // Thread functions
 DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam);
@@ -92,7 +90,7 @@ int init_server(){
         exit(EXIT_FAILURE);
     }
     memset(&client_list, 0, sizeof(ClientList));
-    server.server_status = SERVER_BUSY;
+    server.server_status = SERVER_STATUS_BUSY;
 
     server.socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (server.socket == INVALID_SOCKET) {
@@ -124,8 +122,8 @@ int init_server(){
     io_manager.queue_priority_seq_num.tail = 0;
     InitializeCriticalSection(&io_manager.queue_priority_seq_num.mutex);
     
-    server.session_timeout = CLIENT_SESSION_TIMEOUT_SEC;
-    server.session_id_counter = 0xFF;
+    server.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
+    server.session_id_counter = 0;
     snprintf(server.name, NAME_SIZE, "%.*s", NAME_SIZE - 1, SERVER_NAME);
 
     for(int i = 0; i < MAX_CLIENTS; i++){
@@ -194,13 +192,13 @@ int start_threads() {
         fprintf(stderr, "Failed to create server command thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
-    server.server_status = SERVER_READY;
+    server.server_status = SERVER_STATUS_READY;
     return RET_VAL_SUCCESS;
 }
 // --- Server shutdown ---
 void shutdown_server() {
 
-    server.server_status = SERVER_STOP;
+    server.server_status = SERVER_STATUS_NONE;
 
     if (hthread_receive_frame) {
         // Signal the receive thread to stop and wait for it to finish
@@ -333,7 +331,7 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
     // Extracts the client ID from the received frame's payload, converting it from network byte order.
     new_client->client_id = _ntohl(recv_frame->payload.request.client_id); 
     // Assigns a unique session ID to the new client by atomically incrementing a global counter.
-    new_client->session_id = (uint32_t)InterlockedIncrement(&server.session_id_counter); 
+    new_client->session_id = InterlockedIncrement(&server.session_id_counter); 
     // Copies the flag from the received frame's request payload to the new client's data.
     new_client->flag = recv_frame->payload.request.flag;
     
@@ -436,7 +434,7 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
         fprintf(stderr, "receive_thread_func: setsockopt SO_RCVTIMEO failed with error: %d\n", WSAGetLastError());
     }
 
-    while (server.server_status == SERVER_READY) {
+    while (server.server_status == SERVER_STATUS_READY) {
 
         memset(&received_frame, 0, sizeof(UdpFrame));
         memset(&src_addr, 0, sizeof(src_addr));
@@ -502,12 +500,12 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
     char src_ip[INET_ADDRSTRLEN];   // Buffer to store the human-readable string representation of the source IP address.
     uint16_t src_port;              // Stores the source port number.
 
-    Client *client;             // A pointer to the ClientData structure associated with the current frame's session.
+    Client *client;                 // A pointer to the Client structure associated with the current frame's session.
 
     // Main thread loop: This thread continuously runs as long as the server's global status
     // is set to SERVER_READY. Its primary responsibility is to dequeue incoming UDP frames
     // and dispatch them for processing based on their type.
-    while(server.server_status == SERVER_READY) {
+    while(server.server_status == SERVER_STATUS_READY) {
         // Clear the frame_entry structure at the beginning of each iteration.
         // This ensures that any data from a previous frame is not accidentally processed again.
         memset(&frame_entry, 0, sizeof(QueueFrameEntry));
@@ -703,7 +701,7 @@ DWORD WINAPI thread_proc_ack_frame(LPVOID lpParam){
 
     QueueSeqNumEntry entry;
 
-    while (server.server_status == SERVER_READY) {
+    while (server.server_status == SERVER_STATUS_READY) {
         memset(&entry, 0, sizeof(QueueSeqNumEntry));
 
         if(pop_seq_num(&io_manager.queue_priority_seq_num, &entry) == RET_VAL_SUCCESS){
@@ -736,7 +734,7 @@ DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
     // Main loop of the thread. This loop continuously runs as long as the server's status
     // is set to SERVER_READY. It is responsible for periodically checking client activity
     // and disconnecting inactive clients.
-    while(server.server_status == SERVER_READY) {
+    while(server.server_status == SERVER_STATUS_READY) {
         EnterCriticalSection(&lp_client_list->lock);
         // Iterate through each possible client slot, from 0 up to MAX_CLIENTS - 1.
         // Each 'slot' represents a potential connection slot for a client.
@@ -792,7 +790,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
 
     // Main loop: Continue as long as the server is in a READY state.
     // This thread continuously polls for completed file blocks to write to disk.
-    while (server.server_status == SERVER_READY) {
+    while (server.server_status == SERVER_STATUS_READY) {
         EnterCriticalSection(&client_list->lock);
         // Iterate through all possible client slots.
         for(int i = 0; i < MAX_CLIENTS; i++){
@@ -901,8 +899,8 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             if(fstream->file_complete){
                                 // Update the status in the UID hash table (if used for tracking file transfer status).
                                 update_uid_status_hash_table(io_manager.uid_hash_table, &io_manager.uid_ht_mutex, fstream->s_id, fstream->f_id, UID_RECV_COMPLETE);
-                                fprintf(stdout, "[INFO] Transfer finished, created file: %s, bytes: %llu\n", fstream->fn, fstream->bytes_written);
-                                fprintf(stdout,"Cleaning up file stream: %d\n", j);
+                                // fprintf(stdout, "[INFO] Transfer finished, created file: %s, bytes: %llu\n", fstream->fn, fstream->bytes_written);
+                                // fprintf(stdout,"Cleaning up file stream: %d\n", j);
                                 file_cleanup_stream(fstream, &io_manager); // Perform final cleanup for the completed file stream.
                                 break;
                             }
@@ -930,7 +928,7 @@ DWORD WINAPI thread_proc_server_command(LPVOID lpParam){
     
     char cmd;
     
-    while (server.server_status == SERVER_READY){
+    while (server.server_status == SERVER_STATUS_READY){
 
         fprintf(stdout,"Waiting for command...\n");
         cmd = getchar();
@@ -943,7 +941,7 @@ DWORD WINAPI thread_proc_server_command(LPVOID lpParam){
 
             case 'q':
             case 'Q':
-                server.server_status = SERVER_STOP;
+                server.server_status = SERVER_STATUS_NONE;
                 break;
 
             default:
@@ -955,8 +953,6 @@ DWORD WINAPI thread_proc_server_command(LPVOID lpParam){
     _endthreadex(0);
     return 0;
 }
-
-
 
 
 // Register an acknowledgment (ACK) or negative acknowledgment for a received frame.
@@ -1061,6 +1057,35 @@ void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager){
     memset(fstream->fn, 0, PATH_SIZE); // Clear the file name buffer by filling it with zeros.
     return;
 }
+
+void message_cleanup_stream(MsgStream *mstream, ServerIOManager* io_manager){
+
+    if(mstream == NULL){
+        fprintf(stderr, "ERROR: Trying to clean a NULL pointer message stream\n");
+        return;
+    }
+    if(mstream->buffer){
+        free(mstream->buffer);
+        mstream->buffer = NULL; // Set the pointer to NULL to prevent dangling pointers.
+    }
+    if(mstream->bitmap != NULL){
+        free(mstream->bitmap); // Free the memory allocated for the bitmap.
+        mstream->bitmap = NULL; // Set the pointer to NULL to prevent dangling pointers.
+    }
+    mstream->busy = FALSE; // Reset the busy flag.
+    mstream->stream_err = STREAM_ERR_NONE; // Reset error status.
+    mstream->s_id = 0; // Reset session ID.
+    mstream->m_id = 0; // Reset message ID.
+    mstream->m_len = 0; // Reset message length.
+    mstream->fragment_count = 0; // Reset fragment count.
+    mstream->chars_received = 0; // Reset characters received counter.
+    mstream->bitmap_entries_count = 0; // Reset bitmap entries count.
+    memset(mstream->file_name, 0, PATH_SIZE); // Clear the file name buffer by filling it with zeros.
+    return;
+
+}
+
+
 // Clean client resources
 void cleanup_client(Client *client, ServerIOManager* io_manager){
     
@@ -1079,6 +1104,15 @@ void cleanup_client(Client *client, ServerIOManager* io_manager){
         file_cleanup_stream(&client->file_stream[i], io_manager);
         // Release the critical section lock for the current file stream.
         LeaveCriticalSection(&client->file_stream[i].lock);
+    }
+    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
+        // Acquire the critical section lock for the current message stream.
+        EnterCriticalSection(&client->msg_stream[i].lock);
+        // Call the dedicated cleanup function for the current message stream.
+        // This function will free memory, close files, and reset the message stream's state.
+        message_cleanup_stream(&client->msg_stream[i], io_manager);
+        // Release the critical section lock for the current message stream.
+        LeaveCriticalSection(&client->msg_stream[i].lock);
     }
 
 
@@ -1106,7 +1140,7 @@ void cleanup_client(Client *client, ServerIOManager* io_manager){
     LeaveCriticalSection(&client->lock);
     return;
 }
-
+// Check for any open file streams across all clients.
 void check_open_file_stream(ClientList* client_list){
     for(int i = 0; i < MAX_CLIENTS; i++){
         for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
@@ -1132,7 +1166,7 @@ int main() {
     init_server();
     start_threads();
     // Main server loop for general management, timeouts, and state updates
-    while (server.server_status == SERVER_READY) {
+    while (server.server_status == SERVER_STATUS_READY) {
 
         Sleep(250); // Prevent busy-waiting
    
