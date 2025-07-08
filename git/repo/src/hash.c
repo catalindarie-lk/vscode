@@ -1,27 +1,27 @@
-
+//  // This file contains the implementation of the hash table for frames and unique identifiers.
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
 
-#include "netendians.h"
-#include "frames.h"
-#include "mem_pool.h"
-#include "hash.h"
+#include "include/protocol_frames.h"
+#include "include/netendians.h"
+#include "include/mem_pool.h"
+#include "include/hash.h"
 
 //--------------------------------------------------------------------------------------------------------------------------
 
 uint64_t get_hash_frame(const uint64_t key) {
     return (key % HASH_SIZE_FRAME);
 }
-int insert_frame(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, UdpFrame *frame, uint32_t *count, MemPool *pool) {
+int insert_frame(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, UdpFrame *frame, uint32_t *count, MemPool *pool) {
     
     EnterCriticalSection(mutex);
     
     uint64_t seq_num = _ntohll(frame->header.seq_num);
     uint64_t index = get_hash_frame(seq_num);
     //fprintf(stdout, "SeqNum: %llu inserted at index: %llu\n", seq_num, index);
-    AckHashNode *node = (AckHashNode *)pool_alloc(pool);
+    FramePendingAck *node = (FramePendingAck *)pool_alloc(pool);
     if(node == NULL){
         return RET_VAL_ERROR;
     }
@@ -29,21 +29,21 @@ int insert_frame(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, UdpFrame *f
     node->time = time(NULL);
     node->counter = 1;
 
-    node->next = (AckHashNode *)hash_table[index];  // Insert at the head (linked list)
+    node->next = (FramePendingAck *)hash_table[index];  // Insert at the head (linked list)
     hash_table[index] = node;
-    InterlockedIncrement(count);
+    (*count)++;
 
     LeaveCriticalSection(mutex);
     return RET_VAL_SUCCESS;
 }
-void remove_frame(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, uint64_t seq_num, uint32_t *count, MemPool *pool) {
+void remove_frame(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, uint64_t seq_num, uint32_t *count, MemPool *pool) {
 
     EnterCriticalSection(mutex);
 
     uint64_t index = get_hash_frame(seq_num);
     //fprintf(stdout, "Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
-    AckHashNode *curr = hash_table[index];
-    AckHashNode *prev = NULL;
+    FramePendingAck *curr = hash_table[index];
+    FramePendingAck *prev = NULL;
     while (curr) {
         if (_ntohll(curr->frame.header.seq_num) == seq_num) {
             //fprintf(stdout, "Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
@@ -55,7 +55,7 @@ void remove_frame(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, uint64_t s
             }
             pool_free(pool, curr);
             //free(curr);
-            InterlockedDecrement(count);
+            (*count)--;
             //fprintf(stdout, "Hash count: %d\n", *count);
             LeaveCriticalSection(mutex);
             return;
@@ -65,21 +65,21 @@ void remove_frame(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, uint64_t s
     }
     LeaveCriticalSection(mutex);
 }
-void clean_frame_hash_table(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, uint32_t *count, MemPool *pool) {
+void clean_frame_hash_table(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, uint32_t *count, MemPool *pool) {
     
     EnterCriticalSection(mutex);
     
-    AckHashNode *head = NULL;
+    FramePendingAck *head = NULL;
     for (int i = 0; i < HASH_SIZE_FRAME; i++) {
         if(hash_table[i]){       
-            AckHashNode *ptr = hash_table[i];
+            FramePendingAck *ptr = hash_table[i];
             while (ptr) {
                     head = ptr;
                     //fprintf(stdout, "Bucket: %d - Freeing SeqNum: %d\n", i, head->seq_num);                   
                     ptr = ptr->next;
                     pool_free(pool, head);
                     //free(head);
-                    InterlockedDecrement(count);
+                    (*count)--;
             }
             pool_free(pool, ptr);
             //free(ptr);
@@ -96,7 +96,10 @@ void clean_frame_hash_table(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, 
 uint64_t get_hash_uid(uint32_t u_id) {
     return (u_id % HASH_SIZE_UID);
 }
-void add_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+void add_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+    
+    EnterCriticalSection(mutex);
+    
     uint64_t index = get_hash_uid(u_id);
     
     UniqueIdentifierNode *head = (UniqueIdentifierNode *)malloc(sizeof(UniqueIdentifierNode));
@@ -106,9 +109,13 @@ void add_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id,
     fprintf(stdout, "Added to hash table SID: %d - UID: %d\n", head->s_id, head->u_id);
     head->next = (UniqueIdentifierNode *)hash_table[index];  // Insert at the head (linked list)
     hash_table[index] = head;
+    LeaveCriticalSection(mutex);
     return;
 }
-void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id) {
+void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id) {
+    
+    EnterCriticalSection(mutex);
+
     uint64_t index = get_hash_uid(u_id); 
     UniqueIdentifierNode *curr = hash_table[index];
     UniqueIdentifierNode *prev = NULL;
@@ -122,40 +129,55 @@ void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_
                 hash_table[index] = curr->next;
             }
             free(curr);
+            LeaveCriticalSection(mutex);
             return;
         }
         prev = curr;
         curr = curr->next;
     }
+    LeaveCriticalSection(mutex);
     return;
 }
-BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+    
+    EnterCriticalSection(mutex);
+    
     uint64_t index = get_hash_uid(u_id);
     UniqueIdentifierNode *node = hash_table[index];
     while (node) {
         if (node->u_id == u_id && node->s_id == s_id && node->status == status){
             //fprintf(stdout, "Found in hash table UID: %d, session ID: %d, status %d\n", node->u_id, node->s_id, node->status);
+            LeaveCriticalSection(mutex);
             return TRUE;
         }           
         node = node->next;
     }
+    LeaveCriticalSection(mutex);
     return FALSE;
 }
-int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+    
+    EnterCriticalSection(mutex);
+    
     uint64_t index = get_hash_uid(u_id);
     UniqueIdentifierNode *node = hash_table[index];
     while (node) {
         if (node->u_id == u_id && node->s_id == s_id){
             node->status = status;
             //fprintf(stdout, "Updated in hash table SID: %d UID: %d, new status %d\n", node->session_id, node->u_id, node->status);
+            LeaveCriticalSection(mutex);
             return RET_VAL_SUCCESS;
         }           
         node = node->next;
     }
+    LeaveCriticalSection(mutex);
     return RET_VAL_ERROR;
 
 }
-void clean_uid_hash_table(UniqueIdentifierNode *hash_table[]) {
+void clean_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex) {
+    
+    EnterCriticalSection(mutex);
+    
     UniqueIdentifierNode *head = NULL;
     for (int i = 0; i < HASH_SIZE_UID; i++) {
         if(hash_table[i]){       
@@ -170,9 +192,13 @@ void clean_uid_hash_table(UniqueIdentifierNode *hash_table[]) {
             hash_table[i] = NULL;
         }     
     }
+    LeaveCriticalSection(mutex);
     return;
 }
-void print_uid_hash_table(UniqueIdentifierNode *hash_table[]) {
+void print_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex) {
+    
+    EnterCriticalSection(mutex);
+    
     for (int i = 0; i < HASH_SIZE_UID; i++) {
         if(hash_table[i]){
             printf("BUCKET %d: \n", i);           
@@ -183,4 +209,5 @@ void print_uid_hash_table(UniqueIdentifierNode *hash_table[]) {
             }
         }     
     }
+    LeaveCriticalSection(mutex);
 }

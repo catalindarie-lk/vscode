@@ -1,0 +1,54 @@
+@echo off
+setlocal
+
+REM Get workspace folder from argument
+set workspace=%1
+
+REM Get target source name: udp_client or udp_server
+set target=%2
+
+REM Common source files (in src)
+set common=%workspace%\src\protocol_frames.c ^
+%workspace%\src\mem_pool.c ^
+%workspace%\src\bitmap.c ^
+%workspace%\src\queue.c ^
+%workspace%\src\hash.c ^
+%workspace%\src\checksum.c ^
+%workspace%\src\fileio.c
+
+REM Conditional dependency only for udp_server
+if "%target%"=="udp_server" (
+    set private=%workspace%\src\frame_handlers.c
+) else if "%target%"=="udp_client" (
+    set private=
+) else (
+    echo [ERROR] Unknown target: %target%
+    exit /b 1
+)
+
+
+echo cl.exe /EHsc /favor:AMD64 ^
+%common% ^
+%private% ^
+%workspace%\%target%.c ^
+/I"%workspace%" ^
+/O2 ^
+/Fe"%workspace%\bin\%target%.exe" ^
+/Fo"%workspace%\bin\obj\\" ^
+/Fd"%workspace%\bin\pdb\\" ^
+/link /MACHINE:X64
+
+
+REM Build with cl.exe
+cl.exe /EHsc /favor:AMD64 ^
+%common% ^
+%private% ^
+%workspace%\%target%.c ^
+/I"%workspace%" ^
+/O2 ^
+/Fe"%workspace%\bin\%target%.exe" ^
+/Fo"%workspace%\bin\obj\\" ^
+/Fd"%workspace%\bin\pdb\\" ^
+/link /MACHINE:X64
+
+endlocal

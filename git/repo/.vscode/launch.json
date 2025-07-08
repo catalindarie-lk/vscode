@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "C/C++: cl.exe build and debug active file",
+            "name": "BUILD CURRENT FILE",
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}\\bin\\${fileBasenameNoExtension}.exe",
@@ -11,11 +11,12 @@
             "cwd": "${workspaceFolder}",
             "environment": [],
             "console": "integratedTerminal",
-            "symbolSearchPath": "${workspaceFolder}\\obj",
+            "symbolSearchPath": "${workspaceFolder}\\bin\\obj",
             "logging": {
                 "moduleLoad": true,
                 "exceptions": true
-            }
+            },
+            "preLaunchTask": "Build UDP Program",
         }
     ]
 }

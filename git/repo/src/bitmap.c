@@ -5,7 +5,7 @@
 #include <stdbool.h>            // For BOOL type
 #include <string.h>             // For memset
 #include <windows.h>            // Required for CRITICAL_SECTION and related functions
-#include "bitmap.h"
+#include "include/bitmap.h"
 
 // To mark a fragment as received
 void mark_fragment_received(uint64_t bitmap[], uint64_t fragment_offset, uint32_t fragment_size) {

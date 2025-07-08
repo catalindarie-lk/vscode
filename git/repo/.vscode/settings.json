@@ -21,6 +21,12 @@
         "bit": "c",
         "iphlpapi.h": "c",
         "winsock2.h": "c",
-        "mem_pool.h": "c"
+        "mem_pool.h": "c",
+        "checksum.h": "c",
+        "server.h": "c",
+        "netendians.h": "c",
+        "client.h": "c",
+        "protocol_frames.h": "c",
+        "process.h": "c"
     }
 }

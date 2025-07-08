@@ -5,8 +5,8 @@
 #include <string.h>             // For memset
 #include <stdbool.h>            // For BOOL type
 
-#include "frames.h"             // For UdpFrame structure
-#include "queue.h"
+#include "include/protocol_frames.h"             // For UdpFrame structure
+#include "include/queue.h"
 
 // ---------------------- QUEUE FOR BUFFERING RECEIVED FRAMES ----------------------
 // Push frame data to queue - received frames are buffered to a queue before processing; receive thread pushes the frame to the queue
@@ -28,7 +28,7 @@ int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry){
     // Add the sequence number to the ACK queue 
     memcpy(&queue->frame_entry[queue->tail], frame_entry, sizeof(QueueFrameEntry)); // Copy the frame to the queue
     // Move the tail index forward    
-    InterlockedIncrement(&queue->tail);
+    (queue->tail)++;
     queue->tail %= FRAME_QUEUE_SIZE;
     // Release the mutex after modifying the queue
     LeaveCriticalSection(&queue->mutex);
@@ -53,7 +53,7 @@ int pop_frame(QueueFrame *queue, QueueFrameEntry *frame_entry){
     memcpy(frame_entry, &queue->frame_entry[queue->head], sizeof(QueueFrameEntry)); // Copy the frame from the queue
     memset(&queue->frame_entry[queue->head], 0, sizeof(QueueFrameEntry)); // Clear the frame at the head
     // Move the head index forward
-    InterlockedIncrement(&queue->head);
+    (queue->head)++;
     queue->head %= FRAME_QUEUE_SIZE;
     LeaveCriticalSection(&queue->mutex);
     return RET_VAL_SUCCESS;
@@ -78,7 +78,7 @@ int push_seq_num(QueueSeqNum *queue, QueueSeqNumEntry *seq_num_entry){
     // Add the sequence number to the ACK queue 
     memcpy(&queue->seq_num_entry[queue->tail], seq_num_entry, sizeof(QueueSeqNumEntry));
     // Move the tail index forward    
-    InterlockedIncrement(&queue->tail);
+    (queue->tail)++;
     queue->tail %= SEQ_NUM_QUEUE_SIZE;
     // Release the mutex after modifying the queue
     LeaveCriticalSection(&queue->mutex);
@@ -103,7 +103,7 @@ int pop_seq_num(QueueSeqNum *queue, QueueSeqNumEntry *seq_num_entry){
     memcpy(seq_num_entry, &queue->seq_num_entry[queue->head], sizeof(QueueSeqNumEntry));
     memset(&queue->seq_num_entry[queue->head], 0, sizeof(QueueSeqNumEntry));
     // Move the head index forward
-    InterlockedIncrement(&queue->head);
+    (queue->head)++;
     queue->head %= SEQ_NUM_QUEUE_SIZE;
     LeaveCriticalSection(&queue->mutex);
     return RET_VAL_SUCCESS;

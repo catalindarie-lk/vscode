@@ -2,8 +2,15 @@
 #define FRAMES_H
 
 #include <stdint.h>
-#include <winsock2.h>
+//#include <winsock2.h>
 #include <ws2tcpip.h>
+
+#ifndef RET_VAL_SUCCESS
+#define RET_VAL_SUCCESS 0
+#endif
+#ifndef RET_VAL_ERROR
+#define RET_VAL_ERROR -1
+#endif
 
 #define MAX_PAYLOAD_SIZE                1400                // Max size of data within a frame payload (adjust as needed)
 #define FRAME_DELIMITER                 0xAABB              // A magic number to identify valid frames
@@ -13,12 +20,6 @@
 
 #define NAME_SIZE                       255                 // Maximum size for client/server names
 #define PATH_SIZE                       255                 // Maximum size for file paths
-
-#define MAX_CLIENT_MESSAGE_STREAMS      10
-#define MAX_CLIENT_FILE_STREAMS         10
-
-#define RET_VAL_ERROR                   -1
-#define RET_VAL_SUCCESS                 0
 
 
 // --- Frame Types ---
@@ -119,22 +120,61 @@ typedef struct {
 } UdpFrame;
 #pragma pack(pop)
 
+typedef struct {
+    uint64_t total_sent;
+    uint64_t total_recv;
+
+    uint64_t queue_pop;
 
 
-int send_frame(const UdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
+    uint64_t ack_sent;
+    uint64_t ack_recv;
 
-int send_ack_nak(const uint64_t seq_num, const uint32_t session_id, const uint8_t op_code, 
-                                                    const SOCKET src_socket, const struct sockaddr_in *dest_addr);
+}FrameCounters;
 
-int send_disconnect(const uint32_t session_id, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
 
-int send_connect_response(const uint64_t seq_num, const uint32_t session_id, const uint32_t session_timeout, const uint8_t status, 
-                                                    const char *server_name, SOCKET src_socket, const struct sockaddr_in *dest_addr);
+int send_frame(const UdpFrame *frame, 
+                    const SOCKET src_socket, 
+                    const struct sockaddr_in *dest_addr, 
+                    FrameCounters* frame_counters
+                );
+int send_ack(const uint64_t seq_num, 
+                    const uint32_t session_id, 
+                    const uint8_t op_code, 
+                    const SOCKET src_socket, 
+                    const struct sockaddr_in *dest_addr, 
+                    FrameCounters* frame_counters
+                );
+int send_disconnect(const uint32_t session_id, 
+                    const SOCKET src_socket, 
+                    const struct sockaddr_in *dest_addr, 
+                    FrameCounters* frame_counters
+                );
 
-int send_connect_request(const uint64_t seq_num, const uint32_t session_id, const uint32_t client_id, const uint32_t flag, 
-                                                    const char *client_name, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
-
-int send_keep_alive(const uint64_t seq_num, const uint32_t session_id, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
+int send_connect_response(const uint64_t seq_num, 
+                    const uint32_t session_id, 
+                    const uint32_t session_timeout, 
+                    const uint8_t status, 
+                    const char *server_name, 
+                    SOCKET src_socket, 
+                    const struct sockaddr_in *dest_addr, 
+                    FrameCounters* frame_counters
+                );
+int send_connect_request(const uint64_t seq_num, 
+                    const uint32_t session_id, 
+                    const uint32_t client_id, 
+                    const uint32_t flag, 
+                    const char *client_name, 
+                    const SOCKET src_socket, 
+                    const struct sockaddr_in *dest_addr, 
+                    FrameCounters* frame_counters
+                );
+int send_keep_alive(const uint64_t seq_num, 
+                    const uint32_t session_id, 
+                    const SOCKET src_socket, 
+                    const struct sockaddr_in *dest_addr, 
+                    FrameCounters* frame_counters
+                );
 
 
 

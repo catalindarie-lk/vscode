@@ -4,22 +4,30 @@
 #include <stdint.h>
 #include <windows.h>
 
-#include "frames.h"
-#include "mem_pool.h"
+#include "include/protocol_frames.h"
+#include "include/mem_pool.h"
+
+#ifndef RET_VAL_SUCCESS
+#define RET_VAL_SUCCESS 0
+#endif
+#ifndef RET_VAL_ERROR
+#define RET_VAL_ERROR -1
+#endif
 
 //--------------------------------------------------------------------------------------------------------------------------
 #define HASH_SIZE_FRAME                (32768)
 
-typedef struct AckHashNode{
+typedef struct FramePendingAck{
     UdpFrame frame;
     time_t time;
     uint16_t counter;
-    struct AckHashNode *next;
-}AckHashNode;
+    struct FramePendingAck *next;
+}FramePendingAck;
+
 uint64_t get_hash_frame(uint64_t key);
-int insert_frame(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, UdpFrame *frame, uint32_t *count, MemPool *pool);
-void remove_frame(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, uint64_t seq_num, uint32_t *count, MemPool *pool);
-void clean_frame_hash_table(AckHashNode *hash_table[], CRITICAL_SECTION *mutex, uint32_t *count, MemPool *pool);
+int insert_frame(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, UdpFrame *frame, uint32_t *count, MemPool *pool);
+void remove_frame(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, uint64_t seq_num, uint32_t *count, MemPool *pool);
+void clean_frame_hash_table(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, uint32_t *count, MemPool *pool);
 
 //--------------------------------------------------------------------------------------------------------------------------
 #define HASH_SIZE_UID                  (1024)
@@ -38,11 +46,11 @@ typedef struct UniqueIdentifierNode{
 }UniqueIdentifierNode;
 
 uint64_t get_hash_uid(uint32_t u_id);
-void add_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status);
-void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id);
-BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status);
-int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], const uint32_t s_id, const uint32_t u_id, const uint8_t status);
-void clean_uid_hash_table(UniqueIdentifierNode *hash_table[]);
-void print_uid_hash_table(UniqueIdentifierNode *hash_table[]);
+void add_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status);
+void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id);
+BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status);
+int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status);
+void clean_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex);
+void print_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex);
 
 #endif // FRAMES_HASH_H

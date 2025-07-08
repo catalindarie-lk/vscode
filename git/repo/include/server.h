@@ -3,16 +3,22 @@
 
 #include <stdint.h>
 #include <windows.h>
-#include "frames.h"
-#include "queue.h"
-#include "mem_pool.h"
-#include "hash.h"
+#include "include/protocol_frames.h"
+#include "include/queue.h"
+#include "include/mem_pool.h"
+#include "include/hash.h"
 
 #ifndef RET_VAL_SUCCESS
 #define RET_VAL_SUCCESS 0
 #endif
 #ifndef RET_VAL_ERROR
 #define RET_VAL_ERROR -1
+#endif
+#ifndef MAX_CLIENT_MESSAGE_STREAMS
+#define MAX_CLIENT_MESSAGE_STREAMS      10
+#endif
+#ifndef MAX_CLIENT_FILE_STREAMS
+#define MAX_CLIENT_FILE_STREAMS         10
 #endif
 
 // --- Constants 
@@ -31,6 +37,7 @@
 
 #define BLOCK_SIZE_CHUNK                ((uint64_t)(FILE_FRAGMENT_SIZE * 64))
 #define BLOCK_COUNT_CHUNK               ((uint64_t)(2048))
+
 
 typedef uint8_t ServerStatus;
 enum ServerStatus {
@@ -68,8 +75,8 @@ enum ClientSlotStatus {
 
 typedef struct{
     SOCKET socket;
-    struct sockaddr_in addr;            // Server address structure
-    ServerStatus status;                // Status of the server (e.g., busy, ready, error)
+    struct sockaddr_in server_addr;            // Server address structure
+    ServerStatus server_status;                // Status of the server (e.g., busy, ready, error)
     uint32_t session_timeout;           // Timeout period for client inactivity
     volatile long session_id_counter;   // Global counter for unique session IDs
     char name[NAME_SIZE];               // Human-readable server name
@@ -85,6 +92,7 @@ typedef struct {
     QueueSeqNum queue_priority_seq_num;
 
     UniqueIdentifierNode *uid_hash_table[HASH_SIZE_UID]; // Hash table for unique identifiers (session IDs, file IDs, message IDs)
+    CRITICAL_SECTION uid_ht_mutex;
 }ServerIOManager;
 
 
@@ -169,21 +177,19 @@ typedef struct {
 
     CRITICAL_SECTION lock;
 
-} ClientData;
+} Client;
 
 typedef struct{
-    ClientData client[MAX_CLIENTS];     // Array of connected clients
+    Client client[MAX_CLIENTS];     // Array of connected clients
     CRITICAL_SECTION lock;              // For thread-safe access to connected_clients
 }ClientList;
 
 
-void register_ack(QueueSeqNum *queue, ClientData *client, UdpFrame *frame, uint8_t op_code);
+void register_ack(QueueSeqNum *queue, Client *client, UdpFrame *frame, uint8_t op_code);
 void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager);
-void cleanup_client(ClientData *client, ServerIOManager* io_manager);
+void cleanup_client(Client *client, ServerIOManager* io_manager);
 
 int create_output_file(const char *buffer, const uint64_t size, const char *path);
-
-
 
 
 #endif // SERVER_H

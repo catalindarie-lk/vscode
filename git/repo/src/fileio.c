@@ -2,8 +2,30 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include "safefileio.h"
+#include "include/fileio.h"
 
+long long get_file_size(const char *filepath){
+
+    FILE *fp = fopen(filepath, "rb"); // Open in binary mode
+    if (fp == NULL) {
+        fprintf(stderr, "Error: Could not open file!\n");
+        return RET_VAL_ERROR;
+    }
+    // Seek to end to determine file size
+    if (_fseeki64(fp, 0, SEEK_END) != 0) {
+        fprintf(stderr, "Failed to seek");
+        fclose(fp);
+        return RET_VAL_ERROR;
+    }
+    long long size = _ftelli64(fp);
+    if(size == RET_VAL_ERROR){
+        fprintf(stderr, "Error reading file size! _ftelli64()\n");
+        fclose(fp);
+        return RET_VAL_ERROR;
+    }
+    fclose(fp);
+    return(size);
+}
 
 size_t safe_fwrite(FILE *fp, const void *buffer, size_t total_size) {
     const size_t max_chunk = 1UL << 30; // 1 GB

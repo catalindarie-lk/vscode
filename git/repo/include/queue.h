@@ -4,7 +4,14 @@
 #include <stdint.h>             // For uint64_t and uint8_t types
 #include <stdbool.h>            // For BOOL type
 #include <windows.h>            // Required for CRITICAL_SECTION and related functions
-#include "frames.h"             // For UdpFrame structure
+#include "include/protocol_frames.h"             // For UdpFrame structure
+
+#ifndef RET_VAL_SUCCESS
+#define RET_VAL_SUCCESS 0
+#endif
+#ifndef RET_VAL_ERROR
+#define RET_VAL_ERROR -1
+#endif
 
 #define SEQ_NUM_QUEUE_SIZE                      131072     // Queue buffer size
 #define FRAME_QUEUE_SIZE                        65536

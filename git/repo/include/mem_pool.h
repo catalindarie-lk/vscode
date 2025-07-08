@@ -4,6 +4,13 @@
 #include <stdint.h>             // For uint64_t and uint8_t types
 #include <windows.h>           // For CRITICAL_SECTION and related functions
 
+#ifndef RET_VAL_SUCCESS
+#define RET_VAL_SUCCESS 0
+#endif
+#ifndef RET_VAL_ERROR
+#define RET_VAL_ERROR -1
+#endif
+
 typedef struct {
     char* memory;               // Raw memory buffer
     uint64_t free_head;         // Index of the first free block

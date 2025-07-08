@@ -2,11 +2,14 @@
 #include <stdio.h>              // For fprintf, NULL checks, etc.
 #include <stdint.h>             // For uint64_t and uint8_t types
 #include <string.h>             // For memset, memcpy
-#include <winsock2.h>           // Primary Winsock header
+//#include <winsock2.h>           // Primary Winsock header
+#include <ws2tcpip.h>
 #include <windows.h>
 
-#include "frames.h"
-#include "checksum.h"
+#include "include/checksum.h"
+#include "include/netendians.h"
+#include "include/protocol_frames.h"
+
 
 
 static uint32_t crc32_table[256] = {
@@ -85,5 +88,5 @@ BOOL is_checksum_valid(const UdpFrame *frame, int bytes_received){
     temp_frame_for_checksum.header.checksum = 0; // Zero out checksum field for calculation
 
     uint32_t calculated_checksum = calculate_crc32_table(&temp_frame_for_checksum, bytes_received);
-    return (ntohl(frame->header.checksum) == calculated_checksum); // Use ntohl for 32-bit checksum
+    return (_ntohl(frame->header.checksum) == calculated_checksum); // Use _ntohl for 32-bit checksum
 }

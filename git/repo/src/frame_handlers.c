@@ -2,21 +2,23 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
-#include <winsock2.h>
+//#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
-#include "frame_handlers.h"
-#include "frames.h"
-#include "hash.h"
-#include "queue.h"
-#include "server.h"
 
+#include "include/frame_handlers.h"
+#include "include/server.h"
+#include "include/protocol_frames.h"
+#include "include/netendians.h"
+#include "include/queue.h"
+#include "include/hash.h"
 
 
 
 // Handle message fragment helper functions
-static int msg_match_fragment(ClientData *client, UdpFrame *frame){
+static int msg_match_fragment(Client *client, UdpFrame *frame){
     
-    uint32_t message_id = ntohl(frame->payload.long_text_msg.message_id);
+    uint32_t message_id = _ntohl(frame->payload.long_text_msg.message_id);
 
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
         EnterCriticalSection(&client->msg_stream[i].lock);
@@ -28,14 +30,14 @@ static int msg_match_fragment(ClientData *client, UdpFrame *frame){
     }
     return RET_VAL_ERROR;
 }
-static int msg_validate_fragment(ClientData *client, const int index, UdpFrame *frame, ServerIOManager* io_manager) {
+static int msg_validate_fragment(Client *client, const int index, UdpFrame *frame, ServerIOManager* io_manager) {
 
     EnterCriticalSection(&client->msg_stream[index].lock);
 
-    uint32_t recv_message_id = ntohl(frame->payload.long_text_msg.message_id);
-    uint32_t recv_message_len = ntohl(frame->payload.long_text_msg.message_len);
-    uint32_t recv_fragment_len = ntohl(frame->payload.long_text_msg.fragment_len);
-    uint32_t recv_fragment_offset = ntohl(frame->payload.long_text_msg.fragment_offset);
+    uint32_t recv_message_id = _ntohl(frame->payload.long_text_msg.message_id);
+    uint32_t recv_message_len = _ntohl(frame->payload.long_text_msg.message_len);
+    uint32_t recv_fragment_len = _ntohl(frame->payload.long_text_msg.fragment_len);
+    uint32_t recv_fragment_offset = _ntohl(frame->payload.long_text_msg.fragment_offset);
 
     BOOL is_duplicate_fragment = client->msg_stream[index].bitmap && client->msg_stream[index].buffer &&
                                     check_fragment_received(client->msg_stream[index].bitmap, recv_fragment_offset, TEXT_FRAGMENT_SIZE);
@@ -43,19 +45,19 @@ static int msg_validate_fragment(ClientData *client, const int index, UdpFrame *
         //Client already has bitmap and message buffer allocated so fragment can be processed
         //if the message was already received send duplicate frame ack op_code
         register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_DUPLICATE_FRAME);
-        fprintf(stderr, "Received duplicate text message fragment! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
+        fprintf(stderr, "Received duplicate text message fragment - Session ID: %d, Message ID: %d, Offset: %d,\n", client->session_id, recv_message_id, recv_fragment_offset);
         goto exit_error;
     }
     if(recv_fragment_offset >= recv_message_len){
         //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code
         register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_MALFORMED_FRAME);
-        fprintf(stderr, "Fragment offset past message bounds! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
+        fprintf(stderr, "Fragment offset past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
         goto exit_error;
     }
     if ((recv_fragment_offset + recv_fragment_len) > recv_message_len || recv_fragment_len > TEXT_FRAGMENT_SIZE) {
         //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code 
         register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_MALFORMED_FRAME);
-        fprintf(stderr, "Fragment len past message bounds! - Session ID: %d, Message ID: %d, Fragment Offset: %d, Fragment Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
+        fprintf(stderr, "Fragment len past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->session_id, recv_message_id, recv_fragment_offset, recv_fragment_len);
         goto exit_error;
     }
     //Success path
@@ -67,7 +69,7 @@ exit_error:
     return RET_VAL_ERROR;
 
 }
-static int msg_get_available_stream_channel(ClientData *client){
+static int msg_get_available_stream_channel(Client *client){
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
         EnterCriticalSection(&client->msg_stream[i].lock);
         if(client->msg_stream[i].m_id == 0 && client->msg_stream[i].buffer == NULL && client->msg_stream[i].bitmap == NULL){
@@ -88,11 +90,11 @@ static int msg_init_stream(MsgStream *mstream, const uint32_t session_id, const 
 
     // Calculate total fragments
     mstream->fragment_count = (mstream->m_len + (uint64_t)TEXT_FRAGMENT_SIZE - 1ULL) / (uint64_t)TEXT_FRAGMENT_SIZE;
-    fprintf(stdout, "Fragments count for message: %llu\n", mstream->fragment_count);
+    //fprintf(stdout, "Fragments count: %llu\n", mstream->fragment_count);
 
     // Calculate number of 64-bit bitmap entries (chunks)
     mstream->bitmap_entries_count = (mstream->fragment_count + FRAGMENTS_PER_CHUNK - 1ULL) / FRAGMENTS_PER_CHUNK;  
-    fprintf(stdout, "Bitmap 64bits entries needed: %llu\n", mstream->bitmap_entries_count);
+    //fprintf(stdout, "Bitmap 64bits entries needed: %llu\n", mstream->bitmap_entries_count);
 
     mstream->bitmap = malloc(mstream->bitmap_entries_count * sizeof(uint64_t));
     if(mstream->bitmap == NULL){
@@ -111,7 +113,7 @@ static int msg_init_stream(MsgStream *mstream, const uint32_t session_id, const 
     memset(mstream->buffer, 0, message_len);
 
     // Constructs a filename for storing the received message, incorporating session and message IDs for uniqueness.
-    snprintf(mstream->file_name, PATH_SIZE, "E:\\msg_SID_%d_UID%d.txt", session_id, message_id);
+    snprintf(mstream->file_name, PATH_SIZE, "D:\\E\\msg_SID_%d_UID%d.txt", session_id, message_id);
 
     LeaveCriticalSection(&mstream->lock);
     return RET_VAL_SUCCESS;
@@ -149,7 +151,7 @@ static int msg_check_completion_and_record(MsgStream *mstream, ServerIOManager* 
     
     // Update the file status in the hash table to mark it as complete.
     // This is done regardless of the file save success, as we won't be receiving more fragments.
-    update_uid_status_hash_table(io_manager->uid_hash_table, mstream->s_id, mstream->m_id, UID_RECV_COMPLETE);
+    update_uid_status_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, mstream->s_id, mstream->m_id, UID_RECV_COMPLETE);
 
     // Clean up all dynamically allocated resources for the transfer entry.
     // This block is executed in both success and failure cases of file creation.
@@ -164,6 +166,7 @@ static int msg_check_completion_and_record(MsgStream *mstream, ServerIOManager* 
         mstream->buffer = NULL;
     }
     if(mstream->bitmap != NULL){
+//        memset(mstream->bitmap, 0, mstream->bitmap_entries_count * sizeof(uint64_t)); // Clear the bitmap.
         free(mstream->bitmap);
         mstream->bitmap = NULL;
     }
@@ -180,7 +183,7 @@ static int msg_check_completion_and_record(MsgStream *mstream, ServerIOManager* 
 }
 
 // Handle file fragment helper functions
-static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){
+static int file_match_fragment(Client *client, const uint32_t session_id, const uint32_t file_id){
     // Iterate through all possible file stream slots associated with this client.
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
         // Acquire the critical section lock for the current file stream slot.
@@ -205,7 +208,7 @@ static int file_match_fragment(ClientData *client, UdpFrame *frame, const uint32
     // it means no active transfer for this client corresponds to the incoming fragment.
     return RET_VAL_ERROR; // Return an error value to indicate no match was found.
 }
-static int file_check_metadata(ClientData *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){
+static int file_check_metadata(Client *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){
     // This function checks if a file stream with the given session_id and file_id already exists for the client. 
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){      
         EnterCriticalSection(&client->file_stream[i].lock);       
@@ -217,7 +220,8 @@ static int file_check_metadata(ClientData *client, UdpFrame *frame, const uint32
     }  
     return RET_VAL_SUCCESS; 
 }
-static int file_get_available_stream_channel(ClientData *client){
+static int file_get_available_stream_channel(Client *client){
+    
     // Iterate through all possible file stream slots allocated for this client.
     // MAX_CLIENT_FILE_STREAMS defines the maximum number of concurrent file transfers a single client can handle.
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
@@ -244,16 +248,15 @@ static int file_get_available_stream_channel(ClientData *client){
     return RET_VAL_ERROR; // Return an error value to indicate no slot was found.
 }
 static void file_attach_fragment_to_chunk(FileStream *fstream, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
+
+    // Acquire the critical section lock for the specific FileStream.
+    EnterCriticalSection(&fstream->lock);
+
     // Calculate the index of the 64-bit bitmap entry (which corresponds to a "chunk" of 64 fragments)
     // to which this incoming fragment belongs.
     // fragment_offset / FILE_FRAGMENT_SIZE gives the fragment number.
     // Dividing by 64ULL (FRAGMENTS_PER_CHUNK) then gives the chunk index.
     uint64_t fstream_index = (fragment_offset / FILE_FRAGMENT_SIZE) / FRAGMENTS_PER_CHUNK;
-
-    // Acquire the critical section lock for the specific FileStream.
-    // This ensures thread-safe access to the fstream's data members (bitmap, flags, counters, pool_block_file_chunk)
-    // while this fragment is being processed and attached.
-    EnterCriticalSection(&fstream->lock);
 
     // Calculate the destination address within the target memory chunk where the fragment data will be copied.
     // fstream->pool_block_file_chunk[fstream_index] gives the base address of the chunk.
@@ -281,20 +284,18 @@ static void file_attach_fragment_to_chunk(FileStream *fstream, char *fragment_bu
             // Mark the flag for this last chunk specifically as CHUNK_TRAILING.
             // This flag differentiates it from regular CHUNK_BODY entries for writing logic.
             fstream->flag[fstream_index] = CHUNK_TRAILING;
-            // Note: The `CHUNK_BODY` set above will be immediately overwritten if this condition is true.
-            //fprintf(stdout, "Receiving last chunk bytes: %llu\n", entry->last_chunk_size); // Original comment used 'entry', should be 'fstream'
+            //fprintf(stdout, "Receiving last chunk bytes: %llu\n", fstream->trailing_chunk_size);
         }
         // Check if all expected bytes for the entire file have been received.
         if(fstream->bytes_received == fstream->f_size){
             // If all bytes are received, mark the trailing chunk as complete.
             // This signals that the last chunk is fully assembled (even if partial in size).
             fstream->trailing_chunk_complete = TRUE;
-            fprintf(stdout, "\nReceived all bytes. Last chunk size is: %llu\n", fstream->trailing_chunk_size);
+            fprintf(stdout, "Received complete file: %s, Size: %llu, Last chunk size: %llu\n", fstream->fn, fstream->bytes_received, fstream->trailing_chunk_size);
         }
     }
 
     // Update the bitmap to mark this specific fragment as received.
-    // This function manipulates the bits within the uint64_t bitmap entry.
     mark_fragment_received(fstream->bitmap, fragment_offset, FILE_FRAGMENT_SIZE);
 
     // Release the critical section lock for the file stream.
@@ -319,11 +320,11 @@ static int file_stream_init(FileStream *fstream, const uint32_t session_id, cons
 
     // Calculate total fragments
     fstream->fragment_count = (fstream->f_size + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
-    fprintf(stdout, "Fragments count: %llu\n", fstream->fragment_count);
+    //fprintf(stdout, "Fragments count: %llu\n", fstream->fragment_count);
 
     // Calculate number of 64-bit bitmap entries (chunks)
     fstream->bitmap_entries_count = (fstream->fragment_count + FRAGMENTS_PER_CHUNK - 1ULL) / FRAGMENTS_PER_CHUNK;
-    fprintf(stdout, "Bitmap 64bits entries needed: %llu\n", fstream->bitmap_entries_count);
+    //fprintf(stdout, "Bitmap 64bits entries needed: %llu\n", fstream->bitmap_entries_count);
 
  
     //the file size needs to be a multiple of FILE_FRAGMENT_SIZE and nr of fragments needs to be a multiple of 64 due to bitmap entries being 64 bits
@@ -341,35 +342,35 @@ static int file_stream_init(FileStream *fstream, const uint32_t session_id, cons
     fstream->trailing_chunk_size = 0;
 
     // Allocate memory for bitmap
-    fstream->bitmap = malloc(fstream->bitmap_entries_count * sizeof(uint64_t));
+    fstream->bitmap = calloc(fstream->bitmap_entries_count, sizeof(uint64_t));
     if(fstream->bitmap == NULL){
         fstream->stream_err = STREAM_ERR_BITMAP_MALLOC;
         fprintf(stderr, "Memory allocation fail for file bitmap mem!!!\n");
         goto exit_error;
     }
-    memset(fstream->bitmap, 0, fstream->bitmap_entries_count * sizeof(uint64_t));
+    //memset(fstream->bitmap, 0, fstream->bitmap_entries_count * sizeof(uint64_t));
 
     // Allocate memory for flags
-    fstream->flag = malloc(fstream->bitmap_entries_count * sizeof(uint8_t));
+    fstream->flag = calloc(fstream->bitmap_entries_count, sizeof(uint8_t));
     if(fstream->flag == NULL){
         fstream->stream_err = STREAM_ERR_FLAG_MALLOC;
         fprintf(stderr, "Memory allocation fail for file entry flag!!!\n");
         goto exit_error;
     }
-    memset(fstream->flag, CHUNK_NONE, fstream->bitmap_entries_count * sizeof(uint8_t));
+    //memset(fstream->flag, CHUNK_NONE, fstream->bitmap_entries_count * sizeof(uint8_t));
 
     // Allocate memory for chunk memory block pointers
-    fstream->pool_block_file_chunk = malloc(fstream->bitmap_entries_count * sizeof(char*));
+    fstream->pool_block_file_chunk = calloc(fstream->bitmap_entries_count, sizeof(char*));
     if(fstream->pool_block_file_chunk == NULL){
         fstream->stream_err = STREAM_ERR_CHUNK_PTR_MALLOC;
         fprintf(stderr, "Memory allocation fail for chunk mem blocks!!!\n");
         goto exit_error;
-    }   
-    memset(fstream->pool_block_file_chunk, 0, fstream->bitmap_entries_count * sizeof(char*));
+    }
+    //memset(fstream->pool_block_file_chunk, 0, fstream->bitmap_entries_count * sizeof(char*));
 
     // Construct file name and open file
     // Using snprintf for buffer overflow safety
-    int snprintf_res = snprintf(fstream->fn, PATH_SIZE, "E:\\test_file_SID_%d_UID_%d.txt", session_id, file_id);
+    int snprintf_res = snprintf(fstream->fn, PATH_SIZE, "D:\\E\\test_file_SID_%d_UID_%d.txt", session_id, file_id);
     if (snprintf_res < 0 || snprintf_res >= PATH_SIZE) {
         fprintf(stderr, "Error: File name construction failed or buffer too small.\n");
         fstream->stream_err = STREAM_ERR_FILENAME; // Suggest adding this error code
@@ -396,10 +397,8 @@ exit_error:
 }
 
 
-
-
 // Process received file metadata frame
-int handle_file_metadata(ClientData *client, UdpFrame *frame, ServerIOManager* io_manager) {
+int handle_file_metadata(Client *client, UdpFrame *frame, ServerIOManager* io_manager) {
     // Check if the provided client context is NULL.
     // Receiving a frame for a non-existent client is a critical error,
     // as all operations on the frame depend on a valid client session.
@@ -416,9 +415,9 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame, ServerIOManager* i
     // Update the `last_activity_time` for the client.
     client->last_activity_time = time(NULL);
 
-    uint32_t recv_session_id = ntohl(frame->header.session_id);
-    uint32_t recv_file_id = ntohl(frame->payload.file_metadata.file_id);
-    uint64_t recv_file_size = ntohll(frame->payload.file_metadata.file_size);
+    uint32_t recv_session_id = _ntohl(frame->header.session_id);
+    uint32_t recv_file_id = _ntohl(frame->payload.file_metadata.file_id);
+    uint64_t recv_file_size = _ntohll(frame->payload.file_metadata.file_size);
 
 
     if(file_check_metadata(client, frame, recv_session_id, recv_file_id) == RET_VAL_ERROR){
@@ -431,7 +430,7 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame, ServerIOManager* i
     // Check if the specific file transfer (identified by `recv_file_id` and `client->session_id`)
     // has already been marked as `UID_RECV_COMPLETE` in the unique ID hash table.
     // This check prevents redundant processing or re-acknowledgment of already finished transfers.
-    if(search_uid_hash_table(io_manager->uid_hash_table, recv_session_id, recv_file_id, UID_RECV_COMPLETE) == TRUE){
+    if(search_uid_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, recv_session_id, recv_file_id, UID_RECV_COMPLETE) == TRUE){
         // If the transfer is already complete, register an acknowledgment (ACK)
         // with `STS_TRANSFER_COMPLETE` status. This informs the sender that
         // the file is already received and no further retransmissions of metadata are needed.
@@ -454,11 +453,10 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame, ServerIOManager* i
         // Jump to the `exit_error` label to clean up and return.
         goto exit_error;
     }
-
     // Log the details of the successfully received file metadata to standard output.
     // This provides valuable debugging and monitoring information.
-    fprintf(stdout, "Received metadata Session ID: %d, File ID: %d, File Size: %llu, Fragment Size: %d\n", recv_session_id, recv_file_id, recv_file_size, FILE_FRAGMENT_SIZE);
-
+    fprintf(stdout, "Received metadata Session ID: %d, File ID: %d, Size: %llu\n", recv_session_id, recv_file_id, recv_file_size);
+    fprintf(stdout, "Opened file stream: %u\n", slot);
     // Initialize the file stream for the new incoming file transfer in the determined `slot`.
     // This function would typically handle opening a file on disk, setting up buffer management,
     // and initializing state for tracking received fragments.
@@ -470,7 +468,7 @@ int handle_file_metadata(ClientData *client, UdpFrame *frame, ServerIOManager* i
     // Add an entry to the unique ID hash table for this new file transfer.
     // It's marked with `UID_WAITING_FRAGMENTS` to indicate that the metadata has been received
     // and the server is now awaiting the actual file data fragments.
-    add_uid_hash_table(io_manager->uid_hash_table, recv_session_id, recv_file_id, UID_WAITING_FRAGMENTS);
+    add_uid_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, recv_session_id, recv_file_id, UID_WAITING_FRAGMENTS);
 
     // Register a general acknowledgment (ACK) to be sent back to the client,
     // confirming successful receipt and processing of the file metadata frame.
@@ -491,7 +489,7 @@ exit_error:
     return RET_VAL_ERROR;
 }
 // Process received file fragment frame
-int handle_file_fragment(ClientData *client, UdpFrame *frame, ServerIOManager* io_manager){
+int handle_file_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_manager){
     // Check if the client context is NULL. This is a fundamental check, as all
     // fragment handling logic depends on a valid client session.
     if(client == NULL){
@@ -509,20 +507,21 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame, ServerIOManager* i
     client->last_activity_time = time(NULL);
 
     // Extract necessary information from the UDP frame's header and payload.
-    // `ntohl` and `ntohll` convert values from network byte order to host byte order
+    // `_ntohl` and `_ntohll` convert values from network byte order to host byte order
     // to ensure correct interpretation across different system architectures.
-    uint32_t recv_session_id = ntohl(frame->header.session_id); // Session ID from frame header
-    uint32_t recv_file_id = ntohl(frame->payload.file_fragment.file_id); // File ID from fragment payload
-    uint64_t recv_fragment_offset = ntohll(frame->payload.file_fragment.offset); // Fragment offset
-    uint32_t recv_fragment_size = ntohl(frame->payload.file_fragment.size); // Fragment size
+    uint32_t recv_session_id = _ntohl(frame->header.session_id); // Session ID from frame header
+    uint32_t recv_file_id = _ntohl(frame->payload.file_fragment.file_id); // File ID from fragment payload
+    uint64_t recv_fragment_offset = _ntohll(frame->payload.file_fragment.offset); // Fragment offset
+    uint32_t recv_fragment_size = _ntohl(frame->payload.file_fragment.size); // Fragment size
 
     // Check if this file (identified by `recv_file_id` and `client->session_id`)
     // has already been marked as `UID_RECV_COMPLETE` in the unique ID hash table.
     // This prevents re-processing or re-acknowledging fragments for already completed transfers.
-    if(search_uid_hash_table(io_manager->uid_hash_table, recv_session_id, recv_file_id, UID_RECV_COMPLETE) == TRUE){
+    if(search_uid_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, recv_session_id, recv_file_id, UID_RECV_COMPLETE) == TRUE){
         // If the transfer is complete, register an ACK with `STS_TRANSFER_COMPLETE` status.
         // This signals to the sender that the file is fully received and no more fragments are needed.
         // Use `queue_priority_seq_num` for high-priority control messages, such as transfer
+        fprintf(stderr, "Received frame for completed file ID: %u Session ID %u - missing metadata\n", recv_file_id, recv_session_id);
         register_ack(&io_manager->queue_priority_seq_num, client, frame, STS_TRANSFER_COMPLETE);
         // Jump to the error handling block to release the lock and exit.
         goto exit_error;
@@ -530,13 +529,13 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame, ServerIOManager* i
 
     // Attempt to match the incoming file fragment to an existing file transfer session
     // within the client's context. This function typically searches through `client->file_stream` array.
-    int slot = file_match_fragment(client, frame, recv_session_id, recv_file_id);
+    int slot = file_match_fragment(client, recv_session_id, recv_file_id);
     // If `file_match_fragment` returns `RET_VAL_ERROR`, it means no active file transfer
     // corresponding to the received file ID and session ID was found. This usually implies
     // that the metadata for this file was not received or processed correctly.
     if(slot == RET_VAL_ERROR){
         // Log an error indicating an unknown file ID or missing metadata for the received fragment.
-        fprintf(stderr, "Received frame with unknown file ID: %u Session ID %u - missing metadata\n", recv_file_id, client->session_id);
+        fprintf(stderr, "Received frame with unknown file ID: %u Session ID %u - missing metadata\n", recv_file_id, recv_session_id);
         // Register an ACK with `ERR_INVALID_FILE_ID` status, informing the sender of the issue.
         register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_INVALID_FILE_ID);
         // Jump to the error handling block.
@@ -560,7 +559,7 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame, ServerIOManager* i
         // This informs the sender not to retransmit this specific fragment.
         register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_DUPLICATE_FRAME);
         // Log a message indicating the receipt of a duplicate fragment.
-        fprintf(stderr, "Received duplicate frame (sesion ID: %u, file ID: %u, offset: %llu)!!!\n", recv_session_id, recv_file_id, recv_fragment_offset);
+        fprintf(stderr, "Received duplicate file fragment - Sesion ID: %u, File ID: %u, Offset: %llu\n", recv_session_id, recv_file_id, recv_fragment_offset);
         // Jump to the error handling block.
         goto exit_error;
     }
@@ -581,7 +580,7 @@ int handle_file_fragment(ClientData *client, UdpFrame *frame, ServerIOManager* i
         // Register an ACK with `ERR_MALFORMED_FRAME` status.
         register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_MALFORMED_FRAME);
         // Log an error message indicating that the fragment extends past the file boundaries.
-        fprintf(stderr, "Fragment extends past file bounds (file ID: %u, offset: %llu, size: %u). File size: %llu\n",
+        fprintf(stderr, "Fragment extends past file bounds - file ID: %u, offset: %llu, fragment size: %u, file size: %llu\n",
                 recv_file_id, recv_fragment_offset, recv_fragment_size, client->file_stream[slot].f_size);
         // Jump to the error handling block.
         goto exit_error;
@@ -629,7 +628,7 @@ exit_error:
     return RET_VAL_ERROR;
 }
 // HANDLE received message fragment frame
-int handle_message_fragment(ClientData *client, UdpFrame *frame, ServerIOManager* io_manager){
+int handle_message_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_manager){
 
     int slot; // Declares an integer variable 'slot' to store the index of the message handling slot.
     if(client == NULL){ // Checks if the 'client' pointer is NULL, indicating an invalid or non-existent client context.
@@ -642,16 +641,16 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame, ServerIOManager
     client->last_activity_time = time(NULL); // Updates the 'last_activity_time' field of the client, typically used for session timeout management.
 
     // Extracts and converts message-specific fields from the network byte order to host byte order.
-    // 'ntohl' converts a 32-bit unsigned integer from network byte order to host byte order.
-    uint32_t recv_session_id = ntohl(frame->header.session_id);
-    uint32_t recv_message_id = ntohl(frame->payload.long_text_msg.message_id);
-    uint32_t recv_message_len = ntohl(frame->payload.long_text_msg.message_len);
-    uint32_t recv_fragment_len = ntohl(frame->payload.long_text_msg.fragment_len);
-    uint32_t recv_fragment_offset = ntohl(frame->payload.long_text_msg.fragment_offset);
+    // '_ntohl' converts a 32-bit unsigned integer from network byte order to host byte order.
+    uint32_t recv_session_id = _ntohl(frame->header.session_id);
+    uint32_t recv_message_id = _ntohl(frame->payload.long_text_msg.message_id);
+    uint32_t recv_message_len = _ntohl(frame->payload.long_text_msg.message_len);
+    uint32_t recv_fragment_len = _ntohl(frame->payload.long_text_msg.fragment_len);
+    uint32_t recv_fragment_offset = _ntohl(frame->payload.long_text_msg.fragment_offset);
 
     // Guard against fragments for already completed messages.
     // Checks if the message, identified by its ID and the client's session ID, has already been marked as fully received in the unique ID hash table.
-    if(search_uid_hash_table(io_manager->uid_hash_table, recv_session_id, recv_message_id, UID_RECV_COMPLETE) == TRUE){
+    if(search_uid_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, recv_session_id, recv_message_id, UID_RECV_COMPLETE) == TRUE){
         // If the message is already complete, registers an acknowledgment with a 'STS_TRANSFER_COMPLETE' status.
         // This informs the sender that the message is fully received and no further retransmissions are needed.
         register_ack(&io_manager->queue_priority_seq_num, client, frame, STS_TRANSFER_COMPLETE);
@@ -672,8 +671,9 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame, ServerIOManager
         // Acknowledges the successful receipt of the fragment.
         register_ack(&io_manager->queue_seq_num, client, frame, STS_ACK);
         // Checks if all fragments for the message have been received and, if so, finalizes the message (e.g., writes to disk).
-        if (msg_check_completion_and_record(&client->msg_stream[slot], io_manager) == RET_VAL_ERROR)
+        if (msg_check_completion_and_record(&client->msg_stream[slot], io_manager) == RET_VAL_ERROR){
             goto exit_error; // If completion check or recording fails, jumps to the 'exit_error' label.
+        }
     } else {
         // This block is executed if no matching slot is found, suggesting this is the first fragment of a new message.
         // Attempts to obtain an available slot for a new message stream.
@@ -685,22 +685,29 @@ int handle_message_fragment(ClientData *client, UdpFrame *frame, ServerIOManager
             goto exit_error; // Jumps to the 'exit_error' label.
         }
         // Validates the fragment. This is particularly important for the first fragment, which often contains total message length.
-        if (msg_validate_fragment(client, slot, frame, io_manager) == RET_VAL_ERROR)
+        if (msg_validate_fragment(client, slot, frame, io_manager) == RET_VAL_ERROR){
             goto exit_error; // If validation fails, jumps to the 'exit_error' label.
+        }
         // Initializes the message receiving slot with the message ID and its total expected length.
-        if (msg_init_stream(&client->msg_stream[slot], recv_session_id, recv_message_id, recv_message_len) == RET_VAL_ERROR)
+        if (msg_init_stream(&client->msg_stream[slot], recv_session_id, recv_message_id, recv_message_len) == RET_VAL_ERROR){
             goto exit_error; // If slot initialization fails, jumps to the 'exit_error' label.
-        // Attaches the first fragment's data to the newly initialized message buffer.
-        
+        }
+
+        // Attaches the first fragment's data to the newly initialized message buffer.     
+        fprintf(stdout, "Received first message fragment Session ID: %u, Message ID: %d, Size: %u\n", recv_session_id, recv_message_id, recv_message_len);
+
+        fprintf(stdout, "Opened message stream: %u\n", slot);
+
         msg_attach_fragment(&client->msg_stream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
         
         // Adds an entry to the unique ID hash table, marking the message as awaiting further fragments.
-        add_uid_hash_table(io_manager->uid_hash_table, recv_session_id, recv_message_id, UID_WAITING_FRAGMENTS);
+        add_uid_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, recv_session_id, recv_message_id, UID_WAITING_FRAGMENTS);
         // Acknowledges the successful receipt of this initial fragment.
         register_ack(&io_manager->queue_seq_num, client, frame, STS_ACK);
         // Checks if the message is now complete (e.g., if it was a single-fragment message) and finalizes it.
-        if (msg_check_completion_and_record(&client->msg_stream[slot], io_manager) == RET_VAL_ERROR)
+        if (msg_check_completion_and_record(&client->msg_stream[slot], io_manager) == RET_VAL_ERROR){
             goto exit_error; // If completion check or recording fails, jumps to the 'exit_error' label.
+        }
         LeaveCriticalSection(&client->lock); // Releases the critical section lock.
         return RET_VAL_SUCCESS; // Returns success, indicating the message fragment was handled.
     }

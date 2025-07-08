@@ -4,8 +4,14 @@
 #include <stdio.h>              // For size_t type
 #include <stdint.h>             // For uint32_t type
 #include <windows.h>
-#include "frames.h"             // Frame definitions
+#include "include/protocol_frames.h"             // Frame definitions
 
+#ifndef RET_VAL_SUCCESS
+#define RET_VAL_SUCCESS 0
+#endif
+#ifndef RET_VAL_ERROR
+#define RET_VAL_ERROR -1
+#endif
 
 // ----- Function implementations -----
 // CRC32 calculation

@@ -6,10 +6,18 @@
 #include <stdio.h>     // For printf and fprintf
 #include <string.h>    // For string manipulation functions
 #include <time.h>       // For time functions
-#include <winsock2.h> // For Winsock functions
+//#include <winsock2.h> // For Winsock functions
 #include <ws2tcpip.h> // For modern IP address functions (inet_pton,
 
-#include "frames.h"
+#include "include/protocol_frames.h"
+#include "include/netendians.h" // For network byte order functions
+
+#ifndef RET_VAL_SUCCESS
+#define RET_VAL_SUCCESS 0
+#endif
+#ifndef RET_VAL_ERROR
+#define RET_VAL_ERROR -1
+#endif
 
 //#define ENABLE_FRAME_LOG              1
 // #define SERVER_LOG_FILE                 "E:\\server_log"
@@ -43,7 +51,7 @@ void log_frame(uint8_t log_type, UdpFrame *frame, const struct sockaddr_in *addr
 
     char str_addr[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &addr->sin_addr, str_addr, INET_ADDRSTRLEN);
-    uint16_t port = ntohs(addr->sin_port);
+    uint16_t port = _ntohs(addr->sin_port);
 
     FILE *file = fopen(file_path, "ab");
 
@@ -70,74 +78,74 @@ void log_frame(uint8_t log_type, UdpFrame *frame, const struct sockaddr_in *addr
         case FRAME_TYPE_ACK:
             fprintf(file,"%s\n   FRAME_TYPE_ACK\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n",
                                                     buffer,                                           
-                                                    ntohll(frame->header.seq_num), 
-                                                    ntohl(frame->header.session_id), 
-                                                    ntohl(frame->header.checksum));
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum));
             break;
         case FRAME_TYPE_KEEP_ALIVE:
             fprintf(file,"%s\n   FRAME_TYPE_KEEP_ALIVE\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n",
                                                     buffer,                                           
-                                                    ntohll(frame->header.seq_num), 
-                                                    ntohl(frame->header.session_id), 
-                                                    ntohl(frame->header.checksum));
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum));
             break;
         case FRAME_TYPE_CONNECT_REQUEST:
             fprintf(file, "%s\n   FRAME_TYPE_CONNECT_REQUEST\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   Client ID: %d\n   Flags: %d\n   Client Name: %s\n", 
                                                     buffer,
-                                                    ntohll(frame->header.seq_num), 
-                                                    ntohl(frame->header.session_id), 
-                                                    ntohl(frame->header.checksum),
-                                                    ntohl(frame->payload.request.client_id), 
-                                                    ntohl(frame->payload.request.flag), frame->payload.request.client_name);
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum),
+                                                    _ntohl(frame->payload.request.client_id), 
+                                                    _ntohl(frame->payload.request.flag), frame->payload.request.client_name);
             break;
         case FRAME_TYPE_CONNECT_RESPONSE:
             fprintf(file, "%s\n   FRAME_TYPE_CONNECT_RESPONSE\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   Session Timeout: %d\n   Sever Status: %d\n   Server Name: %s\n", 
                                                     buffer,
-                                                    ntohll(frame->header.seq_num), 
-                                                    ntohl(frame->header.session_id), 
-                                                    ntohl(frame->header.checksum),
-                                                    ntohl(frame->payload.response.session_timeout), 
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum),
+                                                    _ntohl(frame->payload.response.session_timeout), 
                                                     frame->payload.response.server_status, 
                                                     frame->payload.response.server_name);
             break;
         case FRAME_TYPE_FILE_METADATA:
             fprintf(file, "%s   FRAME_TYPE_FILE_METADATA\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %d\n   File Size: %d\n", 
                                                     buffer,
-                                                    ntohll(frame->header.seq_num), 
-                                                    ntohl(frame->header.session_id), 
-                                                    ntohl(frame->header.checksum),
-                                                    ntohl(frame->payload.file_metadata.file_id), 
-                                                    ntohl(frame->payload.file_metadata.file_size));                                                    
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum),
+                                                    _ntohl(frame->payload.file_metadata.file_id), 
+                                                    _ntohl(frame->payload.file_metadata.file_size));                                                    
                                                     break;
         case FRAME_TYPE_FILE_FRAGMENT:
             fprintf(file, "%s   FRAME_TYPE_FILE_FRAGMENT\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %d\n   Current Fragment Size: %d\n   Fragment Offset: %d\n   Fragment Bytes: %s\n", 
                                                     buffer,
-                                                    ntohll(frame->header.seq_num), 
-                                                    ntohl(frame->header.session_id), 
-                                                    ntohl(frame->header.checksum),
-                                                    ntohl(frame->payload.file_fragment.file_id), 
-                                                    ntohl(frame->payload.file_fragment.size),
-                                                    ntohl(frame->payload.file_fragment.offset),
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum),
+                                                    _ntohl(frame->payload.file_fragment.file_id), 
+                                                    _ntohl(frame->payload.file_fragment.size),
+                                                    _ntohl(frame->payload.file_fragment.offset),
                                                     frame->payload.file_fragment.bytes);                                                    
                                                     break;
         case FRAME_TYPE_LONG_TEXT_MESSAGE:
             fprintf(file, "%s   FRAME_TYPE_LONG_TEXT_MESSAGE\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   Message ID: %d\n   Total Length: %d\n   Fragment Length: %d\n   Fragment Offset: %d\n   Fragment Text: %s\n", 
                                                     buffer,
-                                                    ntohll(frame->header.seq_num), 
-                                                    ntohl(frame->header.session_id), 
-                                                    ntohl(frame->header.checksum),
-                                                    ntohl(frame->payload.long_text_msg.message_id), 
-                                                    ntohl(frame->payload.long_text_msg.message_len),
-                                                    ntohl(frame->payload.long_text_msg.fragment_len),
-                                                    ntohl(frame->payload.long_text_msg.fragment_offset), 
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum),
+                                                    _ntohl(frame->payload.long_text_msg.message_id), 
+                                                    _ntohl(frame->payload.long_text_msg.message_len),
+                                                    _ntohl(frame->payload.long_text_msg.fragment_len),
+                                                    _ntohl(frame->payload.long_text_msg.fragment_offset), 
                                                     frame->payload.long_text_msg.fragment_text);
                                                     break;
         case FRAME_TYPE_DISCONNECT:
             fprintf(file, "%s\n   FRAME_TYPE_DISCONNECT\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n", 
                                                     buffer,
-                                                    ntohll(frame->header.seq_num), 
-                                                    ntohl(frame->header.session_id), 
-                                                    ntohl(frame->header.checksum));
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum));
             break;
         default:
             break;
