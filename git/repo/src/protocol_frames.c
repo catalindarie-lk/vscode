@@ -14,13 +14,10 @@
 #include "include/queue.h"
 #include "include/hash.h"
 #include "include/mem_pool.h"
-#include "include/client.h"
-#include "include/server.h"
 
 int send_frame(const UdpFrame *frame, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 ){
     // Determine the actual size to send based on frame type if payloads are variable
     size_t frame_size = 0;
@@ -56,7 +53,6 @@ int send_frame(const UdpFrame *frame,
         fprintf(stderr, "sendto() failed with error: %d\n", WSAGetLastError());
         return SOCKET_ERROR;        
     }
-    frame_counters->total_sent++;
     return bytes_sent;
 }
 
@@ -64,8 +60,7 @@ int send_ack(const uint64_t seq_num,
                     const uint32_t session_id, 
                     const uint8_t op_code, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 ){
     UdpFrame ack_frame;
     //initialize frame
@@ -79,7 +74,7 @@ int send_ack(const uint64_t seq_num,
     // Calculate CRC32 for the ACK/NACK frame
     ack_frame.header.checksum = _htonl(calculate_crc32(&ack_frame, sizeof(FrameHeader) + sizeof(AckPayload)));
     
-    int bytes_sent = send_frame(&ack_frame, src_socket, dest_addr, frame_counters);
+    int bytes_sent = send_frame(&ack_frame, src_socket, dest_addr);
     if(bytes_sent == SOCKET_ERROR){
         fprintf(stderr, "send_ack() failed\n");
         return SOCKET_ERROR;
@@ -89,8 +84,7 @@ int send_ack(const uint64_t seq_num,
 
 int send_disconnect(const uint32_t session_id, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 ){
     UdpFrame frame;
     
@@ -103,7 +97,7 @@ int send_disconnect(const uint32_t session_id,
     // Calculate CRC32 for the ACK/NACK frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader)));
     
-    uint32_t bytes_sent = send_frame(&frame, src_socket, dest_addr, frame_counters);
+    uint32_t bytes_sent = send_frame(&frame, src_socket, dest_addr);
     if(bytes_sent == SOCKET_ERROR){
         fprintf(stderr, "send_disconnect() failed\n");
         return SOCKET_ERROR;
@@ -117,8 +111,7 @@ int send_connect_response(const uint64_t seq_num,
                     const uint8_t status, 
                     const char *server_name, 
                     SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 ) {
     UdpFrame frame;
     // Initialize the response frame
@@ -138,7 +131,7 @@ int send_connect_response(const uint64_t seq_num,
     // Calculate CRC32 for the ACK frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(ConnectResponsePayload)));
 
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr, frame_counters);
+    int bytes_sent = send_frame(&frame, src_socket, dest_addr);
     if (bytes_sent == SOCKET_ERROR) {
         fprintf(stderr, "send_connect_respose() failed\n");
         return SOCKET_ERROR;
@@ -152,8 +145,7 @@ int send_connect_request(const uint64_t seq_num,
                     const uint32_t flag, 
                     const char *client_name, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 ){
     // Create a connect request frame
     UdpFrame frame;
@@ -171,7 +163,7 @@ int send_connect_request(const uint64_t seq_num,
 
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(ConnectRequestPayload)));
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr, frame_counters);
+    int bytes_sent = send_frame(&frame, src_socket, dest_addr);
     if(bytes_sent == SOCKET_ERROR){
         fprintf(stderr, "send_connect_request() failed\n");
         return SOCKET_ERROR;
@@ -182,8 +174,7 @@ int send_connect_request(const uint64_t seq_num,
 int send_keep_alive(const uint64_t seq_num, 
                     const uint32_t session_id, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 ){
     UdpFrame frame;
 
@@ -197,7 +188,7 @@ int send_keep_alive(const uint64_t seq_num,
     // Calculate CRC32 for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader)));
     
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr, frame_counters);
+    int bytes_sent = send_frame(&frame, src_socket, dest_addr);
     if(bytes_sent == SOCKET_ERROR){
         fprintf(stderr, "send_ping_pong() failed\n");
         return SOCKET_ERROR;
@@ -207,138 +198,5 @@ int send_keep_alive(const uint64_t seq_num,
 
 
 
-int send_file_metadata(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t file_id, 
-                            const uint64_t file_size, 
-                            const uint32_t file_fragment_size, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager, 
-                            FrameCounters* frame_counters
-                        ){
-
-    UdpFrame frame;
-
-    // Initialize the text message frame
-    memset(&frame, 0, sizeof(UdpFrame));
-    // Set the header fields
-    frame.header.start_delimiter = _htons(FRAME_DELIMITER);
-    frame.header.frame_type = FRAME_TYPE_FILE_METADATA;
-    frame.header.seq_num = _htonll(seq_num);
-    frame.header.session_id = _htonl(session_id);
-    // Set the payload fields
-    frame.payload.file_metadata.file_id = _htonl(file_id);
-    frame.payload.file_metadata.file_size = _htonll(file_size);
-       
-    // Calculate the checksum for the frame
-    frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));  
-    
-    // if(insert_frame(io_manager->frame_ht, &io_manager->frame_ht_mutex, &frame, &io_manager->frame_ht_count, &io_manager->frame_mem_pool) == RET_VAL_ERROR){
-    //     fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
-    //     return RET_VAL_ERROR;
-    // }
-
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr, frame_counters);
-    if(bytes_sent == SOCKET_ERROR){
-        fprintf(stderr, "send_text_message() failed\n");
-        return SOCKET_ERROR;
-    }
-    return bytes_sent;
-}
-
-int send_file_fragment(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t file_id, 
-                            const uint64_t fragment_offset, 
-                            const char* fragment_buffer, 
-                            const uint32_t fragment_size, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager,  
-                            FrameCounters* frame_counters
-                        ){
-
-    UdpFrame frame;
-    if(fragment_buffer == NULL){
-        fprintf(stderr, "\nInvalid text!.\n");
-        return SOCKET_ERROR;
-    }
-    // Initialize the text message frame
-    memset(&frame, 0, sizeof(UdpFrame));
-    // Set the header fields
-    frame.header.start_delimiter = _htons(FRAME_DELIMITER);
-    frame.header.frame_type = FRAME_TYPE_FILE_FRAGMENT;
-    frame.header.seq_num = _htonll(seq_num);
-    frame.header.session_id = _htonl(session_id);
-    // Set the payload fields
-    frame.payload.file_fragment.file_id = _htonl(file_id);
-    frame.payload.file_fragment.size = _htonl(fragment_size);
-    frame.payload.file_fragment.offset = _htonll(fragment_offset);
-    memcpy(frame.payload.file_fragment.bytes, fragment_buffer, fragment_size);
-    
-    // Calculate the checksum for the frame
-    frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileFragmentPayload)));  
-    if(insert_frame(io_manager->frame_ht, &io_manager->frame_ht_mutex, &frame, &io_manager->frame_ht_count, &io_manager->frame_mem_pool) == RET_VAL_ERROR){
-        fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
-        return RET_VAL_ERROR;
-    }
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr, frame_counters);
-    if(bytes_sent == SOCKET_ERROR){
-        fprintf(stderr, "send_text_message() failed\n");
-        return SOCKET_ERROR;
-    }
-    #ifdef ENABLE_FRAME_LOG
-        log_frame(LOG_FRAME_SENT, &frame, dest_addr, client.log_path);
-    #endif
-    return bytes_sent;
-}
-
-int send_long_text_fragment(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t message_id, 
-                            const uint32_t message_len, 
-                            const uint32_t fragment_offset, 
-                            const char* fragment_buffer, 
-                            const uint32_t fragment_len, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr, 
-                            ClientIOManager* io_manager, 
-                            FrameCounters* frame_counters
-                        ){
-
-    UdpFrame frame;
-    if(fragment_buffer == NULL){
-        fprintf(stderr, "Invalid text parsed!.\n");
-        return SOCKET_ERROR;
-    }
-    // Initialize the text message frame
-    memset(&frame, 0, sizeof(UdpFrame));
-    // Set the header fields
-    frame.header.start_delimiter = _htons(FRAME_DELIMITER);
-    frame.header.frame_type = FRAME_TYPE_LONG_TEXT_MESSAGE;
-    frame.header.seq_num = _htonll(seq_num);
-    frame.header.session_id = _htonl(session_id);
-    // Set the payload fields
-    frame.payload.long_text_msg.message_id = _htonl(message_id);
-    frame.payload.long_text_msg.message_len = _htonl(message_len);
-    frame.payload.long_text_msg.fragment_len = _htonl(fragment_len);
-    frame.payload.long_text_msg.fragment_offset = _htonl(fragment_offset);
-    
-    memcpy(frame.payload.long_text_msg.fragment_text, fragment_buffer, fragment_len);
-    
-    // Calculate the checksum for the frame
-    frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(LongTextPayload)));  
-    if(insert_frame(io_manager->frame_ht, &io_manager->frame_ht_mutex, &frame, &io_manager->frame_ht_count, &io_manager->frame_mem_pool) == RET_VAL_ERROR){
-        fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
-        return RET_VAL_ERROR;
-    }
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr, frame_counters);
-    if(bytes_sent == SOCKET_ERROR){
-        fprintf(stderr, "send_text_message() failed\n");
-        return SOCKET_ERROR;
-    }
-    return bytes_sent;
-}
 
 

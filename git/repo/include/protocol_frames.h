@@ -5,6 +5,7 @@
 //#include <winsock2.h>
 #include <ws2tcpip.h>
 
+
 #ifndef RET_VAL_SUCCESS
 #define RET_VAL_SUCCESS 0
 #endif
@@ -120,35 +121,19 @@ typedef struct {
 } UdpFrame;
 #pragma pack(pop)
 
-typedef struct {
-    uint64_t total_sent;
-    uint64_t total_recv;
-
-    uint64_t queue_pop;
-
-
-    uint64_t ack_sent;
-    uint64_t ack_recv;
-
-}FrameCounters;
-
-
 int send_frame(const UdpFrame *frame, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 );
 int send_ack(const uint64_t seq_num, 
                     const uint32_t session_id, 
                     const uint8_t op_code, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 );
 int send_disconnect(const uint32_t session_id, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 );
 
 int send_connect_response(const uint64_t seq_num, 
@@ -157,8 +142,7 @@ int send_connect_response(const uint64_t seq_num,
                     const uint8_t status, 
                     const char *server_name, 
                     SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 );
 int send_connect_request(const uint64_t seq_num, 
                     const uint32_t session_id, 
@@ -166,15 +150,14 @@ int send_connect_request(const uint64_t seq_num,
                     const uint32_t flag, 
                     const char *client_name, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 );
 int send_keep_alive(const uint64_t seq_num, 
                     const uint32_t session_id, 
                     const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr, 
-                    FrameCounters* frame_counters
+                    const struct sockaddr_in *dest_addr
                 );
+
 
 
 

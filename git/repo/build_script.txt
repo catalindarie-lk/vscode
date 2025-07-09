@@ -10,6 +10,7 @@ set target=%2
 REM Common source files (in src)
 set common=%workspace%\src\protocol_frames.c ^
 %workspace%\src\mem_pool.c ^
+%workspace%\src\sha256.c ^
 %workspace%\src\bitmap.c ^
 %workspace%\src\queue.c ^
 %workspace%\src\hash.c ^
@@ -17,9 +18,9 @@ set common=%workspace%\src\protocol_frames.c ^
 %workspace%\src\fileio.c
 
 REM Conditional dependency only for udp_server
-if "%target%"=="udp_server" (
+if "%target%"=="test_server" (
     set private=%workspace%\src\frame_handlers.c
-) else if "%target%"=="udp_client" (
+) else if "%target%"=="test_client" (
     set private=
 ) else (
     echo [ERROR] Unknown target: %target%

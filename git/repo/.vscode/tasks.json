@@ -4,7 +4,7 @@
     {
       "label": "Build UDP Program",
       "type": "shell",
-      "command": "${workspaceFolder}\\udp_build.bat",
+      "command": "${workspaceFolder}\\build_script.bat",
       "args": [
         "${workspaceFolder}",
         "${fileBasenameNoExtension}"

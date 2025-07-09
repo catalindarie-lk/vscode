@@ -35,8 +35,23 @@
 #ifndef SERVER_STATUS_ERROR
 #define SERVER_STATUS_ERROR             3
 #endif
+
+#ifndef CLIENT_STATUS_NONE
+#define CLIENT_STATUS_NONE              0
+#endif
+#ifndef CLIENT_STATUS_BUSY
+#define CLIENT_STATUS_BUSY              1
+#endif
+#ifndef CLIENT_STATUS_READY
+#define CLIENT_STATUS_READY             2
+#endif
+#ifndef CLIENT_STATUS_ERROR
+#define CLIENT_STATUS_ERROR             3
+#endif
+
+
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
-#define DEFAULT_SESSION_TIMEOUT_SEC     120          // Default session timeout in seconds
+#define DEFAULT_SESSION_TIMEOUT_SEC     120
 #endif
 
 
@@ -47,7 +62,7 @@
 #define CLIENT_ID                       0xAA        // Example client ID, can be set dynamically
 #define CLIENT_NAME                     "lkdc UDP Text/File Transfer Client"
 
-
+#define CONNECTION_SUCCESFULL_TIMEOUT_MS    2500   
 
 #define TEXT_CHUNK_SIZE                 (TEXT_FRAGMENT_SIZE * 128)
 #define FILE_CHUNK_SIZE                 (FILE_FRAGMENT_SIZE * 128)
@@ -75,13 +90,13 @@ enum SessionStatus{
     SESSION_CONNECTED = 2
 };
 
-typedef uint8_t ClientStatus;
-enum ClientStatus {
-    CLIENT_STOP = 0,
-    CLIENT_BUSY = 1,
-    CLIENT_READY = 2,
-    CLIENT_ERROR = 3
-};
+// typedef uint8_t ClientStatus;
+// enum ClientStatus {
+//     CLIENT_STOP = 0,
+//     CLIENT_BUSY = 1,
+//     CLIENT_READY = 2,
+//     CLIENT_ERROR = 3
+// };
 
 
 typedef struct{

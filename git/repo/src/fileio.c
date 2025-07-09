@@ -18,6 +18,11 @@ long long get_file_size(const char *filepath){
         return RET_VAL_ERROR;
     }
     long long size = _ftelli64(fp);
+    if(size == 0){
+        fprintf(stderr, "Error file is empty (size 0)! _ftelli64()\n");
+        fclose(fp);
+        return RET_VAL_ERROR;
+    }
     if(size == RET_VAL_ERROR){
         fprintf(stderr, "Error reading file size! _ftelli64()\n");
         fclose(fp);

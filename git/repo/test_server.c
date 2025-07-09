@@ -28,13 +28,11 @@ ServerIOManager io_manager;
 ClientList client_list;
 
 HANDLE hthread_receive_frame;
-HANDLE hthread_process_frame; 
+HANDLE hthread_process_frame;
 HANDLE hthread_ack_frame; 
 HANDLE hthread_client_timeout;
 HANDLE hthread_file_stream_io;
 HANDLE hthread_server_command;
-
-FrameCounters frame_counters;
 
 const char *server_ip = "10.10.10.1"; // IPv4 example
 
@@ -55,7 +53,8 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam);
 DWORD WINAPI thread_proc_server_command(LPVOID lpParam);
 
 
-void get_network_config(){
+
+static void get_network_config(){
     DWORD bufferSize = 0;
     IP_ADAPTER_ADDRESSES *adapterAddresses = NULL, *adapter = NULL;
 
@@ -80,17 +79,26 @@ void get_network_config(){
     free(adapterAddresses);
     return;
 }
-// Server initialization and management functions
-int init_server(){
-    
+
+
+static int init_server_session(){
+
+    memset(&client_list, 0, sizeof(ClientList));
+
+    server.server_status = SERVER_STATUS_NONE;
+    server.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
+    server.session_id_counter = 0;
+    snprintf(server.name, NAME_SIZE, "%.*s", NAME_SIZE - 1, SERVER_NAME);
+
+    return RET_VAL_SUCCESS;
+}
+static int init_server_config(){
     WSADATA wsaData;
     int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (iResult != 0) {
         fprintf(stderr, "WSAStartup failed: %d\n", iResult);
         exit(EXIT_FAILURE);
     }
-    memset(&client_list, 0, sizeof(ClientList));
-    server.server_status = SERVER_STATUS_BUSY;
 
     server.socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (server.socket == INVALID_SOCKET) {
@@ -109,6 +117,11 @@ int init_server(){
         return RET_VAL_ERROR;
     }
 
+    printf("Server listening on port %d...\n", SERVER_PORT);
+    return RET_VAL_SUCCESS;
+
+}
+static int init_server_buffers(){
     io_manager.queue_frame.head = 0;
     io_manager.queue_frame.tail = 0;
     InitializeCriticalSection(&io_manager.queue_frame.mutex);
@@ -121,11 +134,7 @@ int init_server(){
     io_manager.queue_priority_seq_num.head = 0;
     io_manager.queue_priority_seq_num.tail = 0;
     InitializeCriticalSection(&io_manager.queue_priority_seq_num.mutex);
-    
-    server.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
-    server.session_id_counter = 0;
-    snprintf(server.name, NAME_SIZE, "%.*s", NAME_SIZE - 1, SERVER_NAME);
-
+ 
     for(int i = 0; i < MAX_CLIENTS; i++){
         InitializeCriticalSection(&client_list.client[i].lock);
         for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
@@ -143,19 +152,11 @@ int init_server(){
         io_manager.uid_hash_table[i] = NULL;
     }
     InitializeCriticalSection(&io_manager.uid_ht_mutex);
-
-    frame_counters.total_sent = 0;
-    frame_counters.total_recv = 0;
-    frame_counters.ack_sent = 0;
-    frame_counters.ack_recv = 0;
-    frame_counters.queue_pop = 0;
-
-    printf("Server listening on port %d...\n", SERVER_PORT);
-    //server.status = SERVER_READY;
+    server.server_status = SERVER_STATUS_READY;
     return RET_VAL_SUCCESS;
+
 }
-// --- Start server threads ---
-int start_threads() {
+static int start_threads() {
     // Create threads for receiving and processing frames
     hthread_receive_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_receive_frame, NULL, 0, NULL);
     if (hthread_receive_frame == NULL) {
@@ -195,8 +196,7 @@ int start_threads() {
     server.server_status = SERVER_STATUS_READY;
     return RET_VAL_SUCCESS;
 }
-// --- Server shutdown ---
-void shutdown_server() {
+static void shutdown_server() {
 
     server.server_status = SERVER_STATUS_NONE;
 
@@ -259,6 +259,7 @@ void shutdown_server() {
     WSACleanup();
     printf("Server shut down!\n");
 }
+
 
 
 // Find client by session ID
@@ -457,8 +458,6 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
             memcpy(&frame_entry.src_addr, &src_addr, sizeof(struct sockaddr_in));
             frame_entry.frame_size = bytes_received;
 
-            frame_counters.total_recv++;
-
             uint8_t frame_type = frame_entry.frame.header.frame_type;
             BOOL is_high_priority_frame = (frame_type == FRAME_TYPE_KEEP_ALIVE ||
                                            frame_type == FRAME_TYPE_CONNECT_REQUEST ||
@@ -519,14 +518,10 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
         else if (pop_frame(&io_manager.queue_frame, &frame_entry) == RET_VAL_SUCCESS) {
             // Frame successfully retrieved from the general data queue.
         }
-        // If both queues are empty, there are currently no frames awaiting processing.
         else {
-            Sleep(100); // Pause the thread for 100 milliseconds. This prevents busy-waiting,
-                        // reducing CPU utilization, and allows other threads to run.
-            continue;   // Skip the rest of the current loop iteration and start a new one.
+            Sleep(100);
+            continue; 
         }
-
-        frame_counters.queue_pop++;
 
         // Assign local pointers to the frame data and source address within the popped entry.
         // This makes subsequent access to these details more convenient.
@@ -579,7 +574,14 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 // Log that the client is already connected.
                 fprintf(stdout, "Client %s:%d (Session ID: %d) already connected. Responding to re-connect request.\n", client->ip, src_port, client->session_id);
                 // Send a connection response back to the client. The client's address (client->addr) is accessed here.
-                send_connect_response(header_seq_num, client->session_id, server.session_timeout, server.server_status, server.name, server.socket, &client->addr, &frame_counters);
+                send_connect_response(header_seq_num, 
+                                        client->session_id, 
+                                        server.session_timeout, 
+                                        server.server_status, 
+                                        server.name, 
+                                        server.socket, 
+                                        &client->addr
+                                    );
                 // Release the client's lock.
                 LeaveCriticalSection(&client->lock);
                 continue; // This frame has been processed; move to the next.
@@ -606,7 +608,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 // If no client is found for a non-connect frame, it indicates an unexpected frame.
                 // This could be from a client that disconnected, an old frame, or potentially a malicious one.
                 // Log and ignore such frames.
-                fprintf(stdout, "Received frame (type: 0x%X, seq: %llu) from unknown/disconnected client %s:%d. Ignoring...\n",
+                fprintf(stdout, "Received frame (type: %u, seq: %llu) from unknown/disconnected client %s:%d. Ignoring...\n",
                         header_frame_type, header_seq_num, src_ip, src_port);
                 continue; // Discard this frame and move to the next.
             }
@@ -617,83 +619,76 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
         // Dispatch control to specific handlers based on the frame type.
         switch (header_frame_type) {
             case FRAME_TYPE_CONNECT_REQUEST:
-                // This block is primarily reached if a *new client* was just added by `add_client` above.
-                // (The case of an existing client re-sending CONNECT_REQUEST is handled before the switch).
-                // Acquire the client's lock before accessing or modifying its data.
                 EnterCriticalSection(&client->lock);
-                client->last_activity_time = time(NULL); // Update client activity time.
-                // Send the connection response. The client's address (client->addr) is accessed.
-                send_connect_response(header_seq_num, client->session_id, server.session_timeout, server.server_status, server.name, server.socket, &client->addr, &frame_counters);
+                client->last_activity_time = time(NULL);
+                send_connect_response(header_seq_num, 
+                                        client->session_id, 
+                                        server.session_timeout, 
+                                        server.server_status, 
+                                        server.name, 
+                                        server.socket, 
+                                        &client->addr
+                                    );
                 // Release the client's lock.
                 LeaveCriticalSection(&client->lock);
-                break; // End of FRAME_TYPE_CONNECT_REQUEST case.
+                break;
 
             case FRAME_TYPE_ACK:
-                // When an ACK (Acknowledgment) frame is received from a client.
-                // Acquire the client's lock to safely update its activity time.
                 EnterCriticalSection(&client->lock);
-                client->last_activity_time = time(NULL); // Update last activity time to keep the session alive.
+                client->last_activity_time = time(NULL);
                 LeaveCriticalSection(&client->lock);
                 // TODO: Implement the full ACK processing logic here. This typically involves:
                 //   - Removing acknowledged packets from the sender's retransmission queue.
                 //   - Updating window sizes for flow and congestion control.
                 //   - Advancing sequence numbers to indicate successfully received data.
-                break; // End of FRAME_TYPE_ACK case.
+                break;
 
             case FRAME_TYPE_KEEP_ALIVE:
-                // When a Keep-Alive frame is received from a client.
-                // Acquire the client's lock to safely update its activity time.
                 EnterCriticalSection(&client->lock);
-                client->last_activity_time = time(NULL); // Update last activity time to confirm client's liveness.
-                // Register an ACK to be sent back for this Keep-Alive frame.
-                // The `register_ack` function is responsible for its own internal locking if it modifies the client object beyond reading `client->addr`.
-                register_ack(&io_manager.queue_priority_seq_num, client, frame, STS_KEEP_ALIVE);
-                // Release the client's lock.
+                client->last_activity_time = time(NULL);
                 LeaveCriticalSection(&client->lock);
+                register_ack(&io_manager.queue_priority_seq_num, client, frame, STS_KEEP_ALIVE);
                 // TODO: Further processing if Keep-Alive frames carry additional state information.
-                break; // End of FRAME_TYPE_KEEP_ALIVE case.
+                break;
 
             case FRAME_TYPE_FILE_METADATA:
-                // This frame type indicates that the client is sending file transfer metadata.
-                // The `handle_file_metadata` function is called to process this.
-                // It is assumed that `handle_file_metadata` will acquire necessary locks (e.g., client's lock
-                // if it updates `last_activity_time`, or specific file stream locks) internally.
+            fprintf(stdout, "\n   FRAME_TYPE_FILE_METADATA\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File Name: %s\n   File sha256: ", 
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum),
+                                                    _ntohl(frame->payload.file_metadata.file_id),
+                                                    _ntohll(frame->payload.file_metadata.file_size),    
+                                                    frame->payload.file_metadata.filename                
+                    );
+                for(int i = 0; i < 32; i++){
+                    fprintf(stdout, "%02x", (unsigned char)frame->payload.file_metadata.file_hash[i]);
+                }
+                fprintf(stdout,"\n");
                 handle_file_metadata(client, frame, &io_manager);
-                break; // End of FRAME_TYPE_FILE_METADATA case.
+                break;
 
             case FRAME_TYPE_FILE_FRAGMENT:
-                // This frame type indicates a data fragment of a file being transferred.
-                // The `handle_file_fragment` function is called to process this.
-                // It is assumed that `handle_file_fragment` will acquire necessary locks (e.g., client's lock
-                // for `last_activity_time` or specific file stream locks) internally.
                 handle_file_fragment(client, frame, &io_manager);
-                break; // End of FRAME_TYPE_FILE_FRAGMENT case.
+                break;
 
             case FRAME_TYPE_LONG_TEXT_MESSAGE:
-                // This frame type indicates a fragment of a long text message.
-                // The `handle_message_fragment` function is called to process this.
-                // It is assumed that `handle_message_fragment` will acquire necessary locks internally.
                 handle_message_fragment(client, frame, &io_manager);
-                break; // End of FRAME_TYPE_LONG_TEXT_MESSAGE case.
+                break;
 
             case FRAME_TYPE_DISCONNECT:
-                // This frame type indicates that the client is requesting to disconnect gracefully.
-                // Log the client's disconnection request.
-                fprintf(stdout, "Client %s:%d with session ID %d requested disconnect...\n", client->ip, src_port, client->session_id);
-                // Call `remove_client` to clean up all resources associated with this client.
-                // `remove_client` is expected to handle its own internal locking for the client slot being modified.
+                fprintf(stdout, "Client %s:%d with session ID: %d requested disconnect...\n", client->ip, src_port, client->session_id);
                 remove_client(&client_list, &io_manager, client->slot_num);
-                break; // End of FRAME_TYPE_DISCONNECT case.
+                break;
 
             default:
                 // For any other unexpected or unhandled frame types, log an error message.
-                fprintf(stderr, "Received unknown frame type 0x%X from %s:%d (Session ID: %u). Discarding.\n",
+                fprintf(stderr, "Received unknown frame type: %u from %s:%d (Session ID: %u). Discarding.\n",
                         header_frame_type, src_ip, src_port, header_session_id);
                 break; // End of default case.
         }
     }
     // The thread loop terminates when `server.status` is no longer `SERVER_READY`.
-    // The `_endthreadex(0)` function is the proper way to exit a thread created with `_beginthreadex`.
+    _endthreadex(0);
     return 0;
 }
 // --- SendAck Thread Function ---
@@ -719,7 +714,7 @@ DWORD WINAPI thread_proc_ack_frame(LPVOID lpParam){
         // - entry.op_code: The operation code (ACK or NAK).
         // - server.socket: The UDP socket used for sending.
         // - &entry.addr: The destination address of the client.
-        send_ack(entry.seq_num, entry.session_id, entry.op_code, server.socket, &entry.addr, &frame_counters);
+        send_ack(entry.seq_num, entry.session_id, entry.op_code, server.socket, &entry.addr);
     }
     _endthreadex(0); // Properly exit the thread created by _beginthreadex
     return 0;
@@ -766,7 +761,7 @@ DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
 
             // Send a disconnect control message to the timed-out client's address.
             // This is a best-effort attempt to inform the client that it has been disconnected by the server.
-            send_disconnect(lp_client_list->client[slot].session_id, server.socket, &lp_client_list->client[slot].addr, &frame_counters);
+            send_disconnect(lp_client_list->client[slot].session_id, server.socket, &lp_client_list->client[slot].addr);
 
             // Call the `remove_client` function to clean up all resources associated with this client slot
             // and mark the slot as free. This function is expected to be thread-safe in its own implementation.
@@ -1163,7 +1158,9 @@ void check_open_file_stream(ClientList* client_list){
 
 int main() {
     //get_network_config();
-    init_server();
+    init_server_session();
+    init_server_config();
+    init_server_buffers();
     start_threads();
     // Main server loop for general management, timeouts, and state updates
     while (server.server_status == SERVER_STATUS_READY) {
@@ -1178,8 +1175,6 @@ int main() {
         //                     frame_counters.queue_pop
         //                 );
         fflush(stdout);
-        
-
 
     }
     // --- Server Shutdown Sequence ---

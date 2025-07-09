@@ -34,7 +34,7 @@
 #define SERVER_STATUS_ERROR             3
 #endif
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
-#define DEFAULT_SESSION_TIMEOUT_SEC     120          // Default session timeout in seconds
+#define DEFAULT_SESSION_TIMEOUT_SEC     120
 #endif
 
 // --- Constants 
