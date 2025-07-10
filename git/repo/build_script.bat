@@ -19,7 +19,8 @@ set common=%workspace%\src\protocol_frames.c ^
 
 REM Conditional dependency only for udp_server
 if "%target%"=="test_server" (
-    set private=%workspace%\src\frame_handlers.c
+    set private=%workspace%\src\file_handler.c ^
+%workspace%\src\message_handler.c
 ) else if "%target%"=="test_client" (
     set private=
 ) else (

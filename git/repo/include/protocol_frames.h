@@ -36,7 +36,7 @@ enum FrameType{
 
     FRAME_TYPE_FILE_METADATA = 20,       // Client requests to send a file (includes filename, size, hash)
     FRAME_TYPE_FILE_FRAGMENT = 22,                   // File data fragment
-
+    FRAME_TYPE_FILE_END = 23,
     FRAME_TYPE_LONG_TEXT_MESSAGE = 30      // Fragment of a long text message
 };
 
@@ -88,15 +88,23 @@ typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t file_size;                                     // Total size of the file being transferred
     uint8_t  file_hash[32];                                 // For MD5 hash (adjust size for SHA256 etc.)
-    char     filename[NAME_SIZE];                       // Max filename length
-} FileMetadataPayload;
+    char     filename[NAME_SIZE];                           // Max filename length
+}FileMetadataPayload;
 
 typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t offset;                                        // Offset of this fragment within the file
     uint32_t size;                                          // Length of actual data in 'fragment_data'
     char  bytes[FILE_FRAGMENT_SIZE];                        // Adjusted size
-} FileFragmentPayload;
+}FileFragmentPayload;
+
+typedef struct{
+    uint32_t file_id;                                       // Unique identifier for the file transfer session
+    uint64_t file_size;                                     // Total size of the file being transferred
+    uint8_t flags;
+    uint8_t file_hash[32];                                       // For SHA256 hash
+}FileEndPayload;
+
 
 typedef struct {
     uint32_t message_id;                                    // Unique ID for this specific long message
@@ -115,6 +123,7 @@ typedef struct {
         AckPayload ack;
         FileMetadataPayload file_metadata;                  // File metadata request/response
         FileFragmentPayload file_fragment;                  // File data fragment
+        FileEndPayload file_end;
         LongTextPayload long_text_msg;                      // Fragment of a long text message
         uint8_t raw_payload[MAX_PAYLOAD_SIZE];              // For generic access or padding
     } payload;

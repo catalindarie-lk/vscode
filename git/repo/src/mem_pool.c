@@ -43,7 +43,7 @@ void pool_init(MemPool* pool) {
     // The last block points to -1, indicating the end of the free list
     pool->next[pool->block_count - 1] = (uint64_t)-1; // Use -1 to indicate end of list
     pool->used[pool->block_count - 1] = 0;           // Last block is also unused
-
+    pool->free_blocks = pool->block_count;
     // Initialize the critical section for thread safety
     InitializeCriticalSection(&pool->mutex);
     return;
@@ -64,9 +64,10 @@ void* pool_alloc(MemPool* pool) {
     // Mark the allocated block as used
     pool->used[index] = 1;
     // Leave critical section
-    LeaveCriticalSection(&pool->mutex);
+    InterlockedDecrement64(&pool->free_blocks);
     // Return the memory address of the allocated block
     memset(pool->memory + index * pool->block_size, 0, pool->block_size); // Optional: clear memory for safety
+    LeaveCriticalSection(&pool->mutex);
     return (void *)(pool->memory + index * pool->block_size);
 }
 //--------------------------------------------------------------------------------------------------------------------------
@@ -91,7 +92,8 @@ void pool_free(MemPool* pool, void* ptr) {
         fprintf(stderr, "   Total block count: %llu\n", pool->block_count);
         fprintf(stderr, "   Is within bounds (0 to %llu)? %s\n", pool->block_count - 1,
                         (index < pool->block_count) ? "Yes" : "No");
-        fprintf(stderr, "   Was block marked as used? %s\n", (index < pool->block_count && pool->used[index]) ? "Yes" : "No (Double-Free/Corruption)\n");
+        fprintf(stderr, "   Was block marked as used? %s\n", 
+                        (index < pool->block_count && pool->used[index]) ? "Yes" : "No (Double-Free/Corruption)\n");
         LeaveCriticalSection(&pool->mutex);
         return;
     }
@@ -100,6 +102,7 @@ void pool_free(MemPool* pool, void* ptr) {
     pool->free_head = index;
     // Mark the block as unused
     pool->used[index] = 0;
+    InterlockedIncrement64(&pool->free_blocks);
     // memset(pool->memory + index * pool->block_size, 0, pool->block_size);
     LeaveCriticalSection(&pool->mutex);
     return;
@@ -127,6 +130,7 @@ void pool_destroy(MemPool* pool) {
         free(pool->memory);
         pool->memory = NULL;
     }
+    pool->free_blocks = 0;
     DeleteCriticalSection(&pool->mutex);
 }
 //--------------------------------------------------------------------------------------------------------------------------

@@ -90,14 +90,9 @@ enum SessionStatus{
     SESSION_CONNECTED = 2
 };
 
-// typedef uint8_t ClientStatus;
-// enum ClientStatus {
-//     CLIENT_STOP = 0,
-//     CLIENT_BUSY = 1,
-//     CLIENT_READY = 2,
-//     CLIENT_ERROR = 3
-// };
-
+typedef struct{
+    uint8_t sha256[32];
+}FileHash;
 
 typedef struct{
     SOCKET socket;
@@ -123,6 +118,7 @@ typedef struct{
     uint64_t file_size[MAX_CLIENT_FILE_STREAMS];
     uint64_t file_bytes_to_send[MAX_CLIENT_FILE_STREAMS];
     uint64_t pending_metadata_seq_num[MAX_CLIENT_FILE_STREAMS]; // seq num of the file metadata frame sent to the server, waiting for ACK
+    FileHash file_hash[MAX_CLIENT_FILE_STREAMS];
 
     //uint32_t message_id_count;
     long message_len[MAX_CLIENT_MESSAGE_STREAMS];
@@ -136,16 +132,12 @@ typedef struct{
 } ClientData;
 
 typedef struct {
-    MemPool frame_mem_pool;
-
     QueueFrame queue_frame;
     QueueFrame queue_priority_frame;
-
-    FramePendingAck *frame_ht[HASH_SIZE_FRAME];
-    CRITICAL_SECTION frame_ht_mutex;
-    uint32_t frame_ht_count;
-
+    HashTableFramePendingAck ht_frame;
 }ClientIOManager;
+
+
 
 uint64_t get_new_seq_num();
 

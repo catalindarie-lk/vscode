@@ -24,10 +24,22 @@ typedef struct FramePendingAck{
     struct FramePendingAck *next;
 }FramePendingAck;
 
+typedef struct{
+    FramePendingAck *entry[HASH_SIZE_FRAME];
+    CRITICAL_SECTION mutex;
+    uint32_t count;
+    MemPool pool;
+}HashTableFramePendingAck;
+
 uint64_t get_hash_frame(uint64_t key);
 int insert_frame(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, UdpFrame *frame, uint32_t *count, MemPool *pool);
 void remove_frame(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, uint64_t seq_num, uint32_t *count, MemPool *pool);
 void clean_frame_hash_table(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, uint32_t *count, MemPool *pool);
+
+uint64_t ht_get_hash_frame(const uint64_t seq_num);
+int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame);
+void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num);
+void ht_clean(HashTableFramePendingAck *ht);
 
 //--------------------------------------------------------------------------------------------------------------------------
 #define HASH_SIZE_UID                  (1024)

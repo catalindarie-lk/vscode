@@ -7,6 +7,7 @@
 #include "include/queue.h"
 #include "include/mem_pool.h"
 #include "include/hash.h"
+#include "include/sha256.h"
 
 #ifndef RET_VAL_SUCCESS
 #define RET_VAL_SUCCESS 0
@@ -153,7 +154,8 @@ typedef struct{
     uint64_t bytes_written;             // Total bytes written to disk for this file so far.
     uint64_t bitmap_entries_count;      // Number of uint64_t entries in the bitmap array.
                                         // (Total fragments / 64, rounded up)
-
+    uint8_t sha256[32];
+ 
     BOOL trailing_chunk;                // True if the last bitmap entry represents a partial chunk (less than 64 fragments).
     BOOL trailing_chunk_complete;       // True if all bytes for the last, potentially partial, chunk have been received.
     uint64_t trailing_chunk_size;       // The actual size of the last chunk (if partial).

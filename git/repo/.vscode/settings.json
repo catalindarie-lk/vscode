@@ -24,6 +24,7 @@
         "mem_pool.h": "c",
         "checksum.h": "c",
         "server.h": "c",
-        "netendians.h": "c"
+        "netendians.h": "c",
+        "protocol_frames.h": "c"
     }
 }

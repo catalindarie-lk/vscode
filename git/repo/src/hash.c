@@ -91,6 +91,92 @@ void clean_frame_hash_table(FramePendingAck *hash_table[], CRITICAL_SECTION *mut
     return;
 }
 
+
+
+uint64_t ht_get_hash_frame(const uint64_t seq_num){
+    return (seq_num % HASH_SIZE_FRAME);
+}
+int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame){
+    
+    EnterCriticalSection(&ht->mutex);
+    
+    uint64_t seq_num = _ntohll(frame->header.seq_num);
+    uint64_t index = get_hash_frame(seq_num);
+    //fprintf(stdout, "SeqNum: %llu inserted at index: %llu\n", seq_num, index);
+    FramePendingAck *node = (FramePendingAck *)pool_alloc(&ht->pool);
+    if(node == NULL){
+        return RET_VAL_ERROR;
+    }
+    memcpy(&node->frame, frame, sizeof(UdpFrame));
+    node->time = time(NULL);
+    node->counter = 1;
+
+    node->next = (FramePendingAck *)ht->entry[index];  // Insert at the head (linked list)
+    ht->entry[index] = node;
+    InterlockedIncrement(&ht->count);
+    LeaveCriticalSection(&ht->mutex);
+    return RET_VAL_SUCCESS;
+}
+void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num){
+    EnterCriticalSection(&ht->mutex);
+
+    uint64_t index = get_hash_frame(seq_num);
+    //fprintf(stdout, "Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
+    FramePendingAck *curr = ht->entry[index];
+    FramePendingAck *prev = NULL;
+    while (curr) {
+        if (_ntohll(curr->frame.header.seq_num) == seq_num) {
+            //fprintf(stdout, "Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
+            // Found it
+            if (prev) {
+                prev->next = curr->next;
+            } else {
+                ht->entry[index] = curr->next;
+            }
+            pool_free(&ht->pool, curr);
+            //free(curr);
+            InterlockedDecrement(&ht->count);
+            //fprintf(stdout, "Hash count: %d\n", *count);
+            LeaveCriticalSection(&ht->mutex);
+            return;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    LeaveCriticalSection(&ht->mutex);
+    return;
+ 
+}
+void ht_clean(HashTableFramePendingAck *ht){
+    
+    EnterCriticalSection(&ht->mutex);
+    
+    FramePendingAck *head = NULL;
+    for (int i = 0; i < HASH_SIZE_FRAME; i++) {
+        if(ht->entry[i]){       
+            FramePendingAck *ptr = ht->entry[i];
+            while (ptr) {
+                    head = ptr;
+                    //fprintf(stdout, "Bucket: %d - Freeing SeqNum: %d\n", i, head->seq_num);                   
+                    ptr = ptr->next;
+                    pool_free(&ht->pool, head);
+                    //free(head);
+                    InterlockedDecrement(&ht->count);
+            }
+            if(ptr){
+                pool_free(&ht->pool, ptr);
+                ptr = NULL;
+            }
+            //free(ptr);
+            ht->entry[i] = NULL;
+        }     
+    }
+//    fprintf(stdout, "Frame hash table clean\n");
+    LeaveCriticalSection(&ht->mutex);
+    return;
+}
+
+
 //--------------------------------------------------------------------------------------------------------------------------
 
 uint64_t get_hash_uid(uint32_t u_id) {

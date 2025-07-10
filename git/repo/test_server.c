@@ -21,7 +21,8 @@
 #include "include/queue.h"              // For queue management
 #include "include/bitmap.h"             // For bitmap management
 #include "include/hash.h"               // For hash table management
-#include "include/frame_handlers.h"     // For frame handling functions
+#include "include/file_handler.h"       // For frame handling functions
+#include "include/message_handler.h"       // For frame handling functions
 
 ServerData server;
 ServerIOManager io_manager;
@@ -34,7 +35,7 @@ HANDLE hthread_client_timeout;
 HANDLE hthread_file_stream_io;
 HANDLE hthread_server_command;
 
-const char *server_ip = "10.10.10.1"; // IPv4 example
+const char *server_ip = "127.0.0.1"; // IPv4 example
 
 // Client management functions
 static Client* find_client(ClientList *client_list, const uint32_t session_id);
@@ -652,14 +653,14 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 break;
 
             case FRAME_TYPE_FILE_METADATA:
-            fprintf(stdout, "\n   FRAME_TYPE_FILE_METADATA\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File Name: %s\n   File sha256: ", 
+                fprintf(stdout, "\n   FRAME_TYPE_FILE_METADATA\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File Name: %s\n   File sha256: ", 
                                                     _ntohll(frame->header.seq_num), 
                                                     _ntohl(frame->header.session_id), 
                                                     _ntohl(frame->header.checksum),
                                                     _ntohl(frame->payload.file_metadata.file_id),
                                                     _ntohll(frame->payload.file_metadata.file_size),    
                                                     frame->payload.file_metadata.filename                
-                    );
+                );
                 for(int i = 0; i < 32; i++){
                     fprintf(stdout, "%02x", (unsigned char)frame->payload.file_metadata.file_hash[i]);
                 }
@@ -670,6 +671,19 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
             case FRAME_TYPE_FILE_FRAGMENT:
                 handle_file_fragment(client, frame, &io_manager);
                 break;
+
+            case FRAME_TYPE_FILE_END:
+                fprintf(stdout, "\n   FRAME_TYPE_FILE_END\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File sha256: ", 
+                                                    _ntohll(frame->header.seq_num), 
+                                                    _ntohl(frame->header.session_id), 
+                                                    _ntohl(frame->header.checksum),
+                                                    _ntohl(frame->payload.file_end.file_id),
+                                                    _ntohll(frame->payload.file_end.file_size)         
+                );
+                for(int i = 0; i < 32; i++){
+                    fprintf(stdout, "%02x", (unsigned char)frame->payload.file_end.file_hash[i]);
+                }
+                fprintf(stdout,"\n");
 
             case FRAME_TYPE_LONG_TEXT_MESSAGE:
                 handle_message_fragment(client, frame, &io_manager);
@@ -820,7 +834,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             // Get the memory buffer associated with this chunk.
                             char* buffer = fstream->pool_block_file_chunk[k];
                             uint64_t buffer_size;    // Variable to store the actual size of the chunk to write.
-                            uint8_t new_flag_value; // Variable to store the new flag status after writing.
+                            //uint8_t new_flag_value; // Variable to store the new flag status after writing.
 
                             // Case 1: This is the trailing (last, potentially partial) chunk.
                             // Check if:
@@ -829,7 +843,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             //   c) The current chunk's flag indicates it's the trailing chunk AND it hasn't been written yet.
                             if (fstream->trailing_chunk && fstream->trailing_chunk_complete && (fstream->flag[k] == CHUNK_TRAILING)) {
                                 buffer_size = fstream->trailing_chunk_size; // Use the specific calculated size for the trailing chunk.
-                                new_flag_value = CHUNK_TRAILING | CHUNK_WRITTEN; // Mark it as trailing and now written.
+                            //    new_flag_value = CHUNK_TRAILING | CHUNK_WRITTEN; // Mark it as trailing and now written.
                                 //fprintf(stdout, "Writing trailing chunk bytes: %llu, chunk index: %llu\n", buffer_size, k);
 
                             // Case 2: This is a full-sized chunk (not trailing).
@@ -838,9 +852,10 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             //   b) The current chunk's flag indicates it's a body chunk AND it hasn't been written yet.
                             } else if(fstream->bitmap[k] == ~0ULL && (fstream->flag[k] == CHUNK_BODY)) {
                                 buffer_size = FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK; // Full chunk size.
-                                new_flag_value = CHUNK_BODY | CHUNK_WRITTEN; // Mark it as a body chunk and now written.
+                            //    new_flag_value = CHUNK_BODY | CHUNK_WRITTEN; // Mark it as a body chunk and now written.
                                 // fprintf(stdout, "Writing complete chunk bytes: %llu, chunk index: %llu\n", buffer_size, k); // Optional for full chunks
                             }
+                            //new_flag_value = CHUNK_WRITTEN;
                             // Case 3: This chunk is neither a ready trailing chunk nor a complete, unwritten full chunk.
                             // It means this chunk either:
                             //   - Has not received all its data yet.
@@ -877,7 +892,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                                 break; // Exit the 'k' loop.
                             }
                             fstream->bytes_written += written; // Accumulate the total bytes written to disk.
-                            fstream->flag[k] = new_flag_value; // Update the chunk's flag to reflect it has been written.
+                            fstream->flag[k] |= CHUNK_WRITTEN;//= new_flag_value; // Update the chunk's flag to reflect it has been written.
 
                             // Return the memory buffer for this chunk back to the pre-allocated pool.
                             pool_free(&io_manager.pool_file_chunk, fstream->pool_block_file_chunk[k]);
@@ -953,14 +968,13 @@ DWORD WINAPI thread_proc_server_command(LPVOID lpParam){
 // Register an acknowledgment (ACK) or negative acknowledgment for a received frame.
 void register_ack(QueueSeqNum *queue, Client *client, UdpFrame *frame, uint8_t op_code) {
     // Create a new QueueSeqNumEntry structure to store the ACK/NAK details.
-    QueueSeqNumEntry entry = {
+    QueueSeqNumEntry entry;
         // Extract the sequence number from the frame header, converting from network to host byte order.
-        .seq_num = _ntohll(frame->header.seq_num),
-        // Set the operation code (e.g., ACK or NAK) as provided by the caller.
-        .op_code = op_code,
-        // Extract the session ID from the frame header, converting from network to host byte order.
-        .session_id = _ntohl(frame->header.session_id)
-    };
+    entry.seq_num = _ntohll(frame->header.seq_num);
+    // Set the operation code (e.g., ACK or NAK) as provided by the caller.
+    entry.op_code = op_code;
+    // Extract the session ID from the frame header, converting from network to host byte order.
+    entry.session_id = _ntohl(frame->header.session_id);
     // Copy the client's address (destination for the ACK/NAK) into the entry.
     // This is where the client's `addr` member is accessed.
     memcpy(&entry.addr, &client->addr, sizeof(struct sockaddr_in));
@@ -1154,7 +1168,6 @@ void check_open_file_stream(ClientList* client_list){
     fprintf(stdout, "Completed checking opened file streams\n");
     return;
 }
-
 
 int main() {
     //get_network_config();
