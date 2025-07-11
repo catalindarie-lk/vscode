@@ -48,6 +48,7 @@
 #define FRAGMENTS_PER_CHUNK             (64ULL)
 #define CHUNK_TRAILING                  (1u << 7) // 0b10000000
 #define CHUNK_BODY                      (1u << 6) // 0b01000000
+#define CHUNK_HASHED                    (1u << 5) // 0b00100000
 #define CHUNK_WRITTEN                   (1u << 0) // 0b00000001
 #define CHUNK_NONE                      (0)       // 0b00000000
 
@@ -68,6 +69,7 @@ enum StreamChannelError{
     STREAM_ERR_FP = 1,
     STREAM_ERR_FSEEK = 2,
     STREAM_ERR_FWRITE = 3,
+    STREAM_ERR_FREAD = 4,
 
     STREAM_ERR_BITMAP_MALLOC = 10,
     STREAM_ERR_FLAG_MALLOC = 11,
@@ -154,11 +156,20 @@ typedef struct{
     uint64_t bytes_written;             // Total bytes written to disk for this file so far.
     uint64_t bitmap_entries_count;      // Number of uint64_t entries in the bitmap array.
                                         // (Total fragments / 64, rounded up)
-    uint8_t sha256[32];
- 
+    SHA256_CTX sha256_ctx;
+    uint8_t calculated_sha256[32];
+    BOOL file_hash_calculated;
+
+
+    uint8_t received_sha256[32];
+    BOOL file_hash_received;
+
+    BOOL file_hash_validated;
+
     BOOL trailing_chunk;                // True if the last bitmap entry represents a partial chunk (less than 64 fragments).
     BOOL trailing_chunk_complete;       // True if all bytes for the last, potentially partial, chunk have been received.
     uint64_t trailing_chunk_size;       // The actual size of the last chunk (if partial).
+    uint64_t chunks_hashed;
 
     char fn[PATH_SIZE];                 // Array to store the file name/path.
     FILE *fp;                           // File pointer for the file being written to disk.
@@ -195,14 +206,6 @@ typedef struct{
     Client client[MAX_CLIENTS];     // Array of connected clients
     CRITICAL_SECTION lock;              // For thread-safe access to connected_clients
 }ClientList;
-
-
-void register_ack(QueueSeqNum *queue, Client *client, UdpFrame *frame, uint8_t op_code);
-void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager);
-void message_cleanup_stream(MsgStream *mstream, ServerIOManager* io_manager);
-void cleanup_client(Client *client, ServerIOManager* io_manager);
-
-int create_output_file(const char *buffer, const uint64_t size, const char *path);
 
 
 #endif // SERVER_H

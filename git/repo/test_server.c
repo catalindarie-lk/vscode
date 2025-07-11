@@ -41,6 +41,12 @@ const char *server_ip = "127.0.0.1"; // IPv4 example
 static Client* find_client(ClientList *client_list, const uint32_t session_id);
 static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, const struct sockaddr_in *client_addr);
 static int remove_client(ClientList *client_list, ServerIOManager* io_manager, const uint32_t slot);
+
+void register_ack(QueueSeqNum *queue, Client *client, UdpFrame *frame, uint8_t op_code);
+void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager);
+void message_cleanup_stream(MsgStream *mstream, ServerIOManager* io_manager);
+void cleanup_client(Client *client, ServerIOManager* io_manager);
+BOOL validate_file_hash(FileStream *fstream);
 void check_open_file_stream(ClientList *client_list);
 
 static void update_statistics(Client *client);
@@ -52,7 +58,6 @@ DWORD WINAPI thread_proc_ack_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam);
 DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam);
 DWORD WINAPI thread_proc_server_command(LPVOID lpParam);
-
 
 
 static void get_network_config(){
@@ -260,7 +265,6 @@ static void shutdown_server() {
     WSACleanup();
     printf("Server shut down!\n");
 }
-
 
 
 // Find client by session ID
@@ -684,6 +688,8 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                     fprintf(stdout, "%02x", (unsigned char)frame->payload.file_end.file_hash[i]);
                 }
                 fprintf(stdout,"\n");
+                handle_file_end(client, frame, &io_manager);
+                break;
 
             case FRAME_TYPE_LONG_TEXT_MESSAGE:
                 handle_message_fragment(client, frame, &io_manager);
@@ -824,6 +830,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                     EnterCriticalSection(&fstream->lock);
 
                     // Check if the file stream is currently active/busy with a transfer.
+                    
                     if(fstream->busy){
                         // Iterate through all bitmap entries (chunks) for the current file stream.
                         for(long long k = 0; k < fstream->bitmap_entries_count; k++){
@@ -834,7 +841,6 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             // Get the memory buffer associated with this chunk.
                             char* buffer = fstream->pool_block_file_chunk[k];
                             uint64_t buffer_size;    // Variable to store the actual size of the chunk to write.
-                            //uint8_t new_flag_value; // Variable to store the new flag status after writing.
 
                             // Case 1: This is the trailing (last, potentially partial) chunk.
                             // Check if:
@@ -843,8 +849,6 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             //   c) The current chunk's flag indicates it's the trailing chunk AND it hasn't been written yet.
                             if (fstream->trailing_chunk && fstream->trailing_chunk_complete && (fstream->flag[k] == CHUNK_TRAILING)) {
                                 buffer_size = fstream->trailing_chunk_size; // Use the specific calculated size for the trailing chunk.
-                            //    new_flag_value = CHUNK_TRAILING | CHUNK_WRITTEN; // Mark it as trailing and now written.
-                                //fprintf(stdout, "Writing trailing chunk bytes: %llu, chunk index: %llu\n", buffer_size, k);
 
                             // Case 2: This is a full-sized chunk (not trailing).
                             // Check if:
@@ -852,8 +856,6 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             //   b) The current chunk's flag indicates it's a body chunk AND it hasn't been written yet.
                             } else if(fstream->bitmap[k] == ~0ULL && (fstream->flag[k] == CHUNK_BODY)) {
                                 buffer_size = FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK; // Full chunk size.
-                            //    new_flag_value = CHUNK_BODY | CHUNK_WRITTEN; // Mark it as a body chunk and now written.
-                                // fprintf(stdout, "Writing complete chunk bytes: %llu, chunk index: %llu\n", buffer_size, k); // Optional for full chunks
                             }
                             //new_flag_value = CHUNK_WRITTEN;
                             // Case 3: This chunk is neither a ready trailing chunk nor a complete, unwritten full chunk.
@@ -892,7 +894,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                                 break; // Exit the 'k' loop.
                             }
                             fstream->bytes_written += written; // Accumulate the total bytes written to disk.
-                            fstream->flag[k] |= CHUNK_WRITTEN;//= new_flag_value; // Update the chunk's flag to reflect it has been written.
+                            fstream->flag[k] |= CHUNK_WRITTEN; // Update the chunk's flag to reflect it has been written.
 
                             // Return the memory buffer for this chunk back to the pre-allocated pool.
                             pool_free(&io_manager.pool_file_chunk, fstream->pool_block_file_chunk[k]);
@@ -900,22 +902,89 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             // and to indicate that this chunk's buffer has been released.
                             fstream->pool_block_file_chunk[k] = NULL;
 
-                            // After attempting to write all available chunks for this file stream:
-                            // Check if the total bytes received equals the total file size AND
-                            // if the total bytes written to disk also equals the total file size.
-                            fstream->file_complete = (fstream->bytes_received == fstream->f_size) && (fstream->bytes_written == fstream->f_size);
 
-                            // If the file is now completely received and written:
-                            if(fstream->file_complete){
-                                // Update the status in the UID hash table (if used for tracking file transfer status).
-                                update_uid_status_hash_table(io_manager.uid_hash_table, &io_manager.uid_ht_mutex, fstream->s_id, fstream->f_id, UID_RECV_COMPLETE);
-                                // fprintf(stdout, "[INFO] Transfer finished, created file: %s, bytes: %llu\n", fstream->fn, fstream->bytes_written);
-                                // fprintf(stdout,"Cleaning up file stream: %d\n", j);
-                                file_cleanup_stream(fstream, &io_manager); // Perform final cleanup for the completed file stream.
+                        } //end of looping through BITMAP ENTRIES
+
+
+
+                        for(long long l = 0; l < fstream->bitmap_entries_count; l++){
+                            BOOL is_chunk_body = (fstream->flag[l] & CHUNK_BODY) == CHUNK_BODY;
+                            BOOL is_chunk_body_complete = fstream->bitmap[l] == ~0ULL;
+                            BOOL is_chunk_written = (fstream->flag[l] & CHUNK_WRITTEN) == CHUNK_WRITTEN;
+
+                            BOOL is_chunk_body_and_written = fstream->flag[l] == (CHUNK_BODY | CHUNK_WRITTEN);
+                            BOOL is_chunk_trailing_and_written = fstream->flag[l] == (CHUNK_TRAILING | CHUNK_WRITTEN);
+
+                            if(is_chunk_body && !is_chunk_body_complete){
                                 break;
                             }
 
-                        } //end of looping through BITMAP ENTRIES
+                            if(!is_chunk_written){
+                                 break;
+                            }
+
+                            if(is_chunk_body_and_written || is_chunk_trailing_and_written){
+  
+                                uint64_t file_offset = l * FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK; // Use constant
+
+                                // Attempt to seek to the correct offset in the file.
+                                if (_fseeki64(fstream->fp, file_offset, SEEK_SET) != 0) {
+                                    fprintf(stderr, "Error: Failed to seek to offset %llu for chunk %llu. Session ID: %u, File ID: %u\n", file_offset, l, fstream->s_id, fstream->f_id);
+                                    fstream->stream_err = STREAM_ERR_FSEEK; // Set a specific error code.
+                                    file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
+                                    break; // Exit the 'k' loop.
+                                }
+                                  
+
+                                char chunk_buffer[(FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK)];
+                                size_t chunk_bytes_read = fread(chunk_buffer, 1, sizeof(chunk_buffer), fstream->fp);
+                                
+                                if (chunk_bytes_read <= 0) {
+                                    fprintf(stderr, "Error: Failed to read data from file for chunk offset %llu. Session ID: %u, File ID: %u\n", file_offset, fstream->s_id, fstream->f_id);
+                                    fstream->stream_err = STREAM_ERR_FREAD; // Set a specific error code.
+                                    file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
+                                    break; // Exit the 'k' loop.
+                                }                              
+                                
+                                sha256_update(&fstream->sha256_ctx, chunk_buffer, chunk_bytes_read);
+
+                                fstream->flag[l] |= CHUNK_HASHED;
+                                fstream->chunks_hashed++;
+                            }
+                        }
+
+                        // After attempting to write all available chunks for this file stream:
+                        // Check if the total bytes received equals the total file size AND
+                        // if the total bytes written to disk also equals the total file size.
+                        if((fstream->bytes_received == fstream->f_size) && 
+                                (fstream->bytes_written == fstream->f_size) &&
+                                (fstream->chunks_hashed == fstream->bitmap_entries_count) &&
+                                !fstream->file_hash_calculated){
+                            sha256_final(&fstream->sha256_ctx, (uint8_t *)&fstream->calculated_sha256);
+                            fstream->file_hash_calculated = TRUE;
+                        }
+                        
+                        if(fstream->file_hash_calculated && fstream->file_hash_received && !fstream->file_hash_validated){
+                            fstream->file_hash_validated = validate_file_hash(fstream);
+                            if(!fstream->file_hash_validated){
+                                file_cleanup_stream(fstream, &io_manager); // Perform final cleanup for the completed file stream.
+                            }                                                    
+                        }
+
+                        fstream->file_complete = ((fstream->bytes_received == fstream->f_size) && 
+                                                    (fstream->bytes_written == fstream->f_size) &&
+                                                    fstream->file_hash_calculated &&
+                                                    fstream->file_hash_validated &&
+                                                    !fstream->file_complete
+                                                );
+
+                        // If the file is now completely received and written:
+                        if(fstream->file_complete){           
+                            // Update the status in the UID hash table (if used for tracking file transfer status).
+                            update_uid_status_hash_table(io_manager.uid_hash_table, &io_manager.uid_ht_mutex, fstream->s_id, fstream->f_id, UID_RECV_COMPLETE);
+                            fprintf(stdout, "File '%s' received written to disk and validated", fstream->fn);
+                            file_cleanup_stream(fstream, &io_manager); // Perform final cleanup for the completed file stream.
+                        }
 
                     } // check busy
                     // Release the critical section lock for the current file stream.
@@ -1051,6 +1120,9 @@ void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager){
     fstream->pool_block_file_chunk = NULL; // Set the pointer to NULL.
     // Reset the stream's state variables to their default/initial values.
     fstream->busy = FALSE;
+    fstream->file_hash_received = FALSE;
+    fstream->file_hash_calculated = FALSE;
+    fstream->file_hash_validated = FALSE;
     fstream->file_complete = FALSE;
     fstream->stream_err = STREAM_ERR_NONE; // Reset error status.
     fstream->s_id = 0; // Reset session ID.
@@ -1059,6 +1131,7 @@ void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager){
     fstream->fragment_count = 0; // Reset fragment count.
     fstream->bytes_received = 0; // Reset bytes received counter.
     fstream->bytes_written = 0; // Reset bytes written counter.
+    fstream->chunks_hashed = 0;
     fstream->bitmap_entries_count = 0; // Reset bitmap entries count.
     fstream->trailing_chunk = FALSE; // Reset trailing chunk flag.
     fstream->trailing_chunk_complete = FALSE; // Reset trailing chunk completion flag.
@@ -1066,7 +1139,7 @@ void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager){
     memset(fstream->fn, 0, PATH_SIZE); // Clear the file name buffer by filling it with zeros.
     return;
 }
-
+// Clean up the message stream resources after a file transfer is completed or aborted.
 void message_cleanup_stream(MsgStream *mstream, ServerIOManager* io_manager){
 
     if(mstream == NULL){
@@ -1093,8 +1166,6 @@ void message_cleanup_stream(MsgStream *mstream, ServerIOManager* io_manager){
     return;
 
 }
-
-
 // Clean client resources
 void cleanup_client(Client *client, ServerIOManager* io_manager){
     
@@ -1149,6 +1220,30 @@ void cleanup_client(Client *client, ServerIOManager* io_manager){
     LeaveCriticalSection(&client->lock);
     return;
 }
+// Compare received hash with calculated hash
+BOOL validate_file_hash(FileStream *fstream){
+
+    fprintf(stdout, "File hash received: ");
+    for(int i = 0; i < 32; i++){
+        fprintf(stdout, "%02x", (uint8_t)fstream->received_sha256[i]);
+    }
+    fprintf(stdout, "\n");
+
+    fprintf(stdout, "File hash calculated: ");
+    for(int i = 0; i < 32; i++){
+        fprintf(stdout, "%02x", (uint8_t)fstream->calculated_sha256[i]);
+    }
+    fprintf(stdout, "\n");
+
+
+    for(int i = 0; i < 32; i++){
+        if((uint8_t)fstream->calculated_sha256[i] != (uint8_t)fstream->received_sha256[i]){
+            fprintf(stdout, "ERROR: SHA256 MISSMATCH\n");
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
 // Check for any open file streams across all clients.
 void check_open_file_stream(ClientList* client_list){
     for(int i = 0; i < MAX_CLIENTS; i++){
@@ -1194,3 +1289,11 @@ int main() {
     shutdown_server();
     return 0;
 }
+
+
+
+
+
+
+//int create_output_file(const char *buffer, const uint64_t size, const char *path);
+

@@ -18,7 +18,7 @@
 #include "include/server.h"
 
 // Handle file fragment helper functions
-static int file_match_fragment(Client *client, const uint32_t session_id, const uint32_t file_id){
+static int file_match_frame(Client *client, const uint32_t session_id, const uint32_t file_id){
     // Iterate through all possible file stream slots associated with this client.
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
         // Acquire the critical section lock for the current file stream slot.
@@ -149,15 +149,21 @@ static int file_stream_init(FileStream *fstream, const uint32_t session_id, cons
 
     // Initialize stream channel context data
     fstream->busy = TRUE;
-    fstream->file_complete = FALSE;
-    fstream->stream_err = 0;
 
+    fstream->file_hash_received = FALSE;
+    fstream->file_hash_calculated = FALSE;
+    fstream->file_hash_validated = FALSE;
+    fstream->file_complete = FALSE;
+
+    fstream->stream_err = STREAM_ERR_NONE;
     fstream->s_id = session_id;
     fstream->f_id = file_id;
     fstream->f_size = file_size;
     fstream->bytes_received = 0;
     fstream->bytes_written = 0;
-    memset(fstream->sha256, 0, 32);
+    fstream->chunks_hashed = 0;
+    memset(fstream->calculated_sha256, 0, 32);
+    sha256_init(&fstream->sha256_ctx);
 
     // Calculate total fragments
     fstream->fragment_count = (fstream->f_size + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
@@ -235,6 +241,8 @@ exit_error:
     return RET_VAL_ERROR;
 
 }
+
+
 
 // Process received file metadata frame
 int handle_file_metadata(Client *client, UdpFrame *frame, ServerIOManager* io_manager) {
@@ -363,7 +371,7 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_ma
         goto exit_error;
     }
 
-    int slot = file_match_fragment(client, recv_session_id, recv_file_id);
+    int slot = file_match_frame(client, recv_session_id, recv_file_id);
     if(slot == RET_VAL_ERROR){
         fprintf(stderr, "Received frame with unknown file ID: %u Session ID %u - missing metadata\n", recv_file_id, recv_session_id);
         // Register an ACK with `ERR_INVALID_FILE_ID` status, informing the sender of the issue.
@@ -420,6 +428,77 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_ma
     // Attach the received fragment's data to the appropriate location within the allocated memory chunk.
     // This function typically involves copying the fragment bytes and updating the fragment's status in the bitmap.
     file_attach_fragment_to_chunk(&client->file_stream[slot], frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size, io_manager);
+
+    // Register a general acknowledgment (ACK) to be sent back to the client,
+    // confirming successful receipt and processing of this file fragment.
+    // `queue_seq_num` is typically for data-related ACKs.
+    register_ack(&io_manager->queue_seq_num, client, frame, STS_ACK);
+
+    // Leave the critical section, releasing the client's lock.
+    // This must be done before returning from the function to prevent deadlocks.
+    LeaveCriticalSection(&client->lock);
+    // Return `RET_VAL_SUCCESS` to indicate that the file fragment was handled successfully.
+    return RET_VAL_SUCCESS;
+
+exit_error:
+    // This label serves as a common exit point for all error conditions within the function.
+    // It ensures that the critical section is always exited, regardless of where an error occurred,
+    // thereby preventing deadlocks and resource leaks.
+    LeaveCriticalSection(&client->lock);
+    // Return `RET_VAL_ERROR` to signal that an error occurred during the processing of the file fragment.
+    return RET_VAL_ERROR;
+}
+
+
+
+
+int handle_file_end(Client *client, UdpFrame *frame, ServerIOManager* io_manager){
+    // Check if the client context is NULL. This is a fundamental check, as all
+    // fragment handling logic depends on a valid client session.
+    if(client == NULL){
+        // Log an informational message indicating a frame was received for an unknown client.
+        fprintf(stdout, "Received frame for non existing client context!\n");
+        // Jump to the error handling block to release any potential resources and return.
+        goto exit_error;
+    }
+
+    // Enter a critical section to protect the `client` data structure.
+    EnterCriticalSection(&client->lock);
+
+    // Update the client's `last_activity_time`. This timestamp is used for
+    // session management and timeout detection, indicating recent communication.
+    client->last_activity_time = time(NULL);
+
+    // Extract necessary information from the UDP frame's header and payload.
+    // `_ntohl` and `_ntohll` convert values from network byte order to host byte order
+    // to ensure correct interpretation across different system architectures.
+    uint32_t recv_session_id = _ntohl(frame->header.session_id); // Session ID from frame header
+    uint32_t recv_file_id = _ntohl(frame->payload.file_fragment.file_id); // File ID from fragment payload
+
+    // Check if this file (identified by `recv_file_id` and `client->session_id`)
+    // has already been marked as `UID_RECV_COMPLETE` in the unique ID hash table.
+    // This prevents re-processing or re-acknowledging fragments for already completed transfers.
+    if(search_uid_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, recv_session_id, recv_file_id, UID_RECV_COMPLETE) == TRUE){
+        fprintf(stderr, "Received frame for completed file ID: %u Session ID %u - file end frame\n", recv_file_id, recv_session_id);
+        register_ack(&io_manager->queue_priority_seq_num, client, frame, STS_TRANSFER_COMPLETE);
+        // Jump to the error handling block to release the lock and exit.
+        goto exit_error;
+    }
+
+    int slot = file_match_frame(client, recv_session_id, recv_file_id);
+    if(slot == RET_VAL_ERROR){
+        fprintf(stderr, "Received frame with unknown file ID: %u Session ID %u - file end frame\n", recv_file_id, recv_session_id);
+        // Register an ACK with `ERR_INVALID_FILE_ID` status, informing the sender of the issue.
+        register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_INVALID_FILE_ID);
+        // Jump to the error handling block.
+        goto exit_error;
+    }
+
+    FileStream *fstream = &client->file_stream[slot];
+    for(int i = 0; i < 32; i++){   
+        fstream->received_sha256[i] = frame->payload.file_end.file_hash[i];
+    }    
+    fstream->file_hash_received = TRUE;
 
     // Register a general acknowledgment (ACK) to be sent back to the client,
     // confirming successful receipt and processing of this file fragment.
