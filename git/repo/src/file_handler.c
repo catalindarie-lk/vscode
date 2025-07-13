@@ -24,20 +24,20 @@ static int file_match_frame(Client *client, const uint32_t session_id, const uin
         // Acquire the critical section lock for the current file stream slot.
         // This prevents other threads from modifying or accessing this specific file stream's data
         // (like its busy status, session ID, or file ID) while this function is checking it.
-        EnterCriticalSection(&client->file_stream[i].lock);
+        EnterCriticalSection(&client->fstream[i].lock);
         // Check if the current file stream slot matches the incoming fragment:
         // 1. client->file_stream[i].busy == TRUE: Ensure the slot is currently active and in use for a transfer.
-        // 2. client->file_stream[i].s_id == session_id: Match the session ID from the incoming fragment.
+        // 2. client->file_stream[i].sid == session_id: Match the session ID from the incoming fragment.
         // 3. client->file_stream[i].fid == file_id: Match the file ID from the incoming fragment.
-        if(client->file_stream[i].busy == TRUE && client->file_stream[i].s_id == session_id && client->file_stream[i].f_id == file_id){
+        if(client->fstream[i].busy == TRUE && client->fstream[i].sid == session_id && client->fstream[i].fid == file_id){
             // If a matching file stream slot is found, release its lock.
-            LeaveCriticalSection(&client->file_stream[i].lock);
+            LeaveCriticalSection(&client->fstream[i].lock);
             // Return the index of the matching slot.
             return i;
         }
         // If the current file stream slot does not match the fragment, release its lock
         // before proceeding to check the next slot. This is crucial to avoid deadlocks.
-        LeaveCriticalSection(&client->file_stream[i].lock);
+        LeaveCriticalSection(&client->fstream[i].lock);
     }
     // If the loop completes without finding any file stream slot that matches the session_id and file_id,
     // it means no active transfer for this client corresponds to the incoming fragment.
@@ -46,12 +46,12 @@ static int file_match_frame(Client *client, const uint32_t session_id, const uin
 static int file_check_metadata(Client *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){
     // This function checks if a file stream with the given session_id and file_id already exists for the client. 
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){      
-        EnterCriticalSection(&client->file_stream[i].lock);       
-        if(client->file_stream[i].s_id == session_id && client->file_stream[i].f_id == file_id){          
-            LeaveCriticalSection(&client->file_stream[i].lock);          
+        EnterCriticalSection(&client->fstream[i].lock);       
+        if(client->fstream[i].sid == session_id && client->fstream[i].fid == file_id){          
+            LeaveCriticalSection(&client->fstream[i].lock);          
             return RET_VAL_ERROR;
         }      
-        LeaveCriticalSection(&client->file_stream[i].lock);
+        LeaveCriticalSection(&client->fstream[i].lock);
     }  
     return RET_VAL_SUCCESS; 
 }
@@ -61,22 +61,22 @@ static int file_get_available_stream_channel(Client *client){
     // MAX_CLIENT_FILE_STREAMS defines the maximum number of concurrent file transfers a single client can handle.
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
         // Acquire the critical section lock for the current file stream slot.
-        EnterCriticalSection(&client->file_stream[i].lock);
+        EnterCriticalSection(&client->fstream[i].lock);
         // Check if the current file stream slot is not busy.
         // A 'busy' status of FALSE indicates that this slot is currently free and available.
-        if(client->file_stream[i].busy == FALSE){
+        if(client->fstream[i].busy == FALSE){
             // If an available slot is found, immediately mark it as busy.
             // This claims the slot for the current operation and prevents other threads
             // from simultaneously claiming the same slot.
-            client->file_stream[i].busy = TRUE;
+            client->fstream[i].busy = TRUE;
             // Release the critical section lock for this file stream, as its state has been updated.
-            LeaveCriticalSection(&client->file_stream[i].lock);
+            LeaveCriticalSection(&client->fstream[i].lock);
             // Return the index of the newly claimed (and now busy) slot.
             return i;
         }
         // If the current file stream slot is busy, release its lock before checking the next slot.
         // It's important to release the lock for a busy slot so other threads can still access it.
-        LeaveCriticalSection(&client->file_stream[i].lock);
+        LeaveCriticalSection(&client->fstream[i].lock);
     }
     // If the loop completes without finding any available (non-busy) file stream slots,
     // it means all slots are currently in use.
@@ -124,12 +124,12 @@ static void file_attach_fragment_to_chunk(FileStream *fstream, char *fragment_bu
             //fprintf(stdout, "Receiving last chunk bytes: %llu\n", fstream->trailing_chunk_size);
         }
         // Check if all expected bytes for the entire file have been received.
-        if(fstream->bytes_received == fstream->f_size){
+        if(fstream->bytes_received == fstream->fsize){
             // If all bytes are received, mark the trailing chunk as complete.
             // This signals that the last chunk is fully assembled (even if partial in size).
             fstream->trailing_chunk_complete = TRUE;
 
-            update_uid_status_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, fstream->s_id, fstream->f_id, UID_RECV_COMPLETE);
+            update_uid_status_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, fstream->sid, fstream->fid, UID_RECV_COMPLETE);
             fprintf(stdout, "Received complete file: %s, Size: %llu, Last chunk size: %llu\n", fstream->fn, fstream->bytes_received, fstream->trailing_chunk_size);
         }
     }
@@ -156,9 +156,9 @@ static int file_stream_init(FileStream *fstream, const uint32_t session_id, cons
     fstream->file_complete = FALSE;
 
     fstream->stream_err = STREAM_ERR_NONE;
-    fstream->s_id = session_id;
-    fstream->f_id = file_id;
-    fstream->f_size = file_size;
+    fstream->sid = session_id;
+    fstream->fid = file_id;
+    fstream->fsize = file_size;
     fstream->bytes_received = 0;
     fstream->bytes_written = 0;
     fstream->chunks_hashed = 0;
@@ -166,7 +166,7 @@ static int file_stream_init(FileStream *fstream, const uint32_t session_id, cons
     sha256_init(&fstream->sha256_ctx);
 
     // Calculate total fragments
-    fstream->fragment_count = (fstream->f_size + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
+    fstream->fragment_count = (fstream->fsize + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
     //fprintf(stdout, "Fragments count: %llu\n", fstream->fragment_count);
 
     // Calculate number of 64-bit bitmap entries (chunks)
@@ -181,7 +181,7 @@ static int file_stream_init(FileStream *fstream, const uint32_t session_id, cons
     // 1. The total file size is not a perfect multiple of FILE_FRAGMENT_SIZE
     // OR
     // 2. The total number of fragments is not a perfect multiple of FRAGMENTS_PER_CHUNK (64)
-    fstream->trailing_chunk = ((fstream->f_size % FILE_FRAGMENT_SIZE) != 0) || (((fstream->f_size / FILE_FRAGMENT_SIZE) % 64ULL) != 0);
+    fstream->trailing_chunk = ((fstream->fsize % FILE_FRAGMENT_SIZE) != 0) || (((fstream->fsize / FILE_FRAGMENT_SIZE) % 64ULL) != 0);
 
     // Initialize trailing chunk status
     fstream->trailing_chunk_complete = FALSE;
@@ -230,6 +230,7 @@ static int file_stream_init(FileStream *fstream, const uint32_t session_id, cons
         goto exit_error;
     }
 
+    SetEvent(fstream->hevent_recv_file);
     // Success path
     LeaveCriticalSection(&fstream->lock);
     return RET_VAL_SUCCESS;
@@ -307,7 +308,7 @@ int handle_file_metadata(Client *client, UdpFrame *frame, ServerIOManager* io_ma
     // Initialize the file stream for the new incoming file transfer in the determined `slot`.
     // This function would typically handle opening a file on disk, setting up buffer management,
     // and initializing state for tracking received fragments.
-    if(file_stream_init(&client->file_stream[slot], recv_session_id, recv_file_id, recv_file_size, io_manager) == RET_VAL_ERROR){
+    if(file_stream_init(&client->fstream[slot], recv_session_id, recv_file_id, recv_file_size, io_manager) == RET_VAL_ERROR){
         // If file stream initialization fails, jump to the error handling block.
         goto exit_error;
     }
@@ -381,7 +382,7 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_ma
     }
 
     // Check if this specific fragment (identified by its offset) has already been received.
-    if(check_fragment_received(client->file_stream[slot].bitmap, recv_fragment_offset, FILE_FRAGMENT_SIZE)){
+    if(check_fragment_received(client->fstream[slot].bitmap, recv_fragment_offset, FILE_FRAGMENT_SIZE)){
         // If it's a duplicate, register an ACK with `ERR_DUPLICATE_FRAME` status.
         fprintf(stderr, "Received duplicate file fragment - Sesion ID: %u, File ID: %u, Offset: %llu\n", recv_session_id, recv_file_id, recv_fragment_offset);
         register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_DUPLICATE_FRAME);
@@ -390,22 +391,22 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_ma
 
     // Validate if the received fragment's offset is within the bounds of the expected file size.
     // A fragment starting beyond the file size indicates a malformed or erroneous frame.
-    if(recv_fragment_offset >= client->file_stream[slot].f_size){
+    if(recv_fragment_offset >= client->fstream[slot].fsize){
         // Register an ACK with `ERR_MALFORMED_FRAME` status.
         register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_MALFORMED_FRAME);
         // Log an error message providing details about the out-of-bounds offset.
-        fprintf(stderr, "Received fragment with offset out of limits. File size: %llu, Received offset: %llu\n", client->file_stream[slot].f_size, recv_fragment_offset);
+        fprintf(stderr, "Received fragment with offset out of limits. File size: %llu, Received offset: %llu\n", client->fstream[slot].fsize, recv_fragment_offset);
         // Jump to the error handling block.
         goto exit_error;
     }
     // Validate if the fragment, given its offset and size, extends beyond the file's total size.
     // This catches fragments that start within bounds but are too large for the remaining file.
-    if (recv_fragment_offset + recv_fragment_size > client->file_stream[slot].f_size){
+    if (recv_fragment_offset + recv_fragment_size > client->fstream[slot].fsize){
         // Register an ACK with `ERR_MALFORMED_FRAME` status.
         register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_MALFORMED_FRAME);
         // Log an error message indicating that the fragment extends past the file boundaries.
         fprintf(stderr, "Fragment extends past file bounds - file ID: %u, offset: %llu, fragment size: %u, file size: %llu\n",
-                recv_file_id, recv_fragment_offset, recv_fragment_size, client->file_stream[slot].f_size);
+                recv_file_id, recv_fragment_offset, recv_fragment_size, client->fstream[slot].fsize);
         // Jump to the error handling block.
         goto exit_error;
     }
@@ -415,11 +416,11 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_ma
     uint64_t entry_index = (recv_fragment_offset / FILE_FRAGMENT_SIZE) / 64ULL; // Assuming 64 fragments per bitmap entry
 
     // If the corresponding bitmap entry is 0, it means no memory chunk has been allocated for this section of the file yet.
-    if(client->file_stream[slot].bitmap[entry_index] == 0ULL){
+    if(client->fstream[slot].bitmap[entry_index] == 0ULL){
         // Allocate a new memory chunk from the `pool_file_chunk` memory pool.
-        client->file_stream[slot].pool_block_file_chunk[entry_index] = pool_alloc(&io_manager->pool_file_chunk);
+        client->fstream[slot].pool_block_file_chunk[entry_index] = pool_alloc(&io_manager->pool_file_chunk);
         // Check if the memory chunk allocation was successful.
-        if(client->file_stream[slot].pool_block_file_chunk[entry_index] == NULL){
+        if(client->fstream[slot].pool_block_file_chunk[entry_index] == NULL){
             fprintf(stderr, "Error allocating memory chunk for file ID: %u, offset: %llu\n", recv_file_id, recv_fragment_offset);
             goto exit_error;
         }
@@ -427,7 +428,7 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_ma
 
     // Attach the received fragment's data to the appropriate location within the allocated memory chunk.
     // This function typically involves copying the fragment bytes and updating the fragment's status in the bitmap.
-    file_attach_fragment_to_chunk(&client->file_stream[slot], frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size, io_manager);
+    file_attach_fragment_to_chunk(&client->fstream[slot], frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size, io_manager);
 
     // Register a general acknowledgment (ACK) to be sent back to the client,
     // confirming successful receipt and processing of this file fragment.
@@ -448,10 +449,7 @@ exit_error:
     // Return `RET_VAL_ERROR` to signal that an error occurred during the processing of the file fragment.
     return RET_VAL_ERROR;
 }
-
-
-
-
+// Process received file end frame
 int handle_file_end(Client *client, UdpFrame *frame, ServerIOManager* io_manager){
     // Check if the client context is NULL. This is a fundamental check, as all
     // fragment handling logic depends on a valid client session.
@@ -494,7 +492,7 @@ int handle_file_end(Client *client, UdpFrame *frame, ServerIOManager* io_manager
         goto exit_error;
     }
 
-    FileStream *fstream = &client->file_stream[slot];
+    FileStream *fstream = &client->fstream[slot];
     for(int i = 0; i < 32; i++){   
         fstream->received_sha256[i] = frame->payload.file_end.file_hash[i];
     }    

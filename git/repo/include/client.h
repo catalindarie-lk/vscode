@@ -8,6 +8,7 @@
 #include "include/queue.h"
 #include "include/mem_pool.h"
 #include "include/hash.h"
+#include "sha256.h"
 
 #ifndef RET_VAL_SUCCESS
 #define RET_VAL_SUCCESS 0
@@ -95,6 +96,38 @@ typedef struct{
 }FileHash;
 
 typedef struct{
+
+    FILE *fp;
+    char *fpath;
+    char *fname;
+    long long file_size;
+    uint32_t file_id;
+    uint64_t remaining_bytes_to_send;
+
+    uint64_t pending_metadata_seq_num;  
+    uint8_t chunk_buffer[FILE_CHUNK_SIZE];
+    uint32_t chunk_bytes_to_send;
+    uint32_t chunk_fragment_offset;
+    uint32_t frame_fragment_size;
+    uint64_t frame_fragment_offset;
+    BOOL throttle;
+
+    SHA256_CTX sha256_ctx;
+    FileHash file_hash;
+
+    HANDLE hevent_start_file_transfer;
+    HANDLE hevent_stop_file_transfer;
+    HANDLE hevent_file_metadata;
+    HANDLE hthread_file_transfer;
+
+}FileStream;
+
+typedef struct{
+    uint32_t message_len;
+    uint32_t message_bytes_to_send;
+}MessageStream;
+
+typedef struct{
     SOCKET socket;
     struct sockaddr_in client_addr;
     struct sockaddr_in server_addr;
@@ -114,18 +147,8 @@ typedef struct{
     uint32_t session_timeout;   // timeout received from the server; to be used to send KEEP_ALIVE frames
     char server_name[NAME_SIZE];       // Human readable server name
     
-    //uint32_t file_id_count;  
-    uint64_t file_size[MAX_CLIENT_FILE_STREAMS];
-    uint64_t file_bytes_to_send[MAX_CLIENT_FILE_STREAMS];
-    uint64_t pending_metadata_seq_num[MAX_CLIENT_FILE_STREAMS]; // seq num of the file metadata frame sent to the server, waiting for ACK
-    FileHash file_hash[MAX_CLIENT_FILE_STREAMS];
-
-    //uint32_t message_id_count;
-    long message_len[MAX_CLIENT_MESSAGE_STREAMS];
-    uint32_t message_bytes_to_send[MAX_CLIENT_MESSAGE_STREAMS];
-
- 
-    BOOL file_throttle;
+    FileStream fstream[MAX_CLIENT_FILE_STREAMS];
+    MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
 
     char log_path[PATH_SIZE];
  
@@ -139,6 +162,6 @@ typedef struct {
 
 
 
-uint64_t get_new_seq_num();
+uint64_t get_new_seq_num(); 
 
 #endif

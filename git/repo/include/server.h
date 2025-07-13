@@ -125,9 +125,9 @@ typedef struct {
     uint8_t stream_err;                 // Stores an error code if something goes wrong with the stream.
     char *buffer;                       // Pointer to the buffer holding the message data.
     uint64_t *bitmap;                   // Pointer to a bitmap used for tracking received fragments. Each bit represents a fragment.
-    uint32_t s_id;                      // Sender ID: Unique identifier for the sender of the message.
-    uint32_t m_id;                      // Message ID: Unique identifier for the message itself.
-    uint32_t m_len;                     // Message Length: Total expected length of the complete message in bytes.
+    uint32_t sid;                      // Sender ID: Unique identifier for the sender of the message.
+    uint32_t mid;                      // Message ID: Unique identifier for the message itself.
+    uint32_t mlen;                     // Message Length: Total expected length of the complete message in bytes.
     uint32_t chars_received;            // Characters Received: Current number of characters (bytes) received so far for this message.
     uint64_t fragment_count;            // Fragment Count: Total number of expected fragments for the complete message.
     uint64_t bitmap_entries_count;      // Bitmap Entries Count: The number of uint64_t entries in the bitmap array.
@@ -138,6 +138,10 @@ typedef struct {
 } MsgStream;
 
 typedef struct{
+
+    int client_index;
+    int fstream_index;
+
     BOOL busy;                          // Indicates if this stream channel is currently in use for a transfer.
     BOOL file_complete;                 // True if the entire file has been received and written.
     uint8_t stream_err;                 // Stores an error code if something goes wrong with the stream.
@@ -148,9 +152,9 @@ typedef struct{
                                         // (e.g., 0b10000000 for last partial, 0b00000001 for written, etc.)
     char** pool_block_file_chunk;             // Pointer to an array of char pointers, where each char* points to a
                                         // memory block holding a complete chunk of data (64 fragments).
-    uint32_t s_id;                       // Session ID associated with this file stream.
-    uint32_t f_id;                       // File ID, unique identifier for the file associated with this file stream.
-    uint64_t f_size;                     // Total size of the file being transferred.
+    uint32_t sid;                       // Session ID associated with this file stream.
+    uint32_t fid;                       // File ID, unique identifier for the file associated with this file stream.
+    uint64_t fsize;                     // Total size of the file being transferred.
     uint64_t fragment_count;            // Total number of fragments in the entire file.
     uint64_t bytes_received;            // Total bytes received for this file so far.
     uint64_t bytes_written;             // Total bytes written to disk for this file so far.
@@ -175,6 +179,11 @@ typedef struct{
     FILE *fp;                           // File pointer for the file being written to disk.
 
     CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
+
+    HANDLE hevent_recv_file;
+    HANDLE hevent_client_disconnect;
+    HANDLE htread_recv_file;
+
 }FileStream;
 
 typedef struct {  
@@ -182,19 +191,19 @@ typedef struct {
     char ip[INET_ADDRSTRLEN];
     uint16_t port;
     
-    uint32_t client_id;                 // Unique ID received from the client
+    uint32_t cid;                 // Unique ID received from the client
     char name[NAME_SIZE];               // Optional: human-readable identifier received from the client
-    uint8_t flag;                       // Flags received from the client (e.g., protocol version, capabilities)
+    uint8_t flags;                       // Flags received from the client (e.g., protocol version, capabilities)
     uint8_t connection_status;
  
-    uint32_t session_id;                // Unique ID assigned by the server for this clients's session
+    uint32_t sid;                // Unique ID assigned by the server for this clients's session
     volatile time_t last_activity_time; // Last time the client sent a frame (for timeout checks)             
 
-    uint32_t slot_num;                  // Index of the slot the client is connected to [0..MAX_CLIENTS-1]
-    uint8_t slot_status;                // 0->FREE; 1->BUSY
+    uint32_t client_index;                  // Index of the slot the client is connected to [0..MAX_CLIENTS-1]
+    uint8_t status_index;                // 0->FREE; 1->BUSY
  
-    MsgStream msg_stream[MAX_CLIENT_MESSAGE_STREAMS];
-    FileStream file_stream[MAX_CLIENT_FILE_STREAMS];
+    MsgStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
+    FileStream fstream[MAX_CLIENT_FILE_STREAMS];
      
     Statistics statistics;
 
@@ -207,6 +216,6 @@ typedef struct{
     CRITICAL_SECTION lock;              // For thread-safe access to connected_clients
 }ClientList;
 
-
-#endif // SERVER_H
+ 
+#endif
 // End of file: server.h

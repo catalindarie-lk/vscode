@@ -35,7 +35,9 @@ HANDLE hthread_client_timeout;
 HANDLE hthread_file_stream_io;
 HANDLE hthread_server_command;
 
-const char *server_ip = "127.0.0.1"; // IPv4 example
+const char *server_ip = "10.10.10.1"; // IPv4 example
+
+int event_cnt = 0;
 
 // Client management functions
 static Client* find_client(ClientList *client_list, const uint32_t session_id);
@@ -56,9 +58,9 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_process_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_ack_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam);
-DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam);
+DWORD WINAPI thread_proc_file_stream_polling(LPVOID lpParam);
+DWORD WINAPI thread_proc_file_stream(LPVOID lpParam);
 DWORD WINAPI thread_proc_server_command(LPVOID lpParam);
-
 
 static void get_network_config(){
     DWORD bufferSize = 0;
@@ -85,7 +87,6 @@ static void get_network_config(){
     free(adapterAddresses);
     return;
 }
-
 
 static int init_server_session(){
 
@@ -144,8 +145,10 @@ static int init_server_buffers(){
     for(int i = 0; i < MAX_CLIENTS; i++){
         InitializeCriticalSection(&client_list.client[i].lock);
         for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
-            InitializeCriticalSection(&client_list.client[i].file_stream[j].lock);
-            InitializeCriticalSection(&client_list.client[i].msg_stream[j].lock);
+            InitializeCriticalSection(&client_list.client[i].fstream[j].lock);
+        }
+        for(int j = 0; j < MAX_CLIENT_MESSAGE_STREAMS; j++){
+            InitializeCriticalSection(&client_list.client[i].mstream[j].lock);
         }
     }
     InitializeCriticalSection(&client_list.lock);
@@ -188,11 +191,11 @@ static int start_threads() {
         return RET_VAL_ERROR;
     }
 
-    hthread_file_stream_io = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_stream_io, &client_list, 0, NULL);
-    if (hthread_file_stream_io == NULL) {
-        fprintf(stderr, "Failed to file stream io thread. Error: %d\n", GetLastError());
-        return RET_VAL_ERROR;
-    }
+    // hthread_file_stream_io = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_stream_io, &client_list, 0, NULL);
+    // if (hthread_file_stream_io == NULL) {
+    //     fprintf(stderr, "Failed to file stream io thread. Error: %d\n", GetLastError());
+    //     return RET_VAL_ERROR;
+    // }
 
     hthread_server_command = (HANDLE)_beginthreadex(NULL, 0, thread_proc_server_command, NULL, 0, NULL);
     if (hthread_server_command == NULL) {
@@ -251,8 +254,10 @@ static void shutdown_server() {
     for(int i = 0; i < MAX_CLIENTS; i++){
         DeleteCriticalSection(&client_list.client[i].lock);
         for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
-            DeleteCriticalSection(&client_list.client[i].file_stream[j].lock);
-            DeleteCriticalSection(&client_list.client[i].msg_stream[j].lock);
+            DeleteCriticalSection(&client_list.client[i].fstream[j].lock);
+        }
+        for(int j = 0; j < MAX_CLIENT_MESSAGE_STREAMS; j++){
+            DeleteCriticalSection(&client_list.client[i].mstream[j].lock);
         }
     }
     DeleteCriticalSection(&client_list.lock);
@@ -265,7 +270,6 @@ static void shutdown_server() {
     WSACleanup();
     printf("Server shut down!\n");
 }
-
 
 // Find client by session ID
 static Client* find_client(ClientList *client_list, const uint32_t session_id) {
@@ -280,14 +284,14 @@ static Client* find_client(ClientList *client_list, const uint32_t session_id) {
 
         // Check if the current client slot is marked as SLOT_FREE.
         // A free slot indicates no active client, so it cannot be the one we are searching for.
-        if(client_list->client[slot].slot_status == SLOT_FREE){
+        if(client_list->client[slot].status_index == SLOT_FREE){
             // If the slot is free, release its lock before moving to the next slot.
             LeaveCriticalSection(&client_list->client[slot].lock);
             LeaveCriticalSection(&client_list->lock);
             continue; // Move to the next slot in the loop.
         }
         // If the slot is not free, compare its stored session ID with the target session_id.
-        if(client_list->client[slot].session_id == session_id){
+        if(client_list->client[slot].sid == session_id){
             // If a client with a matching session ID is found, release its lock.
             LeaveCriticalSection(&client_list->client[slot].lock);
             LeaveCriticalSection(&client_list->lock);
@@ -310,7 +314,7 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
     // Loop through the client list to find the first available (free) slot.
     EnterCriticalSection(&client_list->lock);
     while(free_slot < MAX_CLIENTS){ // Continues as long as the current slot index is within the maximum allowed clients.
-        if(client_list->client[free_slot].slot_status == SLOT_FREE) { // Checks if the current slot is marked as free.
+        if(client_list->client[free_slot].status_index == SLOT_FREE) { // Checks if the current slot is marked as free.
             break; // If a free slot is found, exit the loop.
         }
         free_slot++; // Move to the next slot if the current one is busy.
@@ -327,19 +331,19 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
     // This lock ensures that the client's data is initialized safely without race conditions.
     EnterCriticalSection(&new_client->lock);
 
-    new_client->slot_num = free_slot; // Assigns the found slot number to the new client's data structure.
-    new_client->slot_status = SLOT_BUSY; // Marks the slot as busy, indicating it's now in use.
+    new_client->client_index = free_slot; // Assigns the found slot number to the new client's data structure.
+    new_client->status_index = SLOT_BUSY; // Marks the slot as busy, indicating it's now in use.
     // Copies the client's network address information (IP and port) from 'client_addr' to the new client's structure.
     memcpy(&new_client->addr, client_addr, sizeof(struct sockaddr_in));
     new_client->connection_status = CLIENT_CONNECTED; // Sets the connection status to 'CLIENT_CONNECTED'.
     new_client->last_activity_time = time(NULL); // Records the current time as the last activity time for the new client.
 
     // Extracts the client ID from the received frame's payload, converting it from network byte order.
-    new_client->client_id = _ntohl(recv_frame->payload.request.client_id); 
+    new_client->cid = _ntohl(recv_frame->payload.request.client_id); 
     // Assigns a unique session ID to the new client by atomically incrementing a global counter.
-    new_client->session_id = InterlockedIncrement(&server.session_id_counter); 
+    new_client->sid = InterlockedIncrement(&server.session_id_counter); 
     // Copies the flag from the received frame's request payload to the new client's data.
-    new_client->flag = recv_frame->payload.request.flag;
+    new_client->flags = recv_frame->payload.request.flag;
     
     // Formats and copies the client's name from the received frame's payload into the new client's structure.
     // 'snprintf' is used for safe string copying, preventing buffer overflows.
@@ -350,8 +354,17 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
     // Converts the client's port number from network byte order to host byte order.
     new_client->port = _ntohs(client_addr->sin_port);
 
+
+    for(int index = 0; index < MAX_CLIENT_FILE_STREAMS; index++){
+        new_client->fstream[index].client_index = free_slot;
+        new_client->fstream[index].fstream_index = index;
+        new_client->fstream[index].hevent_recv_file = CreateEvent(NULL, TRUE, FALSE, NULL);
+        new_client->fstream[index].hevent_client_disconnect = CreateEvent(NULL, TRUE, FALSE, NULL);
+        new_client->fstream[index].htread_recv_file = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_stream, (LPVOID)&new_client->fstream[index], 0, NULL);
+    }
+
     // Prints a log message to standard output, announcing the addition of a new client with their IP, port, and assigned session ID.
-    fprintf(stdout, "\n[ADDING NEW CLIENT] %s:%d Session ID:%d\n", new_client->ip, new_client->port, new_client->session_id);
+    fprintf(stdout, "\n[ADDING NEW CLIENT] %s:%d Session ID:%d\n", new_client->ip, new_client->port, new_client->sid);
 
     // Leaves the critical section, releasing the lock on the 'new_client' data structure.
     // This makes the newly initialized client data accessible to other threads.
@@ -372,7 +385,7 @@ static int remove_client(ClientList *client_list, ServerIOManager* io_manager, c
         fprintf(stderr, "\nInvalid client slot nr:  %d", slot); // Prints an error message if the slot number is out of bounds.
         return RET_VAL_ERROR;
     }
-    fprintf(stdout, "\nRemoving client with session ID: %d from slot %d\n", client_list->client[slot].session_id, client_list->client[slot].slot_num);
+    fprintf(stdout, "\nRemoving client with session ID: %d from slot %d\n", client_list->client[slot].sid, client_list->client[slot].client_index);
     // Enters a critical section associated with the specific client slot.    
     EnterCriticalSection(&client_list->lock);  
     // Calls a helper function to perform cleanup operations for the client in the specified slot.
@@ -400,7 +413,6 @@ int create_output_file(const char *buffer, const uint64_t size, const char *path
     return RET_VAL_SUCCESS;
 }
 
-
 // update file transfer progress and speed in MBs
 void update_statistics(Client * client){
 
@@ -410,7 +422,7 @@ void update_statistics(Client * client){
     client->statistics.crt_uli.HighPart = client->statistics.ft.dwHighDateTime;
     client->statistics.crt_microseconds = client->statistics.crt_uli.QuadPart / 10;
 
-    client->statistics.crt_bytes_received = (float)client->file_stream[0].bytes_received;
+    client->statistics.crt_bytes_received = (float)client->fstream[0].bytes_received;
 
     //TRANSFER SPEED
     //current speed (1 cycle)
@@ -418,7 +430,7 @@ void update_statistics(Client * client){
     client->statistics.prev_bytes_received = client->statistics.crt_bytes_received;
     client->statistics.prev_microseconds = client->statistics.crt_microseconds;
     //PROGRESS - update file transfer progress percentage
-    client->statistics.file_transfer_progress = (float)client->file_stream[0].bytes_received / (float)client->file_stream[0].f_size * 100.0;
+    client->statistics.file_transfer_progress = (float)client->fstream[0].bytes_received / (float)client->fstream[0].fsize * 100.0;
 
     fprintf(stdout, "\rFile transfer progress: %.2f %% - Speed: %.2f MB/s", client->statistics.file_transfer_progress, client->statistics.file_transfer_speed);
     fflush(stdout);
@@ -577,10 +589,10 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 EnterCriticalSection(&client->lock);
                 client->last_activity_time = time(NULL); // Update the client's last activity timestamp to prevent timeout.
                 // Log that the client is already connected.
-                fprintf(stdout, "Client %s:%d (Session ID: %d) already connected. Responding to re-connect request.\n", client->ip, src_port, client->session_id);
+                fprintf(stdout, "Client %s:%d (Session ID: %d) already connected. Responding to re-connect request.\n", client->ip, src_port, client->sid);
                 // Send a connection response back to the client. The client's address (client->addr) is accessed here.
                 send_connect_response(header_seq_num, 
-                                        client->session_id, 
+                                        client->sid, 
                                         server.session_timeout, 
                                         server.server_status, 
                                         server.name, 
@@ -613,8 +625,8 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 // If no client is found for a non-connect frame, it indicates an unexpected frame.
                 // This could be from a client that disconnected, an old frame, or potentially a malicious one.
                 // Log and ignore such frames.
-                fprintf(stdout, "Received frame (type: %u, seq: %llu) from unknown/disconnected client %s:%d. Ignoring...\n",
-                        header_frame_type, header_seq_num, src_ip, src_port);
+                // fprintf(stdout, "Received frame (type: %u, seq: %llu) from unknown/disconnected client %s:%d. Ignoring...\n",
+                //         header_frame_type, header_seq_num, src_ip, src_port);
                 continue; // Discard this frame and move to the next.
             }
         }
@@ -626,8 +638,9 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
             case FRAME_TYPE_CONNECT_REQUEST:
                 EnterCriticalSection(&client->lock);
                 client->last_activity_time = time(NULL);
+                fprintf(stdout, "Client %s:%d Requested connection. Responding to re-connect request with Session ID: %u\n", client->ip, src_port, client->sid);
                 send_connect_response(header_seq_num, 
-                                        client->session_id, 
+                                        client->sid, 
                                         server.session_timeout, 
                                         server.server_status, 
                                         server.name, 
@@ -657,18 +670,18 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 break;
 
             case FRAME_TYPE_FILE_METADATA:
-                fprintf(stdout, "\n   FRAME_TYPE_FILE_METADATA\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File Name: %s\n   File sha256: ", 
-                                                    _ntohll(frame->header.seq_num), 
-                                                    _ntohl(frame->header.session_id), 
-                                                    _ntohl(frame->header.checksum),
-                                                    _ntohl(frame->payload.file_metadata.file_id),
-                                                    _ntohll(frame->payload.file_metadata.file_size),    
-                                                    frame->payload.file_metadata.filename                
-                );
-                for(int i = 0; i < 32; i++){
-                    fprintf(stdout, "%02x", (unsigned char)frame->payload.file_metadata.file_hash[i]);
-                }
-                fprintf(stdout,"\n");
+                // fprintf(stdout, "\n   FRAME_TYPE_FILE_METADATA\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File Name: %s\n   File sha256: ", 
+                //                                     _ntohll(frame->header.seq_num), 
+                //                                     _ntohl(frame->header.session_id), 
+                //                                     _ntohl(frame->header.checksum),
+                //                                     _ntohl(frame->payload.file_metadata.file_id),
+                //                                     _ntohll(frame->payload.file_metadata.file_size),    
+                //                                     frame->payload.file_metadata.filename                
+                // );
+                // for(int i = 0; i < 32; i++){
+                //     fprintf(stdout, "%02x", (unsigned char)frame->payload.file_metadata.file_hash[i]);
+                // }
+                // fprintf(stdout,"\n");
                 handle_file_metadata(client, frame, &io_manager);
                 break;
 
@@ -677,17 +690,17 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 break;
 
             case FRAME_TYPE_FILE_END:
-                fprintf(stdout, "\n   FRAME_TYPE_FILE_END\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File sha256: ", 
-                                                    _ntohll(frame->header.seq_num), 
-                                                    _ntohl(frame->header.session_id), 
-                                                    _ntohl(frame->header.checksum),
-                                                    _ntohl(frame->payload.file_end.file_id),
-                                                    _ntohll(frame->payload.file_end.file_size)         
-                );
-                for(int i = 0; i < 32; i++){
-                    fprintf(stdout, "%02x", (unsigned char)frame->payload.file_end.file_hash[i]);
-                }
-                fprintf(stdout,"\n");
+                // fprintf(stdout, "\n   FRAME_TYPE_FILE_END\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File sha256: ", 
+                //                                     _ntohll(frame->header.seq_num), 
+                //                                     _ntohl(frame->header.session_id), 
+                //                                     _ntohl(frame->header.checksum),
+                //                                     _ntohl(frame->payload.file_end.file_id),
+                //                                     _ntohll(frame->payload.file_end.file_size)         
+                // );
+                // for(int i = 0; i < 32; i++){
+                //     fprintf(stdout, "%02x", (unsigned char)frame->payload.file_end.file_hash[i]);
+                // }
+                // fprintf(stdout,"\n");
                 handle_file_end(client, frame, &io_manager);
                 break;
 
@@ -696,8 +709,8 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 break;
 
             case FRAME_TYPE_DISCONNECT:
-                fprintf(stdout, "Client %s:%d with session ID: %d requested disconnect...\n", client->ip, src_port, client->session_id);
-                remove_client(&client_list, &io_manager, client->slot_num);
+                fprintf(stdout, "Client %s:%d with session ID: %d requested disconnect...\n", client->ip, src_port, client->sid);
+                remove_client(&client_list, &io_manager, client->client_index);
                 break;
 
             default:
@@ -761,7 +774,7 @@ DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
 
             // Check if the current client slot is marked as SLOT_FREE.
             // If a slot is free, it means there's no active client in it, so no timeout check is needed.
-            if(lp_client_list->client[slot].slot_status == SLOT_FREE){
+            if(lp_client_list->client[slot].status_index == SLOT_FREE){
                 LeaveCriticalSection(&lp_client_list->client[slot].lock);
                 continue; // Skip to the next client slot.
             }
@@ -777,11 +790,11 @@ DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
             // If the code reaches this point, it means the client in the current slot has timed out.
             LeaveCriticalSection(&lp_client_list->client[slot].lock);
 
-            fprintf(stdout, "\nClient with Session ID: %d disconnected due to timeout\n", lp_client_list->client[slot].session_id);
+            fprintf(stdout, "\nClient with Session ID: %d disconnected due to timeout\n", lp_client_list->client[slot].sid);
 
             // Send a disconnect control message to the timed-out client's address.
             // This is a best-effort attempt to inform the client that it has been disconnected by the server.
-            send_disconnect(lp_client_list->client[slot].session_id, server.socket, &lp_client_list->client[slot].addr);
+            send_disconnect(lp_client_list->client[slot].sid, server.socket, &lp_client_list->client[slot].addr);
 
             // Call the `remove_client` function to clean up all resources associated with this client slot
             // and mark the slot as free. This function is expected to be thread-safe in its own implementation.
@@ -798,8 +811,8 @@ DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
     _endthreadex(0);
     return 0; // Return 0 to indicate that the thread terminated successfully.
 }
-// --- Thread for writing file streams to disk ---
-DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
+// --- (NOT USED) Thread for writing file streams to disk ---
+DWORD WINAPI thread_proc_file_stream_polling(LPVOID lpParam) {
 
     ClientList *client_list = (ClientList*)lpParam; // Cast the parameter to ClientList.
 
@@ -821,21 +834,16 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                 // Iterate through all possible file stream slots for the current client.
                 for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
                     
-                    FileStream *fstream = &client->file_stream[j];
+                    FileStream *fstream = &client->fstream[j];
                     
-                    //FileStream *fstream = &client_list.client[i].file_stream[j];
                     // Acquire the critical section lock for the current file stream.
-                    // This protects the file stream's state (bitmap, flags, counters, etc.)
-                    // from concurrent access by other threads (e.g., data reception thread).
                     EnterCriticalSection(&fstream->lock);
 
                     // Check if the file stream is currently active/busy with a transfer.
-                    
                     if(fstream->busy){
                         // Iterate through all bitmap entries (chunks) for the current file stream.
                         for(long long k = 0; k < fstream->bitmap_entries_count; k++){
 
-                            // --- CONSOLIDATED FILE WRITING LOGIC ---
                             // Calculate the absolute file offset where this chunk should be written.
                             uint64_t file_offset = k * FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK; // Use constant
                             // Get the memory buffer associated with this chunk.
@@ -857,7 +865,6 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             } else if(fstream->bitmap[k] == ~0ULL && (fstream->flag[k] == CHUNK_BODY)) {
                                 buffer_size = FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK; // Full chunk size.
                             }
-                            //new_flag_value = CHUNK_WRITTEN;
                             // Case 3: This chunk is neither a ready trailing chunk nor a complete, unwritten full chunk.
                             // It means this chunk either:
                             //   - Has not received all its data yet.
@@ -870,7 +877,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             // --- FILE WRITE OPERATIONS ---
                             // Check if the file pointer is valid. If NULL, something went wrong during file opening.
                             if (fstream->fp == NULL) {
-                                fprintf(stderr, "Error: FILE pointer is null for chunk %llu. Session ID: %u, File ID: %u\n", k, fstream->s_id, fstream->f_id);
+                                fprintf(stderr, "Error: FILE pointer is null for chunk %llu. Session ID: %u, File ID: %u\n", k, fstream->sid, fstream->fid);
                                 fstream->stream_err = STREAM_ERR_FP; // Set a specific error code.
                                 file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream due to the error.
                                 break; // Exit the 'k' loop (current file's chunks) and move to the next file stream.
@@ -878,7 +885,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
 
                             // Attempt to seek to the correct offset in the file.
                             if (_fseeki64(fstream->fp, file_offset, SEEK_SET) != 0) {
-                                fprintf(stderr, "Error: Failed to seek to offset %llu for chunk %llu. Session ID: %u, File ID: %u\n", file_offset, k, fstream->s_id, fstream->f_id);
+                                fprintf(stderr, "Error: Failed to seek to offset %llu for chunk %llu. Session ID: %u, File ID: %u\n", file_offset, k, fstream->sid, fstream->fid);
                                 fstream->stream_err = STREAM_ERR_FSEEK; // Set a specific error code.
                                 file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
                                 break; // Exit the 'k' loop.
@@ -888,7 +895,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             size_t written = fwrite(buffer, 1, buffer_size, fstream->fp);
                             // Check if the number of bytes written matches the expected buffer size.
                             if (written != buffer_size) {
-                                fprintf(stderr, "Error: Failed to write data (expected %llu, wrote %llu) for chunk %llu. Session ID: %u, File ID: %u\n", buffer_size, written, k, fstream->s_id, fstream->f_id);
+                                fprintf(stderr, "Error: Failed to write data (expected %llu, wrote %llu) for chunk %llu. Session ID: %u, File ID: %u\n", buffer_size, written, k, fstream->sid, fstream->fid);
                                 fstream->stream_err = STREAM_ERR_FWRITE; // Set a specific error code.
                                 file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
                                 break; // Exit the 'k' loop.
@@ -903,9 +910,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                             fstream->pool_block_file_chunk[k] = NULL;
 
 
-                        } //end of looping through BITMAP ENTRIES
-
-
+                        }
 
                         for(long long l = 0; l < fstream->bitmap_entries_count; l++){
                             BOOL is_chunk_body = (fstream->flag[l] & CHUNK_BODY) == CHUNK_BODY;
@@ -929,7 +934,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
 
                                 // Attempt to seek to the correct offset in the file.
                                 if (_fseeki64(fstream->fp, file_offset, SEEK_SET) != 0) {
-                                    fprintf(stderr, "Error: Failed to seek to offset %llu for chunk %llu. Session ID: %u, File ID: %u\n", file_offset, l, fstream->s_id, fstream->f_id);
+                                    fprintf(stderr, "Error: Failed to seek to offset %llu for chunk %llu. Session ID: %u, File ID: %u\n", file_offset, l, fstream->sid, fstream->fid);
                                     fstream->stream_err = STREAM_ERR_FSEEK; // Set a specific error code.
                                     file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
                                     break; // Exit the 'k' loop.
@@ -940,7 +945,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                                 size_t chunk_bytes_read = fread(chunk_buffer, 1, sizeof(chunk_buffer), fstream->fp);
                                 
                                 if (chunk_bytes_read <= 0) {
-                                    fprintf(stderr, "Error: Failed to read data from file for chunk offset %llu. Session ID: %u, File ID: %u\n", file_offset, fstream->s_id, fstream->f_id);
+                                    fprintf(stderr, "Error: Failed to read data from file for chunk offset %llu. Session ID: %u, File ID: %u\n", file_offset, fstream->sid, fstream->fid);
                                     fstream->stream_err = STREAM_ERR_FREAD; // Set a specific error code.
                                     file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
                                     break; // Exit the 'k' loop.
@@ -956,8 +961,8 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                         // After attempting to write all available chunks for this file stream:
                         // Check if the total bytes received equals the total file size AND
                         // if the total bytes written to disk also equals the total file size.
-                        if((fstream->bytes_received == fstream->f_size) && 
-                                (fstream->bytes_written == fstream->f_size) &&
+                        if((fstream->bytes_received == fstream->fsize) && 
+                                (fstream->bytes_written == fstream->fsize) &&
                                 (fstream->chunks_hashed == fstream->bitmap_entries_count) &&
                                 !fstream->file_hash_calculated){
                             sha256_final(&fstream->sha256_ctx, (uint8_t *)&fstream->calculated_sha256);
@@ -967,12 +972,12 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                         if(fstream->file_hash_calculated && fstream->file_hash_received && !fstream->file_hash_validated){
                             fstream->file_hash_validated = validate_file_hash(fstream);
                             if(!fstream->file_hash_validated){
-                                file_cleanup_stream(fstream, &io_manager); // Perform final cleanup for the completed file stream.
+                                file_cleanup_stream(fstream, &io_manager);
                             }                                                    
                         }
 
-                        fstream->file_complete = ((fstream->bytes_received == fstream->f_size) && 
-                                                    (fstream->bytes_written == fstream->f_size) &&
+                        fstream->file_complete = ((fstream->bytes_received == fstream->fsize) && 
+                                                    (fstream->bytes_written == fstream->fsize) &&
                                                     fstream->file_hash_calculated &&
                                                     fstream->file_hash_validated &&
                                                     !fstream->file_complete
@@ -981,7 +986,7 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
                         // If the file is now completely received and written:
                         if(fstream->file_complete){           
                             // Update the status in the UID hash table (if used for tracking file transfer status).
-                            update_uid_status_hash_table(io_manager.uid_hash_table, &io_manager.uid_ht_mutex, fstream->s_id, fstream->f_id, UID_RECV_COMPLETE);
+                            update_uid_status_hash_table(io_manager.uid_hash_table, &io_manager.uid_ht_mutex, fstream->sid, fstream->fid, UID_RECV_COMPLETE);
                             fprintf(stdout, "File '%s' received written to disk and validated", fstream->fn);
                             file_cleanup_stream(fstream, &io_manager); // Perform final cleanup for the completed file stream.
                         }
@@ -995,10 +1000,182 @@ DWORD WINAPI thread_proc_file_stream_io(LPVOID lpParam) {
             LeaveCriticalSection(&client->lock);
         } // END of looping through CLIENTS
         LeaveCriticalSection(&client_list->lock);
-        Sleep(100); // Pause execution for 100 milliseconds to avoid busy-waiting and reduce CPU usage.
+        Sleep(10); // Pause execution for 100 milliseconds to avoid busy-waiting and reduce CPU usage.
                     // Consider event-based signaling (e.g., condition variables) for more efficient
                     // and responsive operation in high-performance scenarios.
     }
+    _endthreadex(0); // Properly exit the thread, returning its control to the system.
+    return 0; // Return 0 indicating successful thread termination.
+}
+// --- Thread for writing file streams to disk ---
+DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
+ 
+    FileStream *fstream = (FileStream*)lpParam;
+    HANDLE events[2] = {fstream->hevent_recv_file, fstream->hevent_client_disconnect};
+
+    while (server.server_status == SERVER_STATUS_READY) { 
+        // Wait for file transfer event or client disconnect
+        DWORD result = WaitForMultipleObjects(2, events, FALSE, INFINITE);                   
+        if (result == WAIT_OBJECT_0) {                              
+            // Check if the file stream is currently active/busy with a transfer.
+            while(fstream->busy){
+                EnterCriticalSection(&fstream->lock);
+                // Iterate through all bitmap entries (chunks) for the current file stream.
+                for(long long k = 0; k < fstream->bitmap_entries_count; k++){
+                    // Calculate the absolute file offset where this chunk should be written.
+                    uint64_t file_offset = k * FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK; // Use constant
+                    // Get the memory buffer associated with this chunk.
+                    char* buffer = fstream->pool_block_file_chunk[k];
+                    uint64_t buffer_size;    // Variable to store the actual size of the chunk to write.
+
+                    // Case 1: This is the trailing (last, potentially partial) chunk.
+                    // Check if:
+                    //   a) The fstream is marked as having a trailing chunk.
+                    //   b) The trailing chunk's expected bytes have all been received.
+                    //   c) The current chunk's flag indicates it's the trailing chunk AND it hasn't been written yet.
+                    if (fstream->trailing_chunk && fstream->trailing_chunk_complete && (fstream->flag[k] == CHUNK_TRAILING)) {
+                        buffer_size = fstream->trailing_chunk_size; // Use the specific calculated size for the trailing chunk.
+
+                    // Case 2: This is a full-sized chunk (not trailing).
+                    // Check if:
+                    //   a) All fragments within this 64-bit bitmap entry have been received (~0ULL means all bits set).
+                    //   b) The current chunk's flag indicates it's a body chunk AND it hasn't been written yet.
+                    } else if(fstream->bitmap[k] == ~0ULL && (fstream->flag[k] == CHUNK_BODY)) {
+                        buffer_size = FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK; // Full chunk size.
+                    }
+                    // Case 3: This chunk is neither a ready trailing chunk nor a complete, unwritten full chunk.
+                    // It means this chunk either:
+                    //   - Has not received all its data yet.
+                    //   - Has already been written to disk.
+                    //   - Is not the trailing chunk and not a full chunk (logic error in flag setting perhaps).
+                    else {
+                        continue; // Skip this chunk and move to the next bitmap entry.
+                    }
+
+                    // --- FILE WRITE OPERATIONS ---
+                    // Check if the file pointer is valid. If NULL, something went wrong during file opening.
+                    if (fstream->fp == NULL) {
+                        fprintf(stderr, "Error: FILE pointer is null for chunk %llu. Session ID: %u, File ID: %u\n", k, fstream->sid, fstream->fid);
+                        fstream->stream_err = STREAM_ERR_FP; // Set a specific error code.
+                        file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream due to the error.
+                        break;
+                    }
+
+                    // Attempt to seek to the correct offset in the file.
+                    if (_fseeki64(fstream->fp, file_offset, SEEK_SET) != 0) {
+                        fprintf(stderr, "Error: Failed to seek to offset %llu for chunk %llu. Session ID: %u, File ID: %u\n", file_offset, k, fstream->sid, fstream->fid);
+                        fstream->stream_err = STREAM_ERR_FSEEK; // Set a specific error code.
+                        file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
+                        break;
+                    }
+
+                    // Write the chunk data from the buffer to the file.
+                    size_t written = fwrite(buffer, 1, buffer_size, fstream->fp);
+                    // Check if the number of bytes written matches the expected buffer size.
+                    if (written != buffer_size) {
+                        fprintf(stderr, "Error: Failed to write data (expected %llu, wrote %llu) for chunk %llu. Session ID: %u, File ID: %u\n", buffer_size, written, k, fstream->sid, fstream->fid);
+                        fstream->stream_err = STREAM_ERR_FWRITE; // Set a specific error code.
+                        file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
+                        break;
+                    }
+                    fstream->bytes_written += written; // Accumulate the total bytes written to disk.
+                    fstream->flag[k] |= CHUNK_WRITTEN; // Update the chunk's flag to reflect it has been written.
+
+                    // Return the memory buffer for this chunk back to the pre-allocated pool.
+                    pool_free(&io_manager.pool_file_chunk, fstream->pool_block_file_chunk[k]);
+                    fstream->pool_block_file_chunk[k] = NULL;
+                }
+
+                for(long long l = 0; l < fstream->bitmap_entries_count; l++){
+                    BOOL is_chunk_body = (fstream->flag[l] & CHUNK_BODY) == CHUNK_BODY;
+                    BOOL is_chunk_body_complete = fstream->bitmap[l] == ~0ULL;
+                    BOOL is_chunk_written = (fstream->flag[l] & CHUNK_WRITTEN) == CHUNK_WRITTEN;
+
+                    BOOL is_chunk_body_and_written = fstream->flag[l] == (CHUNK_BODY | CHUNK_WRITTEN);
+                    BOOL is_chunk_trailing_and_written = fstream->flag[l] == (CHUNK_TRAILING | CHUNK_WRITTEN);
+
+                    if(is_chunk_body && !is_chunk_body_complete){
+                        break;
+                    }
+
+                    if(!is_chunk_written){
+                        break;
+                    }
+
+                    if(is_chunk_body_and_written || is_chunk_trailing_and_written){
+                        uint64_t file_offset = l * FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK;
+                        // Attempt to seek to the correct offset in the file.
+                        if (_fseeki64(fstream->fp, file_offset, SEEK_SET) != 0) {
+                            fprintf(stderr, "Error: Failed to seek to offset %llu for chunk %llu. Session ID: %u, File ID: %u\n", file_offset, l, fstream->sid, fstream->fid);
+                            fstream->stream_err = STREAM_ERR_FSEEK; // Set a specific error code.
+                            file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
+                            break;
+                        }
+
+                        char chunk_buffer[(FILE_FRAGMENT_SIZE * FRAGMENTS_PER_CHUNK)];
+                        size_t chunk_bytes_read = fread(chunk_buffer, 1, sizeof(chunk_buffer), fstream->fp);
+                        
+                        if (chunk_bytes_read <= 0) {
+                            fprintf(stderr, "Error: Failed to read data from file for chunk offset %llu. Session ID: %u, File ID: %u\n", file_offset, fstream->sid, fstream->fid);
+                            fstream->stream_err = STREAM_ERR_FREAD; // Set a specific error code.
+                            file_cleanup_stream(fstream, &io_manager); // Clean up the entire file stream.
+                            break;
+                        }                              
+                        
+                        sha256_update(&fstream->sha256_ctx, chunk_buffer, chunk_bytes_read);
+
+                        fstream->flag[l] |= CHUNK_HASHED;
+                        fstream->chunks_hashed++;
+                    }
+                }
+
+                // After attempting to write all available chunks for this file stream:
+                // Check if the total bytes received equals the total file size AND
+                // if the total bytes written to disk also equals the total file size.
+                if((fstream->bytes_received == fstream->fsize) && 
+                        (fstream->bytes_written == fstream->fsize) &&
+                        (fstream->chunks_hashed == fstream->bitmap_entries_count) &&
+                        !fstream->file_hash_calculated){
+                    sha256_final(&fstream->sha256_ctx, (uint8_t *)&fstream->calculated_sha256);
+                    fstream->file_hash_calculated = TRUE;
+                }
+                
+                if(fstream->file_hash_calculated && fstream->file_hash_received && !fstream->file_hash_validated){
+                    fstream->file_hash_validated = validate_file_hash(fstream);
+                    if(!fstream->file_hash_validated){
+                        file_cleanup_stream(fstream, &io_manager);
+                    }                                                    
+                }
+
+                fstream->file_complete = ((fstream->bytes_received == fstream->fsize) && 
+                                            (fstream->bytes_written == fstream->fsize) &&
+                                            fstream->file_hash_calculated &&
+                                            fstream->file_hash_validated &&
+                                            !fstream->file_complete
+                                        );
+
+                // If the file is now completely received and written:
+                if(fstream->file_complete){           
+                    // Update the status in the UID hash table (if used for tracking file transfer status).
+                    update_uid_status_hash_table(io_manager.uid_hash_table, &io_manager.uid_ht_mutex, fstream->sid, fstream->fid, UID_RECV_COMPLETE);
+                    fprintf(stdout, "File '%s' received written to disk and validated", fstream->fn);
+                    file_cleanup_stream(fstream, &io_manager); // Perform final cleanup for the completed file stream.
+                    
+                }
+                LeaveCriticalSection(&fstream->lock);
+                Sleep(100);
+
+            } // check busy
+
+        } else if (result == WAIT_OBJECT_0 + 1) {
+            file_cleanup_stream(fstream, &io_manager); // Perform final cleanup for the completed file stream.
+            break;
+        } else {
+            file_cleanup_stream(fstream, &io_manager); // Perform final cleanup for the completed file stream.
+            break;
+        }               
+    }
+    ResetEvent(fstream->hevent_client_disconnect);
     _endthreadex(0); // Properly exit the thread, returning its control to the system.
     return 0; // Return 0 indicating successful thread termination.
 }
@@ -1125,9 +1302,9 @@ void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager){
     fstream->file_hash_validated = FALSE;
     fstream->file_complete = FALSE;
     fstream->stream_err = STREAM_ERR_NONE; // Reset error status.
-    fstream->s_id = 0; // Reset session ID.
-    fstream->f_id = 0; // Reset file ID.
-    fstream->f_size = 0; // Reset total file size.
+    fstream->sid = 0; // Reset session ID.
+    fstream->fid = 0; // Reset file ID.
+    fstream->fsize = 0; // Reset total file size.
     fstream->fragment_count = 0; // Reset fragment count.
     fstream->bytes_received = 0; // Reset bytes received counter.
     fstream->bytes_written = 0; // Reset bytes written counter.
@@ -1137,6 +1314,7 @@ void file_cleanup_stream(FileStream *fstream, ServerIOManager* io_manager){
     fstream->trailing_chunk_complete = FALSE; // Reset trailing chunk completion flag.
     fstream->trailing_chunk_size = 0; // Reset trailing chunk size.
     memset(fstream->fn, 0, PATH_SIZE); // Clear the file name buffer by filling it with zeros.
+    ResetEvent(fstream->hevent_recv_file);
     return;
 }
 // Clean up the message stream resources after a file transfer is completed or aborted.
@@ -1156,9 +1334,9 @@ void message_cleanup_stream(MsgStream *mstream, ServerIOManager* io_manager){
     }
     mstream->busy = FALSE; // Reset the busy flag.
     mstream->stream_err = STREAM_ERR_NONE; // Reset error status.
-    mstream->s_id = 0; // Reset session ID.
-    mstream->m_id = 0; // Reset message ID.
-    mstream->m_len = 0; // Reset message length.
+    mstream->sid = 0; // Reset session ID.
+    mstream->mid = 0; // Reset message ID.
+    mstream->mlen = 0; // Reset message length.
     mstream->fragment_count = 0; // Reset fragment count.
     mstream->chars_received = 0; // Reset characters received counter.
     mstream->bitmap_entries_count = 0; // Reset bitmap entries count.
@@ -1178,23 +1356,31 @@ void cleanup_client(Client *client, ServerIOManager* io_manager){
     // MAX_CLIENT_FILE_STREAMS defines the maximum number of concurrent file transfers a single client can have.
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
         // Acquire the critical section lock for the current file stream.
-        EnterCriticalSection(&client->file_stream[i].lock);
+        EnterCriticalSection(&client->fstream[i].lock);
         // Call the dedicated cleanup function for the current file stream.
         // This function will free memory, close files, and reset the file stream's state.
-        file_cleanup_stream(&client->file_stream[i], io_manager);
+        file_cleanup_stream(&client->fstream[i], io_manager);
+        SetEvent(client->fstream[i].hevent_client_disconnect);
+        if (client->fstream[i].htread_recv_file) {
+            // Signal the receive thread to stop and wait for it to finish
+            WaitForSingleObject(client->fstream[i].htread_recv_file, INFINITE);       
+            CloseHandle(client->fstream[i].hevent_recv_file);
+            CloseHandle(client->fstream[i].hevent_client_disconnect);
+            CloseHandle(client->fstream[i].htread_recv_file);
+        }
+        
         // Release the critical section lock for the current file stream.
-        LeaveCriticalSection(&client->file_stream[i].lock);
+        LeaveCriticalSection(&client->fstream[i].lock);
     }
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
         // Acquire the critical section lock for the current message stream.
-        EnterCriticalSection(&client->msg_stream[i].lock);
+        EnterCriticalSection(&client->mstream[i].lock);
         // Call the dedicated cleanup function for the current message stream.
         // This function will free memory, close files, and reset the message stream's state.
-        message_cleanup_stream(&client->msg_stream[i], io_manager);
+        message_cleanup_stream(&client->mstream[i], io_manager);
         // Release the critical section lock for the current message stream.
-        LeaveCriticalSection(&client->msg_stream[i].lock);
+        LeaveCriticalSection(&client->mstream[i].lock);
     }
-
 
     // Reset the client's network address structure by filling it with zeros.
     memset(&client->addr, 0, sizeof(struct sockaddr_in));
@@ -1203,20 +1389,20 @@ void cleanup_client(Client *client, ServerIOManager* io_manager){
     // Reset the client's port number to zero.
     client->port = 0;
     // Reset the client's unique identifier to zero.
-    client->client_id = 0;
+    client->cid = 0;
     // Reset the client's name buffer by filling it with zeros.
     memset(&client->name, 0, NAME_SIZE);
     // Reset any client-specific flags to zero.
-    client->flag = 0;
+    client->flags = 0;
     // Set the client's connection status to disconnected.
     client->connection_status = CLIENT_DISCONNECTED;
     // Update the last activity time to the current time. This can be useful for
     // tracking when the client slot became free or was last active.
     client->last_activity_time = time(NULL);
     // Reset the client's assigned slot number to zero.
-    client->slot_num = 0;
+    client->client_index = 0;
     // Mark the client slot as free, indicating it's available for a new connection.
-    client->slot_status = SLOT_FREE;
+    client->status_index = SLOT_FREE;
     LeaveCriticalSection(&client->lock);
     return;
 }
@@ -1248,8 +1434,8 @@ BOOL validate_file_hash(FileStream *fstream){
 void check_open_file_stream(ClientList* client_list){
     for(int i = 0; i < MAX_CLIENTS; i++){
         for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
-            FileStream *fstream = &client_list->client[i].file_stream[j];
-            if(client_list->client[i].file_stream[j].busy == TRUE){
+            FileStream *fstream = &client_list->client[i].fstream[j];
+            if(client_list->client[i].fstream[j].busy == TRUE){
                 fprintf(stdout, "Client: %d - File stream still open: %d\n", i, j);
                 fprintf(stdout, "Bytes received: %llu, Bytes written: %llu\n", fstream->bytes_received, fstream->bytes_written);
                 for(int k = 0; k < fstream->bitmap_entries_count; k++){
@@ -1294,6 +1480,4 @@ int main() {
 
 
 
-
-//int create_output_file(const char *buffer, const uint64_t size, const char *path);
 
