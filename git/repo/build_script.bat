@@ -20,9 +20,10 @@ set common=%workspace%\src\protocol_frames.c ^
 REM Conditional dependency only for udp_server
 if "%target%"=="test_server" (
     set private=%workspace%\src\file_handler.c ^
-%workspace%\src\message_handler.c
+%workspace%\src\message_handler.c ^
+%workspace%\src\server_frames.c
 ) else if "%target%"=="test_client" (
-    set private=
+    set private=%workspace%\src\client_frames.c
 ) else (
     echo [ERROR] Unknown target: %target%
     exit /b 1

@@ -343,7 +343,7 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
     // Assigns a unique session ID to the new client by atomically incrementing a global counter.
     new_client->sid = InterlockedIncrement(&server.session_id_counter); 
     // Copies the flag from the received frame's request payload to the new client's data.
-    new_client->flags = recv_frame->payload.request.flag;
+    new_client->flags = recv_frame->payload.request.flags;
     
     // Formats and copies the client's name from the received frame's payload into the new client's structure.
     // 'snprintf' is used for safe string copying, preventing buffer overflows.

@@ -123,8 +123,23 @@ typedef struct{
 }FileStream;
 
 typedef struct{
+
+    FILE *fp;
+    char *fpath;
+    char *fname;
+    long long text_file_size;
+
+    char *message_buffer;
+    uint32_t message_id;
     uint32_t message_len;
-    uint32_t message_bytes_to_send;
+    uint32_t remaining_bytes_to_send;
+    uint32_t frame_fragment_offset;
+    uint32_t frame_fragment_len;
+    BOOL throttle;  
+
+    HANDLE hevent_start_message_send;
+    HANDLE hevent_stop_message_send;
+    HANDLE hthread_message_send;
 }MessageStream;
 
 typedef struct{

@@ -11,88 +11,6 @@
 
 //--------------------------------------------------------------------------------------------------------------------------
 
-uint64_t get_hash_frame(const uint64_t key) {
-    return (key % HASH_SIZE_FRAME);
-}
-int insert_frame(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, UdpFrame *frame, uint32_t *count, MemPool *pool) {
-    
-    EnterCriticalSection(mutex);
-    
-    uint64_t seq_num = _ntohll(frame->header.seq_num);
-    uint64_t index = get_hash_frame(seq_num);
-    //fprintf(stdout, "SeqNum: %llu inserted at index: %llu\n", seq_num, index);
-    FramePendingAck *node = (FramePendingAck *)pool_alloc(pool);
-    if(node == NULL){
-        return RET_VAL_ERROR;
-    }
-    memcpy(&node->frame, frame, sizeof(UdpFrame));
-    node->time = time(NULL);
-    node->counter = 1;
-
-    node->next = (FramePendingAck *)hash_table[index];  // Insert at the head (linked list)
-    hash_table[index] = node;
-    (*count)++;
-
-    LeaveCriticalSection(mutex);
-    return RET_VAL_SUCCESS;
-}
-void remove_frame(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, uint64_t seq_num, uint32_t *count, MemPool *pool) {
-
-    EnterCriticalSection(mutex);
-
-    uint64_t index = get_hash_frame(seq_num);
-    //fprintf(stdout, "Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
-    FramePendingAck *curr = hash_table[index];
-    FramePendingAck *prev = NULL;
-    while (curr) {
-        if (_ntohll(curr->frame.header.seq_num) == seq_num) {
-            //fprintf(stdout, "Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
-            // Found it
-            if (prev) {
-                prev->next = curr->next;
-            } else {
-                hash_table[index] = curr->next;
-            }
-            pool_free(pool, curr);
-            //free(curr);
-            (*count)--;
-            //fprintf(stdout, "Hash count: %d\n", *count);
-            LeaveCriticalSection(mutex);
-            return;
-        }
-        prev = curr;
-        curr = curr->next;
-    }
-    LeaveCriticalSection(mutex);
-}
-void clean_frame_hash_table(FramePendingAck *hash_table[], CRITICAL_SECTION *mutex, uint32_t *count, MemPool *pool) {
-    
-    EnterCriticalSection(mutex);
-    
-    FramePendingAck *head = NULL;
-    for (int i = 0; i < HASH_SIZE_FRAME; i++) {
-        if(hash_table[i]){       
-            FramePendingAck *ptr = hash_table[i];
-            while (ptr) {
-                    head = ptr;
-                    //fprintf(stdout, "Bucket: %d - Freeing SeqNum: %d\n", i, head->seq_num);                   
-                    ptr = ptr->next;
-                    pool_free(pool, head);
-                    //free(head);
-                    (*count)--;
-            }
-            pool_free(pool, ptr);
-            //free(ptr);
-            hash_table[i] = NULL;
-        }     
-    }
-//    fprintf(stdout, "Frame hash table clean\n");
-    LeaveCriticalSection(mutex);
-    return;
-}
-
-
-
 uint64_t ht_get_hash_frame(const uint64_t seq_num){
     return (seq_num % HASH_SIZE_FRAME);
 }
@@ -101,7 +19,7 @@ int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame){
     EnterCriticalSection(&ht->mutex);
     
     uint64_t seq_num = _ntohll(frame->header.seq_num);
-    uint64_t index = get_hash_frame(seq_num);
+    uint64_t index = ht_get_hash_frame(seq_num);
     //fprintf(stdout, "SeqNum: %llu inserted at index: %llu\n", seq_num, index);
     FramePendingAck *node = (FramePendingAck *)pool_alloc(&ht->pool);
     if(node == NULL){
@@ -120,7 +38,7 @@ int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame){
 void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num){
     EnterCriticalSection(&ht->mutex);
 
-    uint64_t index = get_hash_frame(seq_num);
+    uint64_t index = ht_get_hash_frame(seq_num);
     //fprintf(stdout, "Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
     FramePendingAck *curr = ht->entry[index];
     FramePendingAck *prev = NULL;

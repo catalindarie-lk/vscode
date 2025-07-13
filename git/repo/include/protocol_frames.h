@@ -2,7 +2,6 @@
 #define FRAMES_H
 
 #include <stdint.h>
-//#include <winsock2.h>
 #include <ws2tcpip.h>
 
 
@@ -70,7 +69,7 @@ typedef struct {
 // Payload Structures for different frame types
 typedef struct {
     uint32_t client_id;                                     // Unique identifier of the sender
-    uint8_t  flag;                                          // Protocol the client supports
+    uint8_t  flags;                                          // Protocol the client supports
     char     client_name[NAME_SIZE];                    // Optional: human-readable identifier
 } ConnectRequestPayload;
 
@@ -102,7 +101,7 @@ typedef struct{
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t file_size;                                     // Total size of the file being transferred
     uint8_t flags;
-    uint8_t file_hash[32];                                       // For SHA256 hash
+    uint8_t file_hash[32];                                  // For SHA256 hash
 }FileEndPayload;
 
 
@@ -134,40 +133,11 @@ int send_frame(const UdpFrame *frame,
                     const SOCKET src_socket, 
                     const struct sockaddr_in *dest_addr
                 );
-int send_ack(const uint64_t seq_num, 
-                    const uint32_t session_id, 
-                    const uint8_t op_code, 
-                    const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr
-                );
+
 int send_disconnect(const uint32_t session_id, 
                     const SOCKET src_socket, 
                     const struct sockaddr_in *dest_addr
                 );
-
-int send_connect_response(const uint64_t seq_num, 
-                    const uint32_t session_id, 
-                    const uint32_t session_timeout, 
-                    const uint8_t status, 
-                    const char *server_name, 
-                    SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr
-                );
-int send_connect_request(const uint64_t seq_num, 
-                    const uint32_t session_id, 
-                    const uint32_t client_id, 
-                    const uint32_t flag, 
-                    const char *client_name, 
-                    const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr
-                );
-int send_keep_alive(const uint64_t seq_num, 
-                    const uint32_t session_id, 
-                    const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr
-                );
-
-
 
 
 #endif // FRAMES_H

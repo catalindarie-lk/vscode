@@ -13,6 +13,7 @@
 #pragma comment(lib, "iphlpapi.lib")    // Link against IP Helper API library
 
 #include "include/client.h"
+#include "include/client_frames.h"
 #include "include/protocol_frames.h"    // For protocol frame definitions
 #include "include/netendians.h"         // For network byte order conversions
 #include "include/checksum.h"           // For checksum validation
@@ -32,11 +33,6 @@ HANDLE hthread_resend_frame;
 HANDLE hthread_keep_alive;
 HANDLE hthread_client_command;
 
-
-HANDLE hthread_message_send[MAX_CLIENT_MESSAGE_STREAMS];
-HANDLE hevent_start_message_send[MAX_CLIENT_MESSAGE_STREAMS];
-HANDLE hevent_stop_message_send[MAX_CLIENT_MESSAGE_STREAMS];
-
 HANDLE hevent_connection_successfull;
 
 const char *server_ip = "10.10.10.1"; // loopback address
@@ -52,39 +48,7 @@ DWORD WINAPI thread_proc_message_send(LPVOID lpParam);
 DWORD WINAPI thread_proc_client_command(LPVOID lpParam);
 
 
-int send_file_metadata(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t file_id, 
-                            const uint64_t file_size,
-                            const char *file_name,
-                            const uint32_t file_fragment_size, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
-                        );
 
-int send_file_fragment(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t file_id, 
-                            const uint64_t fragment_offset, 
-                            const char* fragment_buffer, 
-                            const uint32_t fragment_size, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
-                        );
-
-int send_long_text_fragment(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t message_id, 
-                            const uint32_t message_len, 
-                            const uint32_t fragment_offset, 
-                            const char* fragment_buffer, 
-                            const uint32_t fragment_len, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr, 
-                            ClientIOManager* io_manager
-                        );
 
 
 static int init_client_session(){
@@ -212,9 +176,9 @@ static int create_client_events(){
         }
     }
     for(int index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-        hevent_start_message_send[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
-        hevent_stop_message_send[index] = CreateEvent(NULL, TRUE, FALSE, NULL);
-        if (hevent_start_message_send[index] == NULL || hevent_stop_message_send[index] == NULL) {
+        client.mstream[index].hevent_start_message_send = CreateEvent(NULL, TRUE, FALSE, NULL);
+        client.mstream[index].hevent_stop_message_send = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (client.mstream[index].hevent_start_message_send == NULL || client.mstream[index].hevent_stop_message_send == NULL) {
             fprintf(stderr, "Failed to create message send events. Error: %d\n", GetLastError());
             client.session_status = SESSION_DISCONNECTED;
             client.client_status = CLIENT_STATUS_NONE; // Signal immediate shutdown
@@ -254,8 +218,8 @@ static void start_threads(){
         }
     }
    for(int index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-        hthread_message_send[index] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_message_send, (LPVOID)(intptr_t)index, 0, NULL);
-        if (hthread_message_send[index] == NULL){
+        client.mstream[index].hthread_message_send = (HANDLE)_beginthreadex(NULL, 0, thread_proc_message_send, (LPVOID)(intptr_t)index, 0, NULL);
+        if (client.mstream[index].hthread_message_send == NULL){
             fprintf(stderr, "Failed to create message send thread. Error: %d\n", GetLastError());
             client.session_status = SESSION_DISCONNECTED;
             client.client_status = CLIENT_STATUS_NONE; // Signal immediate shutdown
@@ -312,16 +276,16 @@ static void shutdown_client(){
 
 
     for(int index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-        if (hthread_message_send[index]) {
+        if (client.mstream[index].hthread_message_send) {
             // Signal the receive thread to stop and wait for it to finish
-            WaitForSingleObject(hthread_message_send[index], INFINITE);
-            CloseHandle(hthread_message_send[index]);
+            WaitForSingleObject(client.mstream[index].hthread_message_send, INFINITE);
+            CloseHandle(client.mstream[index].hthread_message_send);
         }
-        if (hevent_start_message_send[index]) {
-            CloseHandle(hevent_start_message_send[index]);
+        if (client.mstream[index].hevent_start_message_send) {
+            CloseHandle(client.mstream[index].hevent_start_message_send);
         }
-        if (hevent_stop_message_send[index]) {
-            CloseHandle(hevent_start_message_send[index]);
+        if (client.mstream[index].hevent_stop_message_send) {
+            CloseHandle(client.mstream[index].hevent_start_message_send);
         }
     }
     fprintf(stdout,"message send threads closed...\n");
@@ -331,7 +295,6 @@ static void shutdown_client(){
     DeleteCriticalSection(&io_manager.queue_frame.mutex);
     DeleteCriticalSection(&io_manager.queue_priority_frame.mutex);
     CloseHandle(hevent_connection_successfull);
-    CloseHandle(hevent_start_message_send);
     closesocket(client.socket);
     WSACleanup();
 }
@@ -752,133 +715,126 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
 DWORD WINAPI thread_proc_message_send(LPVOID lpParam){
 
     int index = (int)(intptr_t)lpParam;
-
-    char *file_path = "D:\\E\\test_file.txt";
-    FILE *file = NULL;
-    char *message_buffer = NULL;
-    uint32_t message_id = 0;
-    uint32_t message_len = 0;
-    uint32_t remaining_bytes_to_send = 0;
-    uint32_t frame_fragment_offset = 0;
-    uint32_t frame_fragment_len = 0;
-    BOOL throttle = FALSE;
-
-    long long text_file_size;
-
+    MessageStream *mstream = &client.mstream[index];
+ 
     while(client.client_status == CLIENT_STATUS_READY){
-        
-        WaitForSingleObject(hevent_start_message_send[index], INFINITE);
-        
-        file = NULL;
-        message_buffer = NULL;
-        
-        text_file_size = get_file_size(file_path);  
-      
-        if(text_file_size == RET_VAL_ERROR){
-            goto clean;
-        }
-        if(text_file_size > MAX_MESSAGE_SIZE){
-            fprintf(stdout, "Message file is too large! Message Size: %llu > Max size: %u\n", text_file_size, MAX_MESSAGE_SIZE);
-            goto clean;
-        }
-        message_len = (uint32_t)text_file_size;
-        client.mstream[index].message_len = message_len;
 
-        file = fopen(file_path, "rb");
-        if(file == NULL){
+        WaitForSingleObject(mstream->hevent_start_message_send, INFINITE);
+        
+        mstream->fpath = "D:\\E\\test_file.txt";
+        mstream->fname = "test_file.txt";       
+        
+        mstream->fp = NULL;
+        mstream->message_buffer = NULL;
+        
+        mstream->text_file_size = get_file_size(mstream->fpath);  
+      
+        if(mstream->text_file_size == RET_VAL_ERROR){
+            goto clean;
+        }
+        if(mstream->text_file_size > MAX_MESSAGE_SIZE){
+            fprintf(stdout, "Message file is too large! Message Size: %llu > Max size: %u\n", mstream->text_file_size, MAX_MESSAGE_SIZE);
+            goto clean;
+        }
+        mstream->message_len = (uint32_t)mstream->text_file_size;
+//        client.mstream[index].message_len = mstream->message_len;
+
+        mstream->fp = fopen(mstream->fpath, "rb");
+        if(mstream->fp == NULL){
             fprintf(stdout, "Error opening file!\n");
             goto clean;
         }
 
-        message_id = InterlockedIncrement(&client.uid_count);
-        frame_fragment_offset = 0;
+        mstream->message_id = InterlockedIncrement(&client.uid_count);
+        mstream->frame_fragment_offset = 0;
 
-        message_buffer = malloc(message_len + 1);
-        if(message_buffer == NULL){
+        mstream->message_buffer = malloc(mstream->message_len + 1);
+        if(mstream->message_buffer == NULL){
             fprintf(stdout, "Error allocating memeory buffer for message!\n");
             goto clean;
         }
 
-        remaining_bytes_to_send = fread(message_buffer, 1, message_len, file);
-        message_buffer[message_len] = '\0';
-        if (remaining_bytes_to_send == 0 && ferror(file)) {
+        mstream->remaining_bytes_to_send = fread(mstream->message_buffer, 1, mstream->message_len, mstream->fp);
+        mstream->message_buffer[mstream->message_len] = '\0';
+        if (mstream->remaining_bytes_to_send == 0 && ferror(mstream->fp)) {
             fprintf(stdout, "Error reading message file!\n");
             goto clean;
         }
 
-        while(remaining_bytes_to_send > 0){
+        while(mstream->remaining_bytes_to_send > 0){
 
-            DWORD result = WaitForSingleObject(hevent_stop_message_send[index], 0);
+            DWORD result = WaitForSingleObject(mstream->hevent_stop_message_send, 0);
             if (result == WAIT_OBJECT_0) {
                 fprintf(stderr, "Message send force stopped\n");
                 goto clean;
             }
 
-            if(remaining_bytes_to_send > TEXT_FRAGMENT_SIZE){
-                frame_fragment_len = TEXT_FRAGMENT_SIZE;
+            if(mstream->remaining_bytes_to_send > TEXT_FRAGMENT_SIZE){
+                mstream->frame_fragment_len = TEXT_FRAGMENT_SIZE;
             } else {
-                frame_fragment_len = remaining_bytes_to_send;
+                mstream->frame_fragment_len = mstream->remaining_bytes_to_send;
             }
 
             if(io_manager.ht_frame.count > HASH_FRAME_HIGH_WATERMARK){
-                throttle = TRUE;
+                mstream->throttle = TRUE;
             }
             if(io_manager.ht_frame.count < HASH_FRAME_LOW_WATERMARK){
-                throttle = FALSE;
+                mstream->throttle = FALSE;
             }
-            if(throttle){
+            if(mstream->throttle){
                 Sleep(10);
                 continue;
             }
 
             char buffer[TEXT_FRAGMENT_SIZE];
 
-            const char *offset = message_buffer + frame_fragment_offset;
-            memcpy(buffer, offset, frame_fragment_len);
-            if(frame_fragment_len < TEXT_FRAGMENT_SIZE){
-                buffer[frame_fragment_len] = '\0';
+            const char *offset = mstream->message_buffer + mstream->frame_fragment_offset;
+            memcpy(buffer, offset, mstream->frame_fragment_len);
+            if(mstream->frame_fragment_len < TEXT_FRAGMENT_SIZE){
+                buffer[mstream->frame_fragment_len] = '\0';
             }
 
             int fragment_bytes_sent = send_long_text_fragment(get_new_seq_num(), 
                                                                 client.session_id, 
-                                                                message_id, 
-                                                                message_len, 
-                                                                frame_fragment_offset, 
+                                                                mstream->message_id, 
+                                                                mstream->message_len, 
+                                                                mstream->frame_fragment_offset, 
                                                                 buffer, 
-                                                                frame_fragment_len, 
-                                                                client.socket, &client.server_addr,
+                                                                mstream->frame_fragment_len, 
+                                                                client.socket, 
+                                                                &client.server_addr,
                                                                 &io_manager
                                                             );
             if(fragment_bytes_sent == RET_VAL_ERROR){
                 Sleep(100);
                 continue;
             }
-            frame_fragment_offset += frame_fragment_len;                       
-            remaining_bytes_to_send -= frame_fragment_len;
-            client.mstream[index].message_bytes_to_send = remaining_bytes_to_send;
+            mstream->frame_fragment_offset += mstream->frame_fragment_len;                       
+            mstream->remaining_bytes_to_send -= mstream->frame_fragment_len;
+            //client.mstream[index].message_bytes_to_send = remaining_bytes_to_send;
         }
 
     clean:
 
-        if(message_buffer != NULL){
-            free(message_buffer);
-            message_buffer = NULL;
+        if(mstream->message_buffer != NULL){
+            free(mstream->message_buffer);
+            mstream->message_buffer = NULL;
         }
-        if(file != NULL){
-            fclose(file);
-            file = NULL;
+        if(mstream->fp != NULL){
+            fclose(mstream->fp);
+            mstream->fp = NULL;
         }
-        text_file_size = 0;
-        client.mstream[index].message_len = 0;
-        client.mstream[index].message_bytes_to_send = 0;
-        message_id = 0;
-        message_len = 0;
-        remaining_bytes_to_send = 0;
-        frame_fragment_offset = 0;
-        frame_fragment_len = 0;
-        throttle = FALSE;
-        ResetEvent(hevent_stop_message_send[index]);
-        ResetEvent(hevent_start_message_send[index]);
+        mstream->text_file_size = 0;
+        // client.mstream[index].message_len = 0;
+        // client.mstream[index].message_bytes_to_send = 0;
+        mstream->message_id = 0;
+        mstream->message_len = 0;
+        mstream->remaining_bytes_to_send = 0;
+        mstream->frame_fragment_offset = 0;
+        mstream->frame_fragment_len = 0;
+        mstream->throttle = FALSE;
+        ResetEvent(mstream->hevent_stop_message_send);
+        ResetEvent(mstream->hevent_start_message_send);
     }
     _endthreadex(0); // Properly exit the thread created by _beginthreadex
     return 0; 
@@ -947,9 +903,9 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                         }
                     }
                     for(index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-                        DWORD result = WaitForSingleObject(hevent_start_message_send[index], 0);
+                        DWORD result = WaitForSingleObject(client.mstream[index].hevent_start_message_send, 0);
                         if(result == WAIT_OBJECT_0){
-                            SetEvent(hevent_stop_message_send[index]);
+                            SetEvent(client.mstream[index].hevent_stop_message_send);
                         }
                     }
                     index = 0;
@@ -970,7 +926,7 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                     index = 0;
                     retry_count = 0;
                     while (index < MAX_CLIENT_MESSAGE_STREAMS && retry_count < MAX_RETRIES_STOP_TRANSFER) {
-                        DWORD result = WaitForSingleObject(hevent_stop_message_send[index], 0);
+                        DWORD result = WaitForSingleObject(client.mstream[index].hevent_stop_message_send, 0);
                         if (result == WAIT_TIMEOUT) {
                             index++;
                             retry_count = 0; // reset for next index
@@ -1034,13 +990,13 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                     }
                     
                     for(index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-                        DWORD result = WaitForSingleObject(hevent_start_message_send[index], 0);
+                        DWORD result = WaitForSingleObject(client.mstream[index].hevent_start_message_send, 0);
                         if (result == WAIT_OBJECT_0) {
                             // Event is signaled
                             continue;
                         } else if (result == WAIT_TIMEOUT) {
                             // Event is not signaled
-                            SetEvent(hevent_start_message_send[index]);
+                            SetEvent(client.mstream[index].hevent_start_message_send);
                             fprintf(stdout, "Message thread %d started...\n", index);
                             break;
                         }
@@ -1080,7 +1036,7 @@ int main() {
     while(client.client_status == CLIENT_STATUS_READY){
         fprintf(stdout, "\r\033[2K-- File: %.2f perc, Text: %.2f perc, Hash Frames: %u, Free Pool Blocks: %llu, DIFF: %llu", 
                             (float)(client.fstream[0].file_size - client.fstream[0].remaining_bytes_to_send) / (float)client.fstream[0].file_size * 100.0, 
-                            (float)(client.mstream[0].message_len - client.mstream[0].message_bytes_to_send) / (float)client.mstream[0].message_len * 100.0,
+                            (float)(client.mstream[0].message_len - client.mstream[0].remaining_bytes_to_send) / (float)client.mstream[0].message_len * 100.0,
                             io_manager.ht_frame.count,
                             io_manager.ht_frame.pool.free_blocks,
                             io_manager.ht_frame.pool.free_blocks - (io_manager.ht_frame.pool.block_count - io_manager.ht_frame.count)
@@ -1099,209 +1055,3 @@ int main() {
 }
 
 
-int send_file_metadata(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t file_id, 
-                            const uint64_t file_size,
-                            const char *file_name,
-                            const uint32_t file_fragment_size, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
-                        ){
-
-    UdpFrame frame;
-    // Initialize the text message frame
-    memset(&frame, 0, sizeof(UdpFrame));
-
-    if(file_name == NULL){
-        fprintf(stderr, "ERROR: Invalid file name pointer (NULL).\n");
-        return RET_VAL_ERROR;
-    }
-    uint32_t file_name_len = (uint32_t)strnlen(file_name, NAME_SIZE - 1);
- 
-    if(file_name_len == 0){
-        fprintf(stderr, "ERROR: File name is 0 length.\n");
-        return RET_VAL_ERROR;
-    }
-    if(file_name_len >= NAME_SIZE - 1){
-        fprintf(stderr, "ERROR: File name is too long. Max length is %d characters.\n", NAME_SIZE - 1);
-        return RET_VAL_ERROR;
-    }
-    file_name_len += 1; // Add 1 for null terminator
-
-    // FILE *file = fopen(file_name, "rb");
-    // if(file == NULL){
-    //     fprintf(stderr, "ERROR: Failed to open file %s for reading.\n", file_name);
-    //     return RET_VAL_ERROR;
-    // }
-    // SHA256_CTX sha256_ctx;
-    // sha256_init(&sha256_ctx);
-    // char buffer[4096]; // Buffer for reading file chunks
-    // size_t bytes_read;
-    // while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-    //     sha256_update(&sha256_ctx, (const uint8_t *)buffer, bytes_read);
-    // }
-    // fclose(file);
-
-    // Set the header fields
-    frame.header.start_delimiter = _htons(FRAME_DELIMITER);
-    frame.header.frame_type = FRAME_TYPE_FILE_METADATA;
-    frame.header.seq_num = _htonll(seq_num);
-    frame.header.session_id = _htonl(session_id);
-    // Set the payload fields
-    frame.payload.file_metadata.file_id = _htonl(file_id);
-    frame.payload.file_metadata.file_size = _htonll(file_size);
-    snprintf(frame.payload.file_metadata.filename, file_name_len, "%s", file_name);
-    // sha256_final(&sha256_ctx, frame.payload.file_metadata.file_hash);
-           
-    // Calculate the checksum for the frame
-    frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));
-    
-    if(ht_insert_frame(&io_manager->ht_frame, &frame) == RET_VAL_ERROR){
-        fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
-        return RET_VAL_ERROR;
-    }
-
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr);
-    if(bytes_sent == SOCKET_ERROR){
-        fprintf(stderr, "send_text_message() failed\n");
-        return SOCKET_ERROR;
-    }
-    return bytes_sent;
-}
-
-int send_file_fragment(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t file_id, 
-                            const uint64_t fragment_offset, 
-                            const char* fragment_buffer, 
-                            const uint32_t fragment_size, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
-                        ){
-
-    UdpFrame frame;
-    if(fragment_buffer == NULL){
-        fprintf(stderr, "\nInvalid text!.\n");
-        return SOCKET_ERROR;
-    }
-    // Initialize the text message frame
-    memset(&frame, 0, sizeof(UdpFrame));
-    // Set the header fields
-    frame.header.start_delimiter = _htons(FRAME_DELIMITER);
-    frame.header.frame_type = FRAME_TYPE_FILE_FRAGMENT;
-    frame.header.seq_num = _htonll(seq_num);
-    frame.header.session_id = _htonl(session_id);
-    // Set the payload fields
-    frame.payload.file_fragment.file_id = _htonl(file_id);
-    frame.payload.file_fragment.size = _htonl(fragment_size);
-    frame.payload.file_fragment.offset = _htonll(fragment_offset);
-    memcpy(frame.payload.file_fragment.bytes, fragment_buffer, fragment_size);
-    
-    // Calculate the checksum for the frame
-    frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileFragmentPayload)));  
-
-    if(ht_insert_frame(&io_manager->ht_frame, &frame) == RET_VAL_ERROR){
-        fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
-        return RET_VAL_ERROR;
-    }
-
-
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr);
-    if(bytes_sent == SOCKET_ERROR){
-        fprintf(stderr, "send_text_message() failed\n");
-        return SOCKET_ERROR;
-    }
-    return bytes_sent;
-}
-
-int send_file_end(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t file_id, 
-                            const uint64_t file_size, 
-                            const char *file_hash,
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
-                        ){
-
-    UdpFrame frame;
-    // Initialize the text message frame
-    memset(&frame, 0, sizeof(UdpFrame));
-
-    // Set the header fields
-    frame.header.start_delimiter = _htons(FRAME_DELIMITER);
-    frame.header.frame_type = FRAME_TYPE_FILE_END;
-    frame.header.seq_num = _htonll(seq_num);
-    frame.header.session_id = _htonl(session_id);
-    // Set the payload fields
-    frame.payload.file_metadata.file_id = _htonl(file_id);
-    frame.payload.file_metadata.file_size = _htonll(file_size);
-
-    memcpy(frame.payload.file_end.file_hash, file_hash, 32);
-           
-    // Calculate the checksum for the frame
-    frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileEndPayload)));
-    
-    if(ht_insert_frame(&io_manager->ht_frame, &frame) == RET_VAL_ERROR){
-        fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
-        return RET_VAL_ERROR;
-    }
-
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr);
-    if(bytes_sent == SOCKET_ERROR){
-        fprintf(stderr, "send_text_message() failed\n");
-        return SOCKET_ERROR;
-    }
-    return bytes_sent;
-}
-
-int send_long_text_fragment(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t message_id, 
-                            const uint32_t message_len, 
-                            const uint32_t fragment_offset, 
-                            const char* fragment_buffer, 
-                            const uint32_t fragment_len, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr, 
-                            ClientIOManager* io_manager
-                        ){
-
-    UdpFrame frame;
-    if(fragment_buffer == NULL){
-        fprintf(stderr, "Invalid text pointer parsed!.\n");
-        return SOCKET_ERROR;
-    }
-    // Initialize the text message frame
-    memset(&frame, 0, sizeof(UdpFrame));
-    // Set the header fields
-    frame.header.start_delimiter = _htons(FRAME_DELIMITER);
-    frame.header.frame_type = FRAME_TYPE_LONG_TEXT_MESSAGE;
-    frame.header.seq_num = _htonll(seq_num);
-    frame.header.session_id = _htonl(session_id);
-    // Set the payload fields
-    frame.payload.long_text_msg.message_id = _htonl(message_id);
-    frame.payload.long_text_msg.message_len = _htonl(message_len);
-    frame.payload.long_text_msg.fragment_len = _htonl(fragment_len);
-    frame.payload.long_text_msg.fragment_offset = _htonl(fragment_offset);
-    
-    memcpy(frame.payload.long_text_msg.fragment_text, fragment_buffer, fragment_len);
-    
-    // Calculate the checksum for the frame
-    frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(LongTextPayload)));  
-
-    if(ht_insert_frame(&io_manager->ht_frame, &frame) == RET_VAL_ERROR){
-        fprintf(stderr, "Mem Pool is full, failed to allocate!\n");
-        return RET_VAL_ERROR;
-    }
-
-    int bytes_sent = send_frame(&frame, src_socket, dest_addr);
-    if(bytes_sent == SOCKET_ERROR){
-        fprintf(stderr, "send_text_message() failed\n");
-        return SOCKET_ERROR;
-    }
-    return bytes_sent;
-}
