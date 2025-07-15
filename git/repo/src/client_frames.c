@@ -24,10 +24,10 @@ int send_connect_request(const uint64_t seq_num,
     frame.header.frame_type = FRAME_TYPE_CONNECT_REQUEST;
     frame.header.seq_num = _htonll(seq_num);
     frame.header.session_id = _htonl(session_id);
-    frame.payload.request.client_id = _htonl(client_id);
-    frame.payload.request.flags = flags;
+    frame.payload.connection_request.client_id = _htonl(client_id);
+    frame.payload.connection_request.flags = flags;
 
-    snprintf(frame.payload.request.client_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, client_name);
+    snprintf(frame.payload.connection_request.client_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, client_name);
 
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(ConnectRequestPayload)));

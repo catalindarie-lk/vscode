@@ -33,7 +33,7 @@ static int msg_match_fragment(Client *client, UdpFrame *frame){
     }
     return RET_VAL_ERROR;
 }
-static int msg_validate_fragment(Client *client, const int index, UdpFrame *frame, ServerIOManager* io_manager) {
+static int msg_validate_fragment(Client *client, const int index, UdpFrame *frame, ServerBuffers* buffers) {
 
     EnterCriticalSection(&client->mstream[index].lock);
 
@@ -47,19 +47,19 @@ static int msg_validate_fragment(Client *client, const int index, UdpFrame *fram
     if (is_duplicate_fragment == TRUE) {
         //Client already has bitmap and message buffer allocated so fragment can be processed
         //if the message was already received send duplicate frame ack op_code
-        register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_DUPLICATE_FRAME);
+        register_ack(&buffers->queue_priority_seq_num, client, frame, ERR_DUPLICATE_FRAME);
         fprintf(stderr, "Received duplicate text message fragment - Session ID: %d, Message ID: %d, Offset: %d,\n", client->sid, recv_message_id, recv_fragment_offset);
         goto exit_error;
     }
     if(recv_fragment_offset >= recv_message_len){
         //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code
-        register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_MALFORMED_FRAME);
+        register_ack(&buffers->queue_priority_seq_num, client, frame, ERR_MALFORMED_FRAME);
         fprintf(stderr, "Fragment offset past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->sid, recv_message_id, recv_fragment_offset, recv_fragment_len);
         goto exit_error;
     }
     if ((recv_fragment_offset + recv_fragment_len) > recv_message_len || recv_fragment_len > TEXT_FRAGMENT_SIZE) {
         //if the message has invalid payload metadata send ERR_MALFORMED_FRAME ack op code 
-        register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_MALFORMED_FRAME);
+        register_ack(&buffers->queue_priority_seq_num, client, frame, ERR_MALFORMED_FRAME);
         fprintf(stderr, "Fragment len past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->sid, recv_message_id, recv_fragment_offset, recv_fragment_len);
         goto exit_error;
     }
@@ -137,7 +137,7 @@ static void msg_attach_fragment(MsgStream *mstream, char *fragment_buffer, const
     mark_fragment_received(mstream->bitmap, fragment_offset, TEXT_FRAGMENT_SIZE);
     LeaveCriticalSection(&mstream->lock);
 }
-static int msg_check_completion_and_record(MsgStream *mstream, ServerIOManager* io_manager) {
+static int msg_check_completion_and_record(MsgStream *mstream, ServerBuffers* buffers) {
     // Check if the message is fully received by verifying total bytes and the fragment bitmap.
     EnterCriticalSection(&mstream->lock);
 
@@ -156,12 +156,12 @@ static int msg_check_completion_and_record(MsgStream *mstream, ServerIOManager* 
     
     // Update the file status in the hash table to mark it as complete.
     // This is done regardless of the file save success, as we won't be receiving more fragments.
-    update_uid_status_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, mstream->sid, mstream->mid, UID_RECV_COMPLETE);
+    update_uid_status_hash_table(buffers->uid_hash_table, &buffers->uid_ht_mutex, mstream->sid, mstream->mid, UID_RECV_COMPLETE);
 
     // Clean up all dynamically allocated resources for the transfer entry.
     // This block is executed in both success and failure cases of file creation.
     
-    message_cleanup_stream(mstream, io_manager);
+    message_cleanup_stream(mstream, buffers);
  
     if (msg_creation_status != RET_VAL_SUCCESS) {
         // If file creation failed, return an error.
@@ -176,7 +176,7 @@ static int msg_check_completion_and_record(MsgStream *mstream, ServerIOManager* 
 }
 
 // HANDLE received message fragment frame
-int handle_message_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_manager){
+int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers){
 
     int slot; // Declares an integer variable 'slot' to store the index of the message handling slot.
     if(client == NULL){ // Checks if the 'client' pointer is NULL, indicating an invalid or non-existent client context.
@@ -198,10 +198,10 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerIOManager* io
 
     // Guard against fragments for already completed messages.
     // Checks if the message, identified by its ID and the client's session ID, has already been marked as fully received in the unique ID hash table.
-    if(search_uid_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, recv_session_id, recv_message_id, UID_RECV_COMPLETE) == TRUE){
+    if(search_uid_hash_table(buffers->uid_hash_table, &buffers->uid_ht_mutex, recv_session_id, recv_message_id, UID_RECV_COMPLETE) == TRUE){
         // If the message is already complete, registers an acknowledgment with a 'STS_TRANSFER_COMPLETE' status.
         // This informs the sender that the message is fully received and no further retransmissions are needed.
-        register_ack(&io_manager->queue_priority_seq_num, client, frame, STS_TRANSFER_COMPLETE);
+        register_ack(&buffers->queue_priority_seq_num, client, frame, ERR_EXISTING_FILE);
         goto exit_error; // Jumps to the 'exit_error' label.
     }
 
@@ -211,15 +211,15 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerIOManager* io
     if (slot != RET_VAL_ERROR) {
         // This block is executed if the 'slot' is found, meaning this is a fragment for an existing message.
         // Validates the incoming fragment against the state of the message stream in the identified slot.
-        if (msg_validate_fragment(client, slot, frame, io_manager) == RET_VAL_ERROR) {
+        if (msg_validate_fragment(client, slot, frame, buffers) == RET_VAL_ERROR) {
             goto exit_error; // If fragment validation fails, jumps to the 'exit_error' label.
         }
         // Attaches the fragment's data to the appropriate position within the message buffer managed by the 'message_stream' structure.
         msg_attach_fragment(&client->mstream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
         // Acknowledges the successful receipt of the fragment.
-        register_ack(&io_manager->queue_seq_num, client, frame, STS_ACK);
+        register_ack(&buffers->queue_seq_num, client, frame, STS_ACK);
         // Checks if all fragments for the message have been received and, if so, finalizes the message (e.g., writes to disk).
-        if (msg_check_completion_and_record(&client->mstream[slot], io_manager) == RET_VAL_ERROR){
+        if (msg_check_completion_and_record(&client->mstream[slot], buffers) == RET_VAL_ERROR){
             goto exit_error; // If completion check or recording fails, jumps to the 'exit_error' label.
         }
     } else {
@@ -229,11 +229,11 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerIOManager* io
         if (slot == RET_VAL_ERROR){ // Checks if an available slot could not be obtained (e.g., maximum streams reached).
             fprintf(stderr, "Maximum message streams reached for client ID: %d\n", client->cid); // Logs an error message.
             // Registers an ACK with 'ERR_RESOURCE_LIMIT' status, informing the sender of the resource constraint.
-            register_ack(&io_manager->queue_priority_seq_num, client, frame, ERR_RESOURCE_LIMIT);
+            register_ack(&buffers->queue_priority_seq_num, client, frame, ERR_RESOURCE_LIMIT);
             goto exit_error; // Jumps to the 'exit_error' label.
         }
         // Validates the fragment. This is particularly important for the first fragment, which often contains total message length.
-        if (msg_validate_fragment(client, slot, frame, io_manager) == RET_VAL_ERROR){
+        if (msg_validate_fragment(client, slot, frame, buffers) == RET_VAL_ERROR){
             goto exit_error; // If validation fails, jumps to the 'exit_error' label.
         }
         // Initializes the message receiving slot with the message ID and its total expected length.
@@ -249,11 +249,11 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerIOManager* io
         msg_attach_fragment(&client->mstream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
         
         // Adds an entry to the unique ID hash table, marking the message as awaiting further fragments.
-        add_uid_hash_table(io_manager->uid_hash_table, &io_manager->uid_ht_mutex, recv_session_id, recv_message_id, UID_WAITING_FRAGMENTS);
+        add_uid_hash_table(buffers->uid_hash_table, &buffers->uid_ht_mutex, recv_session_id, recv_message_id, UID_WAITING_FRAGMENTS);
         // Acknowledges the successful receipt of this initial fragment.
-        register_ack(&io_manager->queue_seq_num, client, frame, STS_ACK);
+        register_ack(&buffers->queue_seq_num, client, frame, STS_ACK);
         // Checks if the message is now complete (e.g., if it was a single-fragment message) and finalizes it.
-        if (msg_check_completion_and_record(&client->mstream[slot], io_manager) == RET_VAL_ERROR){
+        if (msg_check_completion_and_record(&client->mstream[slot], buffers) == RET_VAL_ERROR){
             goto exit_error; // If completion check or recording fails, jumps to the 'exit_error' label.
         }
         LeaveCriticalSection(&client->lock); // Releases the critical section lock.

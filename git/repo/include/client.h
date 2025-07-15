@@ -104,12 +104,12 @@ typedef struct{
     uint32_t file_id;
     uint64_t remaining_bytes_to_send;
 
-    uint64_t pending_metadata_seq_num;  
+//    uint64_t pending_metadata_seq_num;  
     uint8_t chunk_buffer[FILE_CHUNK_SIZE];
-    uint32_t chunk_bytes_to_send;
-    uint32_t chunk_fragment_offset;
-    uint32_t frame_fragment_size;
-    uint64_t frame_fragment_offset;
+//    uint32_t chunk_bytes_to_send;
+//    uint32_t chunk_fragment_offset;
+//    uint32_t frame_fragment_size;
+//    uint64_t frame_fragment_offset;
     BOOL throttle;
 
     SHA256_CTX sha256_ctx;

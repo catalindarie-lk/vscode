@@ -13,8 +13,8 @@
 #endif
 
 // Process received file metadata frame
-int handle_file_metadata(Client *client, UdpFrame *frame, ServerIOManager* io_manager);
+int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers);
 // Process received file fragment frame
-int handle_file_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_manager);
+int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers);
 
 #endif // FRAME_HANDLERS_H

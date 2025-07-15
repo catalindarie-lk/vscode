@@ -34,27 +34,31 @@ enum FrameType{
     FRAME_TYPE_KEEP_ALIVE = 6,
 
     FRAME_TYPE_FILE_METADATA = 20,       // Client requests to send a file (includes filename, size, hash)
+    FRAME_TYPE_FILE_METADATA_RESPONSE = 21,
     FRAME_TYPE_FILE_FRAGMENT = 22,                   // File data fragment
     FRAME_TYPE_FILE_END = 23,
+    FRAME_TYPE_FILE_COMPLETE = 24,
     FRAME_TYPE_LONG_TEXT_MESSAGE = 30      // Fragment of a long text message
 };
 
 typedef uint8_t AckErrorCode;
 enum AckErrorCode {
     STS_ACK = 0,
-    STS_KEEP_ALIVE = 1,
-    STS_TRANSFER_COMPLETE = 2,     // Transfer was complete, receive buffer de-allocated
+    STS_KEEP_ALIVE = 1,  
+    STS_CONFIRM_FILE_METADATA = 5,
+    STS_CONFIRM_FILE_END = 6,
 
-    ERR_INVALID_FILE_ID = 100,     // Server has completed this transfer
+    ERR_EXISTING_FILE = 100,     // Server has completed this transfer
     ERR_INVALID_SESSION = 101,     // Session ID not recognized
     ERR_DUPLICATE_FRAME = 102,     // Frame was already received
+    ERR_MISSING_METADATA = 103,
     ERR_TIMEOUT = 104,             // Session timed out due to inactivity
     ERR_UNSUPPORTED_FRAME = 105,   // Frame type not supported
     ERR_MALFORMED_FRAME = 106,     // Frame structure or size invalid
     ERR_RESOURCE_LIMIT = 107,      // Server ran out of memory or slots
     ERR_UNAUTHORIZED = 108,        // Authentication/authorization failed
     ERR_INTERNAL_ERROR = 109,      // Catch-all for unexpected server fault
-
+    ERR_TRANSFER_INIT = 110
 };
 
 #pragma pack(push, 1) 
@@ -86,9 +90,13 @@ typedef struct {
 typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t file_size;                                     // Total size of the file being transferred
-    uint8_t  file_hash[32];                                 // For MD5 hash (adjust size for SHA256 etc.)
     char     filename[NAME_SIZE];                           // Max filename length
 }FileMetadataPayload;
+
+typedef struct {
+    uint32_t file_id;                                       // Unique identifier for the file transfer session
+    uint8_t  op_code;                                       //
+}FileMetadataResponsePayload;
 
 typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
@@ -100,10 +108,13 @@ typedef struct {
 typedef struct{
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t file_size;                                     // Total size of the file being transferred
-    uint8_t flags;
     uint8_t file_hash[32];                                  // For SHA256 hash
 }FileEndPayload;
 
+typedef struct{
+    uint32_t file_id;                                       // Unique identifier for the file transfer session
+    uint8_t op_code;
+}FileCompletePayload;
 
 typedef struct {
     uint32_t message_id;                                    // Unique ID for this specific long message
@@ -117,12 +128,14 @@ typedef struct {
 typedef struct {
     FrameHeader header;
     union {
-        ConnectRequestPayload request;                      // Client's connect request
-        ConnectResponsePayload response;                    // Server's response to client connect
+        ConnectRequestPayload connection_request;                      // Client's connect request
+        ConnectResponsePayload connection_response;                    // Server's response to client connect
         AckPayload ack;
         FileMetadataPayload file_metadata;                  // File metadata request/response
+        FileMetadataResponsePayload file_metadata_response;                  // File metadata request/response
         FileFragmentPayload file_fragment;                  // File data fragment
         FileEndPayload file_end;
+        FileCompletePayload file_complete;
         LongTextPayload long_text_msg;                      // Fragment of a long text message
         uint8_t raw_payload[MAX_PAYLOAD_SIZE];              // For generic access or padding
     } payload;

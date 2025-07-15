@@ -1,5 +1,5 @@
-#ifndef PROTOCOL_FRAME_HANDLERS_H
-#define PROTOCOL_FRAME_HANDLERS_H
+#ifndef MESSAGE_HANDLER_H
+#define MESSAGE_HANDLER_H
 
 #include <stdint.h>
 #include "include/protocol_frames.h"
@@ -13,6 +13,6 @@
 #endif
 
 // HANDLE received message fragment frame
-int handle_message_fragment(Client *client, UdpFrame *frame, ServerIOManager* io_manager);
+int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers);
 
-#endif // FRAME_HANDLERS_H
+#endif // MESSAGE_HANDLER_H

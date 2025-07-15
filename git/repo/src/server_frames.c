@@ -24,10 +24,10 @@ int send_connect_response(const uint64_t seq_num,
     frame.header.seq_num = _htonll(seq_num);
     frame.header.session_id = _htonl(session_id); // Use client's session ID
 
-    frame.payload.response.session_timeout = _htonl(session_timeout);
-    frame.payload.response.server_status = status;
+    frame.payload.connection_response.session_timeout = _htonl(session_timeout);
+    frame.payload.connection_response.server_status = status;
 
-    snprintf(frame.payload.response.server_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, server_name);
+    snprintf(frame.payload.connection_response.server_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, server_name);
 
     // Calculate CRC32 for the ACK frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(ConnectResponsePayload)));
@@ -35,6 +35,37 @@ int send_connect_response(const uint64_t seq_num,
     int bytes_sent = send_frame(&frame, src_socket, dest_addr);
     if (bytes_sent == SOCKET_ERROR) {
         fprintf(stderr, "send_connect_respose() failed\n");
+        return SOCKET_ERROR;
+    }
+    return bytes_sent;
+}
+
+int send_file_metadata_response(const uint64_t seq_num, 
+                    const uint32_t session_id, 
+                    const uint32_t file_id, 
+                    const uint8_t op_code,
+                    SOCKET src_socket, 
+                    const struct sockaddr_in *dest_addr
+                ) {
+    UdpFrame frame;
+    // Initialize the response frame
+    memset(&frame, 0, sizeof(UdpFrame));
+    // Set the header fields
+    frame.header.start_delimiter = _htons(FRAME_DELIMITER);
+    frame.header.frame_type = FRAME_TYPE_FILE_METADATA_RESPONSE;
+
+    frame.header.seq_num = _htonll(seq_num);
+    frame.header.session_id = _htonl(session_id); // Use client's session ID
+
+    frame.payload.file_metadata_response.file_id = _htonl(file_id);
+    frame.payload.file_metadata_response.op_code = op_code;
+
+    // Calculate CRC32 for the ACK frame
+    frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileMetadataResponsePayload)));
+
+    int bytes_sent = send_frame(&frame, src_socket, dest_addr);
+    if (bytes_sent == SOCKET_ERROR) {
+        fprintf(stderr, "send_file_metadata_respose() failed\n");
         return SOCKET_ERROR;
     }
     return bytes_sent;

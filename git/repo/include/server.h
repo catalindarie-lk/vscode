@@ -71,6 +71,8 @@ enum StreamChannelError{
     STREAM_ERR_FWRITE = 3,
     STREAM_ERR_FREAD = 4,
 
+    STREAM_ERR_SHA256_MISMATCH = 7,
+
     STREAM_ERR_BITMAP_MALLOC = 10,
     STREAM_ERR_FLAG_MALLOC = 11,
     STREAM_ERR_CHUNK_PTR_MALLOC = 12,
@@ -102,9 +104,14 @@ typedef struct {
     QueueSeqNum queue_seq_num;
     QueueSeqNum queue_priority_seq_num;
 
+    QueueAck queue_ack;
+    QueueAck queue_priority_ack;
+
     UniqueIdentifierNode *uid_hash_table[HASH_SIZE_UID]; // Hash table for unique identifiers (session IDs, file IDs, message IDs)
+    HashTableFramePendingAck ht_frame;
+
     CRITICAL_SECTION uid_ht_mutex;
-}ServerIOManager;
+}ServerBuffers;
 
 
 typedef struct{
@@ -139,41 +146,44 @@ typedef struct {
 
 typedef struct{
 
-    int client_index;
-    int fstream_index;
+    uint32_t client_index;
+    uint32_t fstream_index;
 
-    BOOL busy;                          // Indicates if this stream channel is currently in use for a transfer.
-    BOOL file_complete;                 // True if the entire file has been received and written.
-    uint8_t stream_err;                 // Stores an error code if something goes wrong with the stream.
+    SOCKET srv_socket;
+    struct sockaddr_in client_addr;
+
+    uint32_t sid;                       // Session ID associated with this file stream.
+    uint32_t fid;                       // File ID, unique identifier for the file associated with this file stream.
+    uint64_t fsize;                     // Total size of the file being transferred.
 
     uint64_t *bitmap;                   // Pointer to an array of uint64_t, where each bit represents a file fragment.
                                         // A bit set to 1 means the fragment has been received.
     uint8_t* flag;                      // Pointer to an array of uint8_t, used for custom flags per chunk/bitmap entry.
                                         // (e.g., 0b10000000 for last partial, 0b00000001 for written, etc.)
-    char** pool_block_file_chunk;             // Pointer to an array of char pointers, where each char* points to a
+    char** pool_block_file_chunk;       // Pointer to an array of char pointers, where each char* points to a
                                         // memory block holding a complete chunk of data (64 fragments).
-    uint32_t sid;                       // Session ID associated with this file stream.
-    uint32_t fid;                       // File ID, unique identifier for the file associated with this file stream.
-    uint64_t fsize;                     // Total size of the file being transferred.
-    uint64_t fragment_count;            // Total number of fragments in the entire file.
-    uint64_t bytes_received;            // Total bytes received for this file so far.
-    uint64_t bytes_written;             // Total bytes written to disk for this file so far.
-    uint64_t bitmap_entries_count;      // Number of uint64_t entries in the bitmap array.
-                                        // (Total fragments / 64, rounded up)
-    SHA256_CTX sha256_ctx;
-    uint8_t calculated_sha256[32];
-    BOOL file_hash_calculated;
-
-
-    uint8_t received_sha256[32];
-    BOOL file_hash_received;
-
-    BOOL file_hash_validated;
-
     BOOL trailing_chunk;                // True if the last bitmap entry represents a partial chunk (less than 64 fragments).
     BOOL trailing_chunk_complete;       // True if all bytes for the last, potentially partial, chunk have been received.
     uint64_t trailing_chunk_size;       // The actual size of the last chunk (if partial).
-    uint64_t chunks_hashed;
+
+    uint64_t file_end_frame_seq_num;
+    uint64_t fragment_count;            // Total number of fragments in the entire file.
+    uint64_t recv_bytes_count;          // Total bytes received for this file so far.
+    uint64_t written_bytes_count;       // Total bytes written to disk for this file so far.
+    uint64_t bitmap_entries_count;      // Number of uint64_t entries in the bitmap array.
+    uint64_t hashed_chunks_count;
+ 
+    BOOL fstream_busy;                  // Indicates if this stream channel is currently in use for a transfer.
+    uint8_t fstream_err;                // Stores an error code if something goes wrong with the stream.
+    BOOL file_complete;                 // True if the entire file has been received and written.
+    BOOL file_bytes_received;
+    BOOL file_bytes_written;
+    BOOL file_hash_received;
+    BOOL file_hash_calculated;
+    BOOL file_hash_validated;
+
+    uint8_t received_sha256[32];
+    uint8_t calculated_sha256[32];
 
     char fn[PATH_SIZE];                 // Array to store the file name/path.
     FILE *fp;                           // File pointer for the file being written to disk.
@@ -181,13 +191,14 @@ typedef struct{
     CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
 
     HANDLE hevent_recv_file;
-    HANDLE hevent_client_disconnect;
+    HANDLE hevent_close_stream;
     HANDLE htread_recv_file;
 
 }FileStream;
 
-typedef struct {  
-    struct sockaddr_in addr;            // Client's address
+typedef struct {
+    SOCKET srv_socket;
+    struct sockaddr_in client_addr;            // Client's address
     char ip[INET_ADDRSTRLEN];
     uint16_t port;
     
@@ -210,12 +221,11 @@ typedef struct {
     CRITICAL_SECTION lock;
 
 } Client;
-
+ 
 typedef struct{
     Client client[MAX_CLIENTS];     // Array of connected clients
     CRITICAL_SECTION lock;              // For thread-safe access to connected_clients
 }ClientList;
 
- 
+
 #endif
-// End of file: server.h

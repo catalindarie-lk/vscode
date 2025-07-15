@@ -85,7 +85,7 @@ int push_seq_num(QueueSeqNum *queue, QueueSeqNumEntry *seq_num_entry){
     return RET_VAL_SUCCESS;
 }
 // Pop sequence num data from queue -> send ack/nak (separate thread)
-int pop_seq_num(QueueSeqNum *queue, QueueSeqNumEntry *seq_num_entry){       
+int pop_seq_num(QueueSeqNum *queue, QueueSeqNumEntry *seq_num_entry){
     // Check if the queue is initialized
     if (queue == NULL || &queue->mutex == NULL){
         //fprintf(stderr, "Pop - Seq Num queue not initialized\n");
@@ -105,6 +105,62 @@ int pop_seq_num(QueueSeqNum *queue, QueueSeqNumEntry *seq_num_entry){
     // Move the head index forward
     (queue->head)++;
     queue->head %= SEQ_NUM_QUEUE_SIZE;
+    LeaveCriticalSection(&queue->mutex);
+    return RET_VAL_SUCCESS;
+}
+
+void new_ack_entry(QueueAckEntry *entry, const uint64_t seq, const uint32_t sid, const uint8_t op_code, const SOCKET src_socket, const struct sockaddr_in *dest_addr){
+    entry->seq = seq;
+    entry->sid = sid;
+    entry->op_code = op_code;
+    entry->src_socket = src_socket;
+    memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
+    return;
+}
+
+int push_ack(QueueAck *queue, QueueAckEntry *entry){
+    // Check if the queue is initialized
+    if (queue == NULL || &queue->mutex == NULL){
+        fprintf(stderr, "Push - Ack queue not initialized\n");
+        return RET_VAL_ERROR;
+    }
+    EnterCriticalSection(&queue->mutex);
+    // Check if the queue is full
+    if((queue->tail + 1) % QUEUE_ACK_SIZE == queue->head){
+        LeaveCriticalSection(&queue->mutex);
+        //fprintf(stderr, "Push - Ack queue Full\n");
+        return RET_VAL_ERROR;
+    }
+    // Add the entry to the ACK queue 
+    memcpy(&queue->entry[queue->tail], entry, sizeof(QueueAckEntry));
+    // Move the tail index forward    
+    (queue->tail)++;
+    queue->tail %= QUEUE_ACK_SIZE;
+    // Release the mutex after modifying the queue
+    LeaveCriticalSection(&queue->mutex);
+    return RET_VAL_SUCCESS;
+}
+
+int pop_ack(QueueAck *queue, QueueAckEntry *entry){       
+    // Check if the queue is initialized
+    if (queue == NULL || &queue->mutex == NULL){
+        //fprintf(stderr, "Pop - Ack queue not initialized\n");
+        return RET_VAL_ERROR;
+    }
+    EnterCriticalSection(&queue->mutex);
+    // Check if the queue is empty before removing an entry
+    if (queue->head == queue->tail) {
+        LeaveCriticalSection(&queue->mutex);
+        //fprintf(stderr, "Pop - Ack queue empty\n");
+        return RET_VAL_ERROR;
+    }
+    // Copy the entry to buffer
+    memcpy(entry, &queue->entry[queue->head], sizeof(QueueAckEntry));
+    // Remove the entry in the ACK queue
+    memset(&queue->entry[queue->head], 0, sizeof(QueueAckEntry));
+    // Move the head index forward
+    (queue->head)++;
+    queue->head %= QUEUE_ACK_SIZE;
     LeaveCriticalSection(&queue->mutex);
     return RET_VAL_SUCCESS;
 }
