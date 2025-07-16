@@ -123,15 +123,10 @@ static void file_attach_fragment_to_chunk(FileStream *fstream, char *fragment_bu
             // Mark the flag for this last chunk specifically as CHUNK_TRAILING.
             // This flag differentiates it from regular CHUNK_BODY entries for writing logic.
             fstream->flag[fstream_index] = CHUNK_TRAILING;
-            //fprintf(stdout, "Receiving last chunk bytes: %llu\n", fstream->trailing_chunk_size);
         }
         // Check if all expected bytes for the entire file have been received.
         if(fstream->recv_bytes_count == fstream->fsize){
-            // If all bytes are received, mark the trailing chunk as complete.
-            // This signals that the last chunk is fully assembled (even if partial in size).
             fstream->trailing_chunk_complete = TRUE;
-
-            //update_uid_status_hash_table(buffers->uid_hash_table, &buffers->uid_ht_mutex, fstream->sid, fstream->fid, UID_RECV_COMPLETE);
             fprintf(stdout, "Received complete file: %s, Size: %llu, Last chunk size: %llu\n", fstream->fn, fstream->recv_bytes_count, fstream->trailing_chunk_size);
         }
     }
@@ -263,7 +258,7 @@ int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers
         goto exit_err;
     }
 
-    if(search_uid_hash_table(buffers->uid_hash_table, &buffers->uid_ht_mutex, recv_session_id, recv_file_id, UID_RECV_COMPLETE) == TRUE){
+    if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received metadata frame Seq: %llu for old completed fID: %u sID %u\n", recv_seq_num, recv_file_id, recv_session_id);
         err = ERR_EXISTING_FILE;
         goto exit_err;
@@ -285,17 +280,21 @@ int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers
         goto exit_err;
     }
 
-    add_uid_hash_table(buffers->uid_hash_table, &buffers->uid_ht_mutex, recv_session_id, recv_file_id, UID_WAITING_FRAGMENTS);
+    if(ht_insert_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_WAITING_FRAGMENTS) == RET_VAL_ERROR){
+        fprintf(stderr, "Failed to allocate memory for file ID in hash table\n");
+        err = ERR_MEMORY_ALLOCATION;
+        goto exit_err;
+    }
 
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_METADATA, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    push_ack(&buffers->fqueue_priority_ack, &ack_entry);
     
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
 
 exit_err:
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, err, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    push_ack(&buffers->fqueue_priority_ack, &ack_entry);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }
@@ -320,7 +319,7 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
     uint64_t recv_fragment_offset = _ntohll(frame->payload.file_fragment.offset);
     uint32_t recv_fragment_size = _ntohl(frame->payload.file_fragment.size);
 
-    if(search_uid_hash_table(buffers->uid_hash_table, &buffers->uid_ht_mutex, recv_session_id, recv_file_id, UID_RECV_COMPLETE) == TRUE){
+    if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received fragment frame Seq: %llu; for old completed fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
         err = ERR_EXISTING_FILE;
         goto exit_err;
@@ -367,14 +366,14 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
     file_attach_fragment_to_chunk(&client->fstream[slot], frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size, buffers);
 
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_ACK, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->queue_ack, &ack_entry);
+    push_ack(&buffers->fqueue_ack, &ack_entry);
 
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
 
 exit_err:
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, err, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    push_ack(&buffers->fqueue_priority_ack, &ack_entry);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 
@@ -398,7 +397,7 @@ int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
     uint32_t recv_session_id = _ntohl(frame->header.session_id); // Session ID from frame header
     uint32_t recv_file_id = _ntohl(frame->payload.file_fragment.file_id); // File ID from fragment payload
 
-    if(search_uid_hash_table(buffers->uid_hash_table, &buffers->uid_ht_mutex, recv_session_id, recv_file_id, UID_RECV_COMPLETE) == TRUE){
+    if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received file end frame for completed file Seq: %llu; sID: %u; fID: %u;\n", recv_seq_num, recv_session_id, recv_file_id);
         err = ERR_EXISTING_FILE;
         goto exit_err;
@@ -420,7 +419,7 @@ int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
 
     if(fstream->file_complete){
         new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_END, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
+        push_ack(&buffers->fqueue_priority_ack, &ack_entry);
     }
  
     LeaveCriticalSection(&client->lock);
@@ -428,7 +427,7 @@ int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
 
 exit_err:
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, err, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    push_ack(&buffers->fqueue_priority_ack, &ack_entry);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }

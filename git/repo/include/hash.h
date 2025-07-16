@@ -37,27 +37,35 @@ void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num);
 void ht_clean(HashTableFramePendingAck *ht);
 
 //--------------------------------------------------------------------------------------------------------------------------
-#define HASH_SIZE_UID                  (1024)
+#define HASH_SIZE_ID                  (512)
 
-typedef uint8_t HashMessageStatus;
-enum HashMessageStatus{
-    UID_WAITING_FRAGMENTS = 1,
-    UID_RECV_COMPLETE= 2
+typedef uint8_t HashTableStatus;
+enum HashTableStatus{
+    ID_STATUS_NONE = 0,
+    ID_WAITING_FRAGMENTS = 1,
+    ID_RECV_COMPLETE= 2
 };
 
-typedef struct UniqueIdentifierNode{
-    uint32_t u_id;
-    uint32_t s_id;
+typedef struct IdentifierNode{
+    uint32_t id;
+    uint32_t sid;
     uint8_t status;                         //1 - Pending; 2 - Finished
-    struct UniqueIdentifierNode *next;
-}UniqueIdentifierNode;
+    struct IdentifierNode *next;
+}IdentifierNode;
 
-uint64_t get_hash_uid(uint32_t u_id);
-void add_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status);
-void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id);
-BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status);
-int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status);
-void clean_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex);
-void print_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex);
+typedef struct{
+    IdentifierNode *entry[HASH_SIZE_ID];
+    CRITICAL_SECTION mutex;
+    uint32_t count;
+    MemPool pool;
+}HashTableIdentifierNode;
+
+uint64_t ht_get_hash_id(uint32_t id);
+int ht_insert_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
+void ht_remove_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id);
+BOOL ht_search_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
+int ht_update_id_status(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
+void ht_clean_id(HashTableIdentifierNode *ht);
+void ht_print_id(HashTableIdentifierNode *ht);
 
 #endif // FRAMES_HASH_H

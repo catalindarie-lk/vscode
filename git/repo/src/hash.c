@@ -36,6 +36,7 @@ int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame){
     return RET_VAL_SUCCESS;
 }
 void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num){
+   
     EnterCriticalSection(&ht->mutex);
 
     uint64_t index = ht_get_hash_frame(seq_num);
@@ -94,124 +95,122 @@ void ht_clean(HashTableFramePendingAck *ht){
     return;
 }
 
-
 //--------------------------------------------------------------------------------------------------------------------------
 
-uint64_t get_hash_uid(uint32_t u_id) {
-    return (u_id % HASH_SIZE_UID);
+uint64_t ht_get_hash_id(uint32_t id) {
+    return (id % HASH_SIZE_ID);
 }
-void add_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
-    
-    EnterCriticalSection(mutex);
-    
-    uint64_t index = get_hash_uid(u_id);
-    
-    UniqueIdentifierNode *head = (UniqueIdentifierNode *)malloc(sizeof(UniqueIdentifierNode));
-    head->u_id = u_id;
-    head->s_id = s_id;
-    head->status = UID_WAITING_FRAGMENTS;
-    fprintf(stdout, "Added to hash table SID: %d - UID: %d\n", head->s_id, head->u_id);
-    head->next = (UniqueIdentifierNode *)hash_table[index];  // Insert at the head (linked list)
-    hash_table[index] = head;
-    LeaveCriticalSection(mutex);
-    return;
+int ht_insert_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status) {
+    EnterCriticalSection(&ht->mutex);
+    uint64_t index = ht_get_hash_id(id);   
+    IdentifierNode *node = (IdentifierNode *)malloc(sizeof(IdentifierNode));
+        if(node == NULL){
+        fprintf(stderr, "ERROR: fail to allocate memory for id hash node\n");
+        return RET_VAL_ERROR;
+    }
+    node->sid = sid;
+    node->id = id;    
+    node->status = status;
+    fprintf(stdout, "Added to hash table SID: %d - ID: %d\n", node->sid, node->id);
+    node->next = (IdentifierNode *)ht->entry[index];  // Insert at the head (linked list)
+    ht->entry[index] = node;
+    InterlockedIncrement(&ht->count);
+    LeaveCriticalSection(&ht->mutex);
+    return RET_VAL_SUCCESS;
 }
-void remove_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id) {
+void ht_remove_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id) {
     
-    EnterCriticalSection(mutex);
+    EnterCriticalSection(&ht->mutex);
 
-    uint64_t index = get_hash_uid(u_id); 
-    UniqueIdentifierNode *curr = hash_table[index];
-    UniqueIdentifierNode *prev = NULL;
+    uint64_t index = ht_get_hash_id(id); 
+    IdentifierNode *curr = ht->entry[index];
+    IdentifierNode *prev = NULL;
     while (curr) {     
-        if (curr->u_id == u_id && curr->s_id == s_id) {
+        if (curr->id == id && curr->sid == sid) {
             // Found it
-            //fprintf(stdout, "Removing UID: %d, SID: %d from hash table\n", curr->u_id, curr->s_id);
             if (prev) {
                 prev->next = curr->next;
             } else {
-                hash_table[index] = curr->next;
+                ht->entry[index] = curr->next;
             }
             free(curr);
-            LeaveCriticalSection(mutex);
+            LeaveCriticalSection(&ht->mutex);
             return;
         }
         prev = curr;
         curr = curr->next;
     }
-    LeaveCriticalSection(mutex);
+    LeaveCriticalSection(&ht->mutex);
     return;
 }
-BOOL search_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+BOOL ht_search_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status) {
     
-    EnterCriticalSection(mutex);
+    EnterCriticalSection(&ht->mutex);
     
-    uint64_t index = get_hash_uid(u_id);
-    UniqueIdentifierNode *node = hash_table[index];
+    uint64_t index = ht_get_hash_id(id);
+    IdentifierNode *node = ht->entry[index];
     while (node) {
-        if (node->s_id == s_id && node->u_id == u_id && node->status == status){
-            //fprintf(stdout, "Found in hash table UID: %d, session ID: %d, status %d\n", node->u_id, node->s_id, node->status);
-            LeaveCriticalSection(mutex);
+        if (node->sid == sid && node->id == id && node->status == status){
+            LeaveCriticalSection(&ht->mutex);
             return TRUE;
         }           
         node = node->next;
     }
-    LeaveCriticalSection(mutex);
+    LeaveCriticalSection(&ht->mutex);
     return FALSE;
 }
-int update_uid_status_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex, const uint32_t s_id, const uint32_t u_id, const uint8_t status) {
+int ht_update_id_status(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status) {
     
-    EnterCriticalSection(mutex);
+    EnterCriticalSection(&ht->mutex);
     
-    uint64_t index = get_hash_uid(u_id);
-    UniqueIdentifierNode *node = hash_table[index];
+    uint64_t index = ht_get_hash_id(id);
+    IdentifierNode *node = ht->entry[index];
     while (node) {
-        if (node->u_id == u_id && node->s_id == s_id){
+        if (node->id == id && node->sid == sid){
             node->status = status;
-            //fprintf(stdout, "Updated in hash table SID: %d UID: %d, new status %d\n", node->session_id, node->u_id, node->status);
-            LeaveCriticalSection(mutex);
+            LeaveCriticalSection(&ht->mutex);
             return RET_VAL_SUCCESS;
         }           
         node = node->next;
     }
-    LeaveCriticalSection(mutex);
+    LeaveCriticalSection(&ht->mutex);
     return RET_VAL_ERROR;
 
 }
-void clean_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex) {
+void ht_clean_id(HashTableIdentifierNode *ht) {
     
-    EnterCriticalSection(mutex);
+    EnterCriticalSection(&ht->mutex);
     
-    UniqueIdentifierNode *head = NULL;
-    for (int i = 0; i < HASH_SIZE_UID; i++) {
-        if(hash_table[i]){       
-            UniqueIdentifierNode *node = hash_table[i];
+    IdentifierNode *head = NULL;
+    for (int index = 0; index < HASH_SIZE_ID; index++) {
+        if(ht->entry[index]){       
+            IdentifierNode *node = ht->entry[index];
             while (node) {
-                    head = node;
-                    //fprintf(stdout, "Bucket: %d - Freeing SeqNum: %d\n", i, head->seq_num);                   
+                    head = node;                
                     node = node->next;
                     free(head);
             }
             free(node);
-            hash_table[i] = NULL;
+            ht->entry[index] = NULL;
         }     
     }
-    LeaveCriticalSection(mutex);
+    LeaveCriticalSection(&ht->mutex);
     return;
 }
-void print_uid_hash_table(UniqueIdentifierNode *hash_table[], CRITICAL_SECTION *mutex) {
+void ht_print_id(HashTableIdentifierNode *ht) {
     
-    EnterCriticalSection(mutex);
+    EnterCriticalSection(&ht->mutex);
     
-    for (int i = 0; i < HASH_SIZE_UID; i++) {
-        if(hash_table[i]){
-            printf("BUCKET %d: \n", i);           
-            UniqueIdentifierNode *node = hash_table[i];
+    for (int index = 0; index < HASH_SIZE_ID; index++) {
+        if(ht->entry[index]){
+            printf("BUCKET %d: \n", index);           
+            IdentifierNode *node = ht->entry[index];
             while (node) {
-                    fprintf(stdout, "SID: %d - UID: %d\n", node->s_id, node->u_id);                   
+                    fprintf(stdout, "sID: %d - fID: %d\n", node->sid, node->id);                   
                     node = node->next;
             }
         }     
     }
-    LeaveCriticalSection(mutex);
+    LeaveCriticalSection(&ht->mutex);
 }
+

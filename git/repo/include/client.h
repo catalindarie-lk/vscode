@@ -22,35 +22,6 @@
 #ifndef MAX_CLIENT_FILE_STREAMS
 #define MAX_CLIENT_FILE_STREAMS         10
 #endif
-
-
-#ifndef SERVER_STATUS_NONE
-#define SERVER_STATUS_NONE              0
-#endif
-#ifndef SERVER_STATUS_BUSY
-#define SERVER_STATUS_BUSY              1
-#endif
-#ifndef SERVER_STATUS_READY
-#define SERVER_STATUS_READY             2
-#endif
-#ifndef SERVER_STATUS_ERROR
-#define SERVER_STATUS_ERROR             3
-#endif
-
-#ifndef CLIENT_STATUS_NONE
-#define CLIENT_STATUS_NONE              0
-#endif
-#ifndef CLIENT_STATUS_BUSY
-#define CLIENT_STATUS_BUSY              1
-#endif
-#ifndef CLIENT_STATUS_READY
-#define CLIENT_STATUS_READY             2
-#endif
-#ifndef CLIENT_STATUS_ERROR
-#define CLIENT_STATUS_ERROR             3
-#endif
-
-
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
 #define DEFAULT_SESSION_TIMEOUT_SEC     120
 #endif
@@ -83,6 +54,12 @@
 #define TIMEOUT_METADATA_RESPONSE_MS    (5000)      //wait for 5 sec after sending a metadata fragment for response
 #define MAX_RETRIES_STOP_TRANSFER       (5)         //max retries to stop file/message transfer
 
+enum Status{
+    STATUS_NONE = 0,
+    STATUS_BUSY = 1,
+    STATUS_READY = 2,
+    STATUS_ERROR = 3
+};
 
 typedef uint8_t SessionStatus;
 enum SessionStatus{
@@ -94,33 +71,6 @@ enum SessionStatus{
 typedef struct{
     uint8_t sha256[32];
 }FileHash;
-
-typedef struct{
-
-    FILE *fp;
-    char *fpath;
-    char *fname;
-    long long file_size;
-    uint32_t file_id;
-    uint64_t remaining_bytes_to_send;
-
-//    uint64_t pending_metadata_seq_num;  
-    uint8_t chunk_buffer[FILE_CHUNK_SIZE];
-//    uint32_t chunk_bytes_to_send;
-//    uint32_t chunk_fragment_offset;
-//    uint32_t frame_fragment_size;
-//    uint64_t frame_fragment_offset;
-    BOOL throttle;
-
-    SHA256_CTX sha256_ctx;
-    FileHash file_hash;
-
-    HANDLE hevent_start_file_transfer;
-    HANDLE hevent_stop_file_transfer;
-    HANDLE hevent_file_metadata;
-    HANDLE hthread_file_transfer;
-
-}FileStream;
 
 typedef struct{
 
@@ -143,21 +93,43 @@ typedef struct{
 }MessageStream;
 
 typedef struct{
+
+    FILE *fp;
+    char *fpath;
+    char *fname;
+    long long fsize;
+
+    uint32_t fid;
+    uint64_t remaining_bytes_to_send;
+    uint64_t pending_metadata_seq_num;
+
+    BOOL throttle;
+    FileHash fhash;
+
+    HANDLE hevent_start_file_transfer;
+    HANDLE hevent_stop_file_transfer;
+    HANDLE hevent_metadata_response;
+    HANDLE hthread_file_transfer;
+
+}FileStream;
+
+typedef struct{
     SOCKET socket;
     struct sockaddr_in client_addr;
     struct sockaddr_in server_addr;
 
     uint8_t client_status;         
     uint8_t session_status;     // 0-DISCONNECTED; 1-CONNECTED
-    uint32_t client_id;
+    uint32_t cid;
     uint8_t flags;
     char client_name[NAME_SIZE];
     time_t last_active_time;
    
     volatile uint64_t frame_count;       // this will be sent as seq_num
-    volatile uint32_t uid_count;      // file id counter for the current session
+    volatile uint32_t fid_count;
+    volatile uint32_t mid_count;
 
-    uint32_t session_id;        // session id received from the server after connection accepted
+    uint32_t sid;        // session id received from the server after connection accepted
     uint8_t server_status;      // 0-NOK; 1-OK (connection confirmed by server)
     uint32_t session_timeout;   // timeout received from the server; to be used to send KEEP_ALIVE frames
     char server_name[NAME_SIZE];       // Human readable server name
@@ -173,7 +145,7 @@ typedef struct {
     QueueFrame queue_frame;
     QueueFrame queue_priority_frame;
     HashTableFramePendingAck ht_frame;
-}ClientIOManager;
+}ClientBuffers;
 
 
 

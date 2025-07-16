@@ -45,6 +45,7 @@ typedef struct {
     uint32_t head;          
     uint32_t tail;
     CRITICAL_SECTION mutex; // Mutex for thread-safe access to frame_buffer
+    HANDLE semaphore;
 }QueueFrame;
 
 typedef struct {
@@ -59,6 +60,7 @@ typedef struct {
     uint32_t head;          
     uint32_t tail;
     CRITICAL_SECTION mutex; // Mutex for thread-safe access to frame_buffer
+    HANDLE semaphore;
 }QueueAck;
 
 

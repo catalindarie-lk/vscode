@@ -25,6 +25,7 @@
         "checksum.h": "c",
         "server.h": "c",
         "netendians.h": "c",
-        "protocol_frames.h": "c"
+        "protocol_frames.h": "c",
+        "message_handler.h": "c"
     }
 }

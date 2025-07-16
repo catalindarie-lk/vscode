@@ -72,7 +72,7 @@ int send_file_metadata(const uint64_t seq_num,
                             const uint32_t file_fragment_size, 
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
+                            ClientBuffers* buffers
                         ){
 
     UdpFrame frame;
@@ -109,7 +109,7 @@ int send_file_metadata(const uint64_t seq_num,
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));
     
-    if(ht_insert_frame(&io_manager->ht_frame, &frame) == RET_VAL_ERROR){
+    if(ht_insert_frame(&buffers->ht_frame, &frame) == RET_VAL_ERROR){
         fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
         return RET_VAL_ERROR;
     }
@@ -130,7 +130,7 @@ int send_file_fragment(const uint64_t seq_num,
                             const uint32_t fragment_size, 
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
+                            ClientBuffers* buffers
                         ){
 
     UdpFrame frame;
@@ -154,7 +154,7 @@ int send_file_fragment(const uint64_t seq_num,
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileFragmentPayload)));  
 
-    if(ht_insert_frame(&io_manager->ht_frame, &frame) == RET_VAL_ERROR){
+    if(ht_insert_frame(&buffers->ht_frame, &frame) == RET_VAL_ERROR){
         fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
         return RET_VAL_ERROR;
     }
@@ -175,7 +175,7 @@ int send_file_end(const uint64_t seq_num,
                             const char *file_hash,
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
+                            ClientBuffers* buffers
                         ){
 
     UdpFrame frame;
@@ -196,7 +196,7 @@ int send_file_end(const uint64_t seq_num,
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileEndPayload)));
     
-    if(ht_insert_frame(&io_manager->ht_frame, &frame) == RET_VAL_ERROR){
+    if(ht_insert_frame(&buffers->ht_frame, &frame) == RET_VAL_ERROR){
         fprintf(stderr, "Mem Pool is fool, failed to allocate!\n");
         return RET_VAL_ERROR;
     }
@@ -218,7 +218,7 @@ int send_long_text_fragment(const uint64_t seq_num,
                             const uint32_t fragment_len, 
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr, 
-                            ClientIOManager* io_manager
+                            ClientBuffers* buffers
                         ){
 
     UdpFrame frame;
@@ -244,7 +244,7 @@ int send_long_text_fragment(const uint64_t seq_num,
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(LongTextPayload)));  
 
-    if(ht_insert_frame(&io_manager->ht_frame, &frame) == RET_VAL_ERROR){
+    if(ht_insert_frame(&buffers->ht_frame, &frame) == RET_VAL_ERROR){
         fprintf(stderr, "Mem Pool is full, failed to allocate!\n");
         return RET_VAL_ERROR;
     }

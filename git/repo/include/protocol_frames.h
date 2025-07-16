@@ -43,10 +43,10 @@ enum FrameType{
 
 typedef uint8_t AckErrorCode;
 enum AckErrorCode {
-    STS_ACK = 0,
-    STS_KEEP_ALIVE = 1,  
-    STS_CONFIRM_FILE_METADATA = 5,
-    STS_CONFIRM_FILE_END = 6,
+    STS_ACK = 11,
+    STS_KEEP_ALIVE = 12,  
+    STS_CONFIRM_FILE_METADATA = 21,
+    STS_CONFIRM_FILE_END = 22,
 
     ERR_EXISTING_FILE = 100,     // Server has completed this transfer
     ERR_INVALID_SESSION = 101,     // Session ID not recognized
@@ -58,7 +58,12 @@ enum AckErrorCode {
     ERR_RESOURCE_LIMIT = 107,      // Server ran out of memory or slots
     ERR_UNAUTHORIZED = 108,        // Authentication/authorization failed
     ERR_INTERNAL_ERROR = 109,      // Catch-all for unexpected server fault
-    ERR_TRANSFER_INIT = 110
+    ERR_TRANSFER_INIT = 110,
+
+    ERR_EXISTING_MESSAGE = 200,
+    ERR_MESSAGE_VALIDATION = 201,
+
+    ERR_MEMORY_ALLOCATION = 121
 };
 
 #pragma pack(push, 1) 

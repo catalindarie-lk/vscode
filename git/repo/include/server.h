@@ -22,18 +22,6 @@
 #define MAX_CLIENT_FILE_STREAMS         10
 #endif
 
-#ifndef SERVER_STATUS_NONE
-#define SERVER_STATUS_NONE              0
-#endif
-#ifndef SERVER_STATUS_BUSY
-#define SERVER_STATUS_BUSY              1
-#endif
-#ifndef SERVER_STATUS_READY
-#define SERVER_STATUS_READY             2
-#endif
-#ifndef SERVER_STATUS_ERROR
-#define SERVER_STATUS_ERROR             3
-#endif
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
 #define DEFAULT_SESSION_TIMEOUT_SEC     120
 #endif
@@ -55,7 +43,12 @@
 #define BLOCK_SIZE_CHUNK                ((uint64_t)(FILE_FRAGMENT_SIZE * 64))
 #define BLOCK_COUNT_CHUNK               ((uint64_t)(2048))
 
-
+enum Status{
+    STATUS_NONE = 0,
+    STATUS_BUSY = 1,
+    STATUS_READY = 2,
+    STATUS_ERROR = 3
+};
 
 typedef uint8_t ClientConnection;
 enum ClientConnection {
@@ -101,18 +94,16 @@ typedef struct {
 
     QueueFrame queue_frame;
     QueueFrame queue_priority_frame;
-    QueueSeqNum queue_seq_num;
-    QueueSeqNum queue_priority_seq_num;
 
-    QueueAck queue_ack;
-    QueueAck queue_priority_ack;
+    QueueAck mqueue_ack;
+    QueueAck fqueue_ack;
+    QueueAck fqueue_priority_ack;
 
-    UniqueIdentifierNode *uid_hash_table[HASH_SIZE_UID]; // Hash table for unique identifiers (session IDs, file IDs, message IDs)
     HashTableFramePendingAck ht_frame;
+    HashTableIdentifierNode ht_fid;
+    HashTableIdentifierNode ht_mid;
 
-    CRITICAL_SECTION uid_ht_mutex;
 }ServerBuffers;
-
 
 typedef struct{
     FILETIME ft;
@@ -142,7 +133,7 @@ typedef struct {
     char file_name[PATH_SIZE];          // File Name: Buffer to store the name of the file associated with this message stream.
 
     CRITICAL_SECTION lock;              // Lock: Spinlock/Mutex to protect access to this MsgStream structure in multithreaded environments.
-} MsgStream;
+} MessageStream;
 
 typedef struct{
 
@@ -191,8 +182,8 @@ typedef struct{
     CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
 
     HANDLE hevent_recv_file;
-    HANDLE hevent_close_stream;
     HANDLE htread_recv_file;
+    HANDLE hevent_close_stream;
 
 }FileStream;
 
@@ -213,7 +204,7 @@ typedef struct {
     uint32_t client_index;                  // Index of the slot the client is connected to [0..MAX_CLIENTS-1]
     uint8_t status_index;                // 0->FREE; 1->BUSY
  
-    MsgStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
+    MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
     FileStream fstream[MAX_CLIENT_FILE_STREAMS];
      
     Statistics statistics;

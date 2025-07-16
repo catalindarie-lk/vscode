@@ -30,6 +30,7 @@ int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry){
     // Move the tail index forward    
     (queue->tail)++;
     queue->tail %= FRAME_QUEUE_SIZE;
+    ReleaseSemaphore(queue->semaphore, 1, NULL);
     // Release the mutex after modifying the queue
     LeaveCriticalSection(&queue->mutex);
     return RET_VAL_SUCCESS;
@@ -136,6 +137,7 @@ int push_ack(QueueAck *queue, QueueAckEntry *entry){
     // Move the tail index forward    
     (queue->tail)++;
     queue->tail %= QUEUE_ACK_SIZE;
+    ReleaseSemaphore(queue->semaphore, 1, NULL);
     // Release the mutex after modifying the queue
     LeaveCriticalSection(&queue->mutex);
     return RET_VAL_SUCCESS;

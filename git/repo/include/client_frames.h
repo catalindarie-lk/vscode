@@ -29,7 +29,7 @@ int send_file_metadata(const uint64_t seq_num,
                             const uint32_t file_fragment_size, 
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
+                            ClientBuffers* buffers
                         );
 
 int send_file_fragment(const uint64_t seq_num, 
@@ -40,7 +40,7 @@ int send_file_fragment(const uint64_t seq_num,
                             const uint32_t fragment_size, 
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
+                            ClientBuffers* buffers
                         );
 
 int send_file_end(const uint64_t seq_num, 
@@ -50,7 +50,7 @@ int send_file_end(const uint64_t seq_num,
                             const char *file_hash,
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr,
-                            ClientIOManager* io_manager
+                            ClientBuffers* buffers
                         );
 
 int send_long_text_fragment(const uint64_t seq_num, 
@@ -62,7 +62,7 @@ int send_long_text_fragment(const uint64_t seq_num,
                             const uint32_t fragment_len, 
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr, 
-                            ClientIOManager* io_manager
+                            ClientBuffers* buffers
                         );
 
 
