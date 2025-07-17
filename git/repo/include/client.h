@@ -34,7 +34,8 @@
 #define CLIENT_ID                       0xAA        // Example client ID, can be set dynamically
 #define CLIENT_NAME                     "lkdc UDP Text/File Transfer Client"
 
-#define CONNECTION_SUCCESFULL_TIMEOUT_MS    2500   
+#define ESTABLISHED_TIMEOUT_MS          2500
+#define DISCONNECTED_TIMEOUT_MS         2500
 
 #define TEXT_CHUNK_SIZE                 (TEXT_FRAGMENT_SIZE * 128)
 #define FILE_CHUNK_SIZE                 (FILE_FRAGMENT_SIZE * 128)
@@ -55,7 +56,7 @@
 #define MAX_RETRIES_STOP_TRANSFER       (5)         //max retries to stop file/message transfer
 
 enum Status{
-    STATUS_NONE = 0,
+    STATUS_CLOSED = 0,
     STATUS_BUSY = 1,
     STATUS_READY = 2,
     STATUS_ERROR = 3
@@ -63,9 +64,9 @@ enum Status{
 
 typedef uint8_t SessionStatus;
 enum SessionStatus{
-    SESSION_DISCONNECTED = 0,
-    SESSION_CONNECTING = 1,
-    SESSION_CONNECTED = 2
+    CONNECTION_CLOSED = 0,
+    CONNECTION_LISTENING = 1,
+    CONNECTION_ESTABLISHED = 2
 };
 
 typedef struct{
@@ -83,12 +84,10 @@ typedef struct{
     uint32_t message_id;
     uint32_t message_len;
     uint32_t remaining_bytes_to_send;
-    uint32_t frame_fragment_offset;
-    uint32_t frame_fragment_len;
     BOOL throttle;  
 
     HANDLE hevent_start_message_send;
-    HANDLE hevent_stop_message_send;
+    HANDLE hevent_close_message_stream_thread;
     HANDLE hthread_message_send;
 }MessageStream;
 
@@ -107,7 +106,7 @@ typedef struct{
     FileHash fhash;
 
     HANDLE hevent_start_file_transfer;
-    HANDLE hevent_stop_file_transfer;
+    HANDLE hevent_close_file_stream_thread;
     HANDLE hevent_metadata_response;
     HANDLE hthread_file_transfer;
 
@@ -134,6 +133,12 @@ typedef struct{
     uint32_t session_timeout;   // timeout received from the server; to be used to send KEEP_ALIVE frames
     char server_name[NAME_SIZE];       // Human readable server name
     
+    HANDLE hevent_connection_listening;
+    HANDLE hevent_connection_established;
+    HANDLE hevent_connection_closed;
+
+    HANDLE hevent_shutdown;
+
     FileStream fstream[MAX_CLIENT_FILE_STREAMS];
     MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
 
@@ -147,8 +152,15 @@ typedef struct {
     HashTableFramePendingAck ht_frame;
 }ClientBuffers;
 
+static void clean_file_stream(FileStream *fstream);
+static void clean_message_stream(MessageStream *mstream);
 
-
-uint64_t get_new_seq_num(); 
+uint64_t get_new_seq_num();
+void request_disconnect();
+void force_disconnect();
+void timeout_disconnect();
+void request_connect();
+void transfer_file();
+void send_text_message();
 
 #endif

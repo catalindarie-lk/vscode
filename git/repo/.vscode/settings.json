@@ -26,6 +26,7 @@
         "server.h": "c",
         "netendians.h": "c",
         "protocol_frames.h": "c",
-        "message_handler.h": "c"
+        "message_handler.h": "c",
+        "fileio.h": "c"
     }
 }

@@ -33,6 +33,7 @@ HANDLE hthread_process_frame;
 HANDLE hthread_ack_frame;
 HANDLE hthread_send_ack; 
 HANDLE hthread_client_timeout;
+HANDLE hthread_file_stream_io;
 HANDLE hthread_server_command;
 
 const char *server_ip = "10.10.10.1"; // IPv4 example
@@ -44,7 +45,6 @@ static Client* find_client(ClientList *client_list, const uint32_t session_id);
 static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, const SOCKET srv_socket, const struct sockaddr_in *client_addr);
 static int remove_client(ClientList *client_list, ServerBuffers* buffers, const uint32_t slot);
 
-void register_ack(QueueSeqNum *queue, Client *client, UdpFrame *frame, uint8_t op_code);
 void file_cleanup_stream(FileStream *fstream, ServerBuffers* buffers);
 void message_cleanup_stream(MessageStream *mstream, ServerBuffers* buffers);
 void cleanup_client(Client *client, ServerBuffers* buffers);
@@ -131,28 +131,33 @@ static int init_server_buffers(){
     // initialize queue frames
     buffers.queue_frame.head = 0;
     buffers.queue_frame.tail = 0;
+    memset(&buffers.queue_frame.frame_entry, 0, FRAME_QUEUE_SIZE * sizeof(QueueFrameEntry));
     InitializeCriticalSection(&buffers.queue_frame.mutex);
     buffers.queue_frame.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
     // initialize priority queue frames
     buffers.queue_priority_frame.head = 0;
     buffers.queue_priority_frame.tail = 0;
+    memset(&buffers.queue_priority_frame.frame_entry, 0, FRAME_QUEUE_SIZE * sizeof(QueueFrameEntry));
     InitializeCriticalSection(&buffers.queue_priority_frame.mutex);
     buffers.queue_priority_frame.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
 
+    buffers.queue_priority_ack.head = 0;
+    buffers.queue_priority_ack.tail = 0;
+    memset(&buffers.queue_priority_ack.entry, 0, QUEUE_ACK_SIZE * sizeof(QueueAckEntry));
+    InitializeCriticalSection(&buffers.queue_priority_ack.mutex);
+    buffers.queue_priority_ack.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+
     buffers.mqueue_ack.head = 0;
     buffers.mqueue_ack.tail = 0;
+    memset(&buffers.mqueue_ack.entry, 0, QUEUE_ACK_SIZE * sizeof(QueueAckEntry));
     InitializeCriticalSection(&buffers.mqueue_ack.mutex);
     buffers.mqueue_ack.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
 
     buffers.fqueue_ack.head = 0;
     buffers.fqueue_ack.tail = 0;
+    memset(&buffers.fqueue_ack.entry, 0, QUEUE_ACK_SIZE * sizeof(QueueAckEntry));
     InitializeCriticalSection(&buffers.fqueue_ack.mutex);
     buffers.fqueue_ack.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
-
-    buffers.fqueue_priority_ack.head = 0;
-    buffers.fqueue_priority_ack.tail = 0;
-    InitializeCriticalSection(&buffers.fqueue_priority_ack.mutex);
-    buffers.fqueue_priority_ack.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
  
     for(int i = 0; i < MAX_CLIENTS; i++){
         InitializeCriticalSection(&client_list.client[i].lock);
@@ -199,6 +204,11 @@ static int start_threads() {
         return RET_VAL_ERROR;
     }
 
+    // hthread_ack_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_ack_frame, NULL, 0, NULL);
+    // if (hthread_ack_frame == NULL) {
+    //     fprintf(stderr, "Failed to create ack thread. Error: %d\n", GetLastError());
+    //     return RET_VAL_ERROR;
+    // }
     hthread_send_ack = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_ack, NULL, 0, NULL);
     if (hthread_send_ack == NULL) {
         fprintf(stderr, "Failed to create send ack thread. Error: %d\n", GetLastError());
@@ -210,6 +220,12 @@ static int start_threads() {
         fprintf(stderr, "Failed to create client timeout thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
+
+    // hthread_file_stream_io = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_stream_io, &client_list, 0, NULL);
+    // if (hthread_file_stream_io == NULL) {
+    //     fprintf(stderr, "Failed to file stream io thread. Error: %d\n", GetLastError());
+    //     return RET_VAL_ERROR;
+    // }
 
     hthread_server_command = (HANDLE)_beginthreadex(NULL, 0, thread_proc_server_command, NULL, 0, NULL);
     if (hthread_server_command == NULL) {
@@ -237,6 +253,13 @@ static void shutdown_server() {
     }
     fprintf(stdout,"process thread closed...\n");
 
+    // if (hthread_ack_frame) {
+    //     // Signal the receive thread to stop and wait for it to finish
+    //     WaitForSingleObject(hthread_ack_frame, INFINITE);
+    //     CloseHandle(hthread_ack_frame);
+    // }
+    // fprintf(stdout,"ack thread closed...\n");
+
     if (hthread_send_ack) {
         // Signal the receive thread to stop and wait for it to finish
         WaitForSingleObject(hthread_send_ack, INFINITE);
@@ -250,6 +273,13 @@ static void shutdown_server() {
         CloseHandle(hthread_client_timeout);
     }
     fprintf(stdout,"client timeout thread closed...\n");
+
+    if (hthread_file_stream_io) {
+        // Signal the receive thread to stop and wait for it to finish
+        WaitForSingleObject(hthread_file_stream_io, INFINITE);
+        CloseHandle(hthread_file_stream_io);
+    }
+    fprintf(stdout,"file stream io thread closed...\n");
 
     if (hthread_server_command) {
         // Signal the receive thread to stop and wait for it to finish
@@ -268,9 +298,11 @@ static void shutdown_server() {
         }
     }
     DeleteCriticalSection(&client_list.lock);
+
     DeleteCriticalSection(&buffers.mqueue_ack.mutex);
     DeleteCriticalSection(&buffers.fqueue_ack.mutex);
-    DeleteCriticalSection(&buffers.fqueue_priority_ack.mutex);
+    DeleteCriticalSection(&buffers.queue_priority_ack.mutex);
+
     DeleteCriticalSection(&buffers.queue_frame.mutex);
     DeleteCriticalSection(&buffers.queue_priority_frame.mutex);
     
@@ -540,10 +572,14 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
         if (wait_result == WAIT_OBJECT_0) {
             if (pop_frame(&buffers.queue_priority_frame, &frame_entry) == RET_VAL_SUCCESS) {
                 // Frame successfully retrieved from the priority queue.
+            } else {
+                continue;
             }
         } else if (wait_result == WAIT_OBJECT_0 + 1) {
             if (pop_frame(&buffers.queue_frame, &frame_entry) == RET_VAL_SUCCESS) {
                 // Frame successfully retrieved from the general data queue.
+            } else {
+                continue;
             }
         } else {
             fprintf(stderr, "Unexpected wait result: %lu\n", wait_result);
@@ -636,7 +672,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 LeaveCriticalSection(&client->lock);
 
                 new_ack_entry(&ack_entry, header_seq_num, header_session_id, STS_KEEP_ALIVE, client->srv_socket, &client->client_addr);
-                push_ack(&buffers.mqueue_ack, &ack_entry);
+                push_ack(&buffers.queue_priority_ack, &ack_entry);
 
                 break;
 
@@ -661,16 +697,16 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 break;
 
             case FRAME_TYPE_FILE_END:
-                fprintf(stdout, "\n   FRAME_TYPE_FILE_END\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File sha256: ", 
-                                                    _ntohll(frame->header.seq_num), 
-                                                    _ntohl(frame->header.session_id), 
-                                                    _ntohl(frame->header.checksum),
-                                                    _ntohl(frame->payload.file_end.file_id),
-                                                    _ntohll(frame->payload.file_end.file_size)         
-                );
-                for(int i = 0; i < 32; i++){
-                    fprintf(stdout, "%02x", (unsigned char)frame->payload.file_end.file_hash[i]);
-                }
+                // fprintf(stdout, "\n   FRAME_TYPE_FILE_END\n   Seq Num: %llu\n   Session ID: %d\n   Checksum: %d\n   File ID: %u\n   File Size: %llu\n   File sha256: ", 
+                //                                     _ntohll(frame->header.seq_num), 
+                //                                     _ntohl(frame->header.session_id), 
+                //                                     _ntohl(frame->header.checksum),
+                //                                     _ntohl(frame->payload.file_end.file_id),
+                //                                     _ntohll(frame->payload.file_end.file_size)         
+                // );
+                // for(int i = 0; i < 32; i++){
+                //     fprintf(stdout, "%02x", (unsigned char)frame->payload.file_end.file_hash[i]);
+                // }
                 fprintf(stdout,"\n");
                 handle_file_end(client, frame, &buffers);
                 break;
@@ -681,6 +717,8 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
 
             case FRAME_TYPE_DISCONNECT:
                 fprintf(stdout, "Client %s:%d with session ID: %d requested disconnect...\n", client->ip, src_port, client->sid);
+                new_ack_entry(&ack_entry, header_seq_num, header_session_id, STS_CONFIRM_DISCONNECT, client->srv_socket, &client->client_addr);
+                push_ack(&buffers.queue_priority_ack, &ack_entry);
                 remove_client(&client_list, &buffers, client->client_index);
                 break;
 
@@ -697,21 +735,28 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
 DWORD WINAPI thread_proc_send_ack(LPVOID lpParam){
 
     QueueAckEntry ack_entry;
-    HANDLE queue_semaphores[3] = {buffers.mqueue_ack.semaphore, buffers.fqueue_priority_ack.semaphore, buffers.fqueue_ack.semaphore};
+    HANDLE queue_semaphores[3] = {buffers.queue_priority_ack.semaphore, buffers.mqueue_ack.semaphore, buffers.fqueue_ack.semaphore};
 
     while (server.server_status == STATUS_READY) {
         DWORD wait_result = WaitForMultipleObjects(3, queue_semaphores, FALSE, INFINITE);
+        //memset(&ack_entry, 0, sizeof(QueueAckEntry));
         if (wait_result == WAIT_OBJECT_0) {
+            if (pop_ack(&buffers.queue_priority_ack, &ack_entry) == RET_VAL_SUCCESS) {
+                // Frame successfully retrieved from the priority queue.
+            } else {
+                continue;
+            }
+        } else if (wait_result == WAIT_OBJECT_0 + 1) {
             if (pop_ack(&buffers.mqueue_ack, &ack_entry) == RET_VAL_SUCCESS) {
                 // Frame successfully retrieved from the priority queue.
-            } 
-        } else if (wait_result == WAIT_OBJECT_0 + 1) {
-            if (pop_ack(&buffers.fqueue_priority_ack, &ack_entry) == RET_VAL_SUCCESS) {
-                // Frame successfully retrieved from the priority queue.
+            } else {
+                continue;
             }
         } else if (wait_result == WAIT_OBJECT_0 + 2) {
             if (pop_ack(&buffers.fqueue_ack, &ack_entry) == RET_VAL_SUCCESS) {
                 // Frame successfully retrieved from the general data queue.
+            } else {
+                continue;
             }
         } else {
             fprintf(stderr, "Unexpected wait result: %lu\n", wait_result);
@@ -935,7 +980,7 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
 
                     QueueAckEntry ack_entry;
                     new_ack_entry(&ack_entry, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, fstream->srv_socket, &fstream->client_addr);
-                    push_ack(&buffers.fqueue_priority_ack, &ack_entry);
+                    push_ack(&buffers.queue_priority_ack, &ack_entry);
 
                     file_cleanup_stream(fstream, &buffers);
                     LeaveCriticalSection(&fstream->lock);

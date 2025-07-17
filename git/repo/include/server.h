@@ -97,7 +97,7 @@ typedef struct {
 
     QueueAck mqueue_ack;
     QueueAck fqueue_ack;
-    QueueAck fqueue_priority_ack;
+    QueueAck queue_priority_ack;
 
     HashTableFramePendingAck ht_frame;
     HashTableIdentifierNode ht_fid;

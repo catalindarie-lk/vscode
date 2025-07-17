@@ -21,6 +21,7 @@
 #define NAME_SIZE                       255                 // Maximum size for client/server names
 #define PATH_SIZE                       255                 // Maximum size for file paths
 
+#define FRAME_TYPE_DISCONNECT_SEQ_NUM   (UINT64_MAX - 100)
 
 // --- Frame Types ---
 typedef uint8_t FrameType;
@@ -43,27 +44,28 @@ enum FrameType{
 
 typedef uint8_t AckErrorCode;
 enum AckErrorCode {
-    STS_ACK = 11,
+    STS_FRAME_DATA_ACK = 11,
     STS_KEEP_ALIVE = 12,  
     STS_CONFIRM_FILE_METADATA = 21,
     STS_CONFIRM_FILE_END = 22,
+    STS_CONFIRM_DISCONNECT = 23,
 
-    ERR_EXISTING_FILE = 100,     // Server has completed this transfer
-    ERR_INVALID_SESSION = 101,     // Session ID not recognized
-    ERR_DUPLICATE_FRAME = 102,     // Frame was already received
-    ERR_MISSING_METADATA = 103,
-    ERR_TIMEOUT = 104,             // Session timed out due to inactivity
-    ERR_UNSUPPORTED_FRAME = 105,   // Frame type not supported
-    ERR_MALFORMED_FRAME = 106,     // Frame structure or size invalid
-    ERR_RESOURCE_LIMIT = 107,      // Server ran out of memory or slots
-    ERR_UNAUTHORIZED = 108,        // Authentication/authorization failed
-    ERR_INTERNAL_ERROR = 109,      // Catch-all for unexpected server fault
-    ERR_TRANSFER_INIT = 110,
-
-    ERR_EXISTING_MESSAGE = 200,
-    ERR_MESSAGE_VALIDATION = 201,
-
-    ERR_MEMORY_ALLOCATION = 121
+    ERR_EXISTING_FILE = 100,       // Server has completed this transfer
+    ERR_DUPLICATE_FRAME = 101,     // Frame was already received
+    ERR_MISSING_METADATA = 102,
+    ERR_EXISTING_MESSAGE = 103,
+    ERR_MESSAGE_FINAL_CHECK = 104,
+    ERR_MEMORY_ALLOCATION = 105,
+    ERR_STREAM_INIT = 106,    
+    ERR_MALFORMED_FRAME = 107,     // Frame structure or size invalid
+    ERR_RESOURCE_LIMIT = 108,      // Server ran out of memory or slots
+       
+    ERR_INVALID_SESSION = 120,     // Session ID not recognized
+    ERR_TIMEOUT = 121,             // Session timed out due to inactivity
+    ERR_UNSUPPORTED_FRAME = 122,   // Frame type not supported
+    ERR_UNAUTHORIZED = 123,        // Authentication/authorization failed
+    ERR_INTERNAL_ERROR = 124       // Catch-all for unexpected server fault
+    
 };
 
 #pragma pack(push, 1) 

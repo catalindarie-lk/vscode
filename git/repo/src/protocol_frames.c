@@ -68,7 +68,7 @@ int send_disconnect(const uint32_t session_id,
     // Set the header fields
     frame.header.start_delimiter = _htons(FRAME_DELIMITER);
     frame.header.frame_type = FRAME_TYPE_DISCONNECT;
-    frame.header.seq_num = UINT64_MAX;
+    frame.header.seq_num = FRAME_TYPE_DISCONNECT_SEQ_NUM;
     frame.header.session_id = _htonl(session_id); // Use the session ID provided
     // Calculate CRC32 for the ACK/NACK frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader)));
