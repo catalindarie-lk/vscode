@@ -29,6 +29,9 @@ int send_frame(const UdpFrame *frame,
         case FRAME_TYPE_FILE_COMPLETE:
             frame_size = sizeof(FrameHeader) + sizeof(FileCompletePayload); // Or header + payload_len + related metadata
             break;
+        case FRAME_TYPE_LONG_TEXT_MESSAGE:
+            frame_size = sizeof(FrameHeader) + sizeof(LongTextPayload); // Or header + payload_len + related metadata
+            break;
         case FRAME_TYPE_ACK:
             frame_size = sizeof(FrameHeader) + sizeof(AckPayload); // Acknowledgment frame
             break;
