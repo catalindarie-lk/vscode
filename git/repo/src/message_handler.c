@@ -35,9 +35,10 @@ static int msg_match_fragment(Client *client, UdpFrame *frame){
 }
 static int msg_validate_fragment(Client *client, const int index, UdpFrame *frame, ServerBuffers* buffers) {
 
-    EnterCriticalSection(&client->mstream[index].lock);
+    MessageStream *mstream = &client->mstream[index];
 
-    QueueAckEntry ack_entry = {0};
+    EnterCriticalSection(&client->lock);
+    EnterCriticalSection(&mstream->lock);
 
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
     uint32_t recv_session_id = _ntohl(frame->header.session_id);
@@ -46,34 +47,39 @@ static int msg_validate_fragment(Client *client, const int index, UdpFrame *fram
     uint32_t recv_fragment_len = _ntohl(frame->payload.long_text_msg.fragment_len);
     uint32_t recv_fragment_offset = _ntohl(frame->payload.long_text_msg.fragment_offset);
 
-    BOOL is_duplicate_fragment = client->mstream[index].bitmap && client->mstream[index].buffer &&
-                                    check_fragment_received(client->mstream[index].bitmap, recv_fragment_offset, TEXT_FRAGMENT_SIZE);
+    QueueAckEntry ack_entry = {0};
+    uint8_t op_code = 0;
+
+    BOOL is_duplicate_fragment = mstream->bitmap && mstream->buffer &&
+                                    check_fragment_received(mstream->bitmap, recv_fragment_offset, TEXT_FRAGMENT_SIZE);
 
     if (is_duplicate_fragment == TRUE) {
         fprintf(stderr, "Received duplicate text message fragment - Session ID: %d, Message ID: %d, Offset: %d,\n", client->sid, recv_message_id, recv_fragment_offset);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_DUPLICATE_FRAME, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->mqueue_ack, &ack_entry);
-        LeaveCriticalSection(&client->mstream[index].lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_DUPLICATE_FRAME;
+        goto exit_err;
+
     }
     if(recv_fragment_offset >= recv_message_len){
         fprintf(stderr, "Fragment offset past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->sid, recv_message_id, recv_fragment_offset, recv_fragment_len);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MALFORMED_FRAME, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->mqueue_ack, &ack_entry);
-        LeaveCriticalSection(&client->mstream[index].lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_MALFORMED_FRAME;
+        goto exit_err;
     }
     if ((recv_fragment_offset + recv_fragment_len) > recv_message_len || recv_fragment_len > TEXT_FRAGMENT_SIZE) {
         fprintf(stderr, "Fragment len past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->sid, recv_message_id, recv_fragment_offset, recv_fragment_len);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MALFORMED_FRAME, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->mqueue_ack, &ack_entry);
-        LeaveCriticalSection(&client->mstream[index].lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_MALFORMED_FRAME;
+        goto exit_err;
     }
 
-    LeaveCriticalSection(&client->mstream[index].lock);
+    LeaveCriticalSection(&mstream->lock);
+    LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
 
+exit_err:
+    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
+    push_ack(&buffers->mqueue_ack, &ack_entry);
+    LeaveCriticalSection(&mstream->lock);
+    LeaveCriticalSection(&client->lock);
+    return RET_VAL_ERROR;
 }
 static int msg_get_available_stream_channel(Client *client){
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
@@ -183,8 +189,6 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
     EnterCriticalSection(&client->lock);
 
     client->last_activity_time = time(NULL);
-
-    QueueAckEntry ack_entry = {0};
     
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
     uint32_t recv_session_id = _ntohl(frame->header.session_id);
@@ -193,12 +197,13 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
     uint32_t recv_fragment_len = _ntohl(frame->payload.long_text_msg.fragment_len);
     uint32_t recv_fragment_offset = _ntohl(frame->payload.long_text_msg.fragment_offset);
 
+    QueueAckEntry ack_entry = {0};
+    uint8_t op_code = 0;
+
     if(ht_search_id(&buffers->ht_mid, recv_session_id, recv_message_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received file end frame for completed file Seq: %llu; sID: %u; mID: %u;\n", recv_seq_num, recv_session_id, recv_message_id);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_EXISTING_MESSAGE, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->mqueue_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_EXISTING_MESSAGE;
+        goto exit_err;
     }
 
     slot = msg_match_fragment(client, frame);
@@ -209,33 +214,32 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
         }
         msg_attach_fragment(&client->mstream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
         
+        if (msg_check_completion_and_record(&client->mstream[slot], buffers) == RET_VAL_ERROR){
+            fprintf(stderr, "Final check of the message failed\n");
+            op_code = ERR_MESSAGE_FINAL_CHECK;
+            goto exit_err;
+        }
+
         new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, client->srv_socket, &client->client_addr);
         push_ack(&buffers->mqueue_ack, &ack_entry);
+        
+        LeaveCriticalSection(&client->lock);
+        return RET_VAL_SUCCESS;
 
-        if (msg_check_completion_and_record(&client->mstream[slot], buffers) == RET_VAL_ERROR){
-            new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MESSAGE_FINAL_CHECK, client->srv_socket, &client->client_addr);
-            push_ack(&buffers->mqueue_ack, &ack_entry);
-            LeaveCriticalSection(&client->lock);
-            return RET_VAL_ERROR;
-        }
     } else {
         int slot = msg_get_available_stream_channel(client);
         if (slot == RET_VAL_ERROR){
             fprintf(stderr, "Maximum message streams reached for client ID: %d\n", client->cid);
-            new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_RESOURCE_LIMIT, client->srv_socket, &client->client_addr);
-            push_ack(&buffers->mqueue_ack, &ack_entry);
-            LeaveCriticalSection(&client->lock);
-            return RET_VAL_ERROR;
+            op_code = ERR_RESOURCE_LIMIT;
+            goto exit_err;
         }
         if (msg_validate_fragment(client, slot, frame, buffers) == RET_VAL_ERROR){
             LeaveCriticalSection(&client->lock);
             return RET_VAL_ERROR;
         }
         if (msg_init_stream(&client->mstream[slot], recv_session_id, recv_message_id, recv_message_len) == RET_VAL_ERROR){
-            new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_STREAM_INIT, client->srv_socket, &client->client_addr);
-            push_ack(&buffers->mqueue_ack, &ack_entry);
-            LeaveCriticalSection(&client->lock);
-            return RET_VAL_ERROR;
+            op_code = ERR_STREAM_INIT;
+            goto exit_err;
         }
 
         fprintf(stdout, "Received first message fragment Session ID: %u, Message ID: %d, Size: %u\n", recv_session_id, recv_message_id, recv_message_len);
@@ -245,23 +249,26 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
 
         if(ht_insert_id(&buffers->ht_mid, recv_session_id, recv_message_id, ID_WAITING_FRAGMENTS) == RET_VAL_ERROR){
             fprintf(stderr, "Failed to allocate memory for message ID in hash table\n");
-            new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MEMORY_ALLOCATION, client->srv_socket, &client->client_addr);
-            push_ack(&buffers->mqueue_ack, &ack_entry);
-            LeaveCriticalSection(&client->lock);
-            return RET_VAL_ERROR;
+            op_code = ERR_MEMORY_ALLOCATION;
+            goto exit_err;
+        }
+
+        if (msg_check_completion_and_record(&client->mstream[slot], buffers) == RET_VAL_ERROR){
+            fprintf(stderr, "Final check of the message failed\n");
+            op_code = ERR_MESSAGE_FINAL_CHECK;
+            goto exit_err;
         }
 
         new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, client->srv_socket, &client->client_addr);
         push_ack(&buffers->mqueue_ack, &ack_entry);
 
-        if (msg_check_completion_and_record(&client->mstream[slot], buffers) == RET_VAL_ERROR){
-            new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MESSAGE_FINAL_CHECK, client->srv_socket, &client->client_addr);
-            push_ack(&buffers->mqueue_ack, &ack_entry);
-            LeaveCriticalSection(&client->lock);
-            return RET_VAL_ERROR;
-        }
         LeaveCriticalSection(&client->lock);
         return RET_VAL_SUCCESS;
     }
+exit_err:
+    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
+    push_ack(&buffers->mqueue_ack, &ack_entry);
+    LeaveCriticalSection(&client->lock);
+    return RET_VAL_ERROR;
 }
 

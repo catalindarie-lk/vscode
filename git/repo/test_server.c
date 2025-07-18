@@ -609,52 +609,56 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
         }
 
         client = NULL;
-
-        if(header_frame_type == FRAME_TYPE_CONNECT_REQUEST){
-            client = find_client(&client_list, header_session_id);
-            if(client != NULL){
-                EnterCriticalSection(&client->lock);
-                client->last_activity_time = time(NULL);
-                fprintf(stdout, "Client %s:%d (Session ID: %d) already connected. Responding to re-connect request.\n", client->ip, src_port, client->sid);
-                send_connect_response(header_seq_num, 
-                                        client->sid, 
-                                        server.session_timeout, 
-                                        server.server_status, 
-                                        server.name, 
-                                        server.socket, 
-                                        &client->client_addr
-                                    );
-                LeaveCriticalSection(&client->lock);
-                continue;
-            }
+        if(header_frame_type == FRAME_TYPE_CONNECT_REQUEST && header_session_id == FRAME_TYPE_CONNECT_REQUEST_SID){
             client = add_client(&client_list, frame, server.socket, src_addr);
             if (client == NULL) {
                 fprintf(stderr, "Failed to add new client from %s:%d. Max clients reached or server error.\n", src_ip, src_port);
                 continue;
             }
-        }
-        else {
+            EnterCriticalSection(&client->lock);
+            client->last_activity_time = time(NULL);
+            fprintf(stdout, "Client %s:%d Requested connection. Responding to connect request with Session ID: %u\n", client->ip, src_port, client->sid);
+            send_connect_response(header_seq_num, 
+                                    client->sid, 
+                                    server.session_timeout, 
+                                    server.server_status, 
+                                    server.name, 
+                                    server.socket, 
+                                    &client->client_addr
+                                );
+            // Release the client's lock.
+            LeaveCriticalSection(&client->lock);
+            continue;
+
+        } else if (header_frame_type == FRAME_TYPE_CONNECT_REQUEST && header_session_id != FRAME_TYPE_CONNECT_REQUEST_SID) {
             client = find_client(&client_list, header_session_id);
             if(client == NULL){
+                fprintf(stderr, "Unknown client tried to re-connect\n");
+                continue;
+            }
+            EnterCriticalSection(&client->lock);
+            client->last_activity_time = time(NULL);
+            fprintf(stdout, "Client %s:%d Requested re-connection. Responding to re-connect request with Session ID: %u\n", client->ip, src_port, client->sid);
+            send_connect_response(header_seq_num, 
+                                    client->sid, 
+                                    server.session_timeout, 
+                                    server.server_status, 
+                                    server.name, 
+                                    server.socket, 
+                                    &client->client_addr
+                                );
+            // Release the client's lock.
+            LeaveCriticalSection(&client->lock);
+            continue;
+        } else {
+            client = find_client(&client_list, header_session_id);
+            if(client == NULL){
+                fprintf(stderr, "Received frame from unknown client\n");
                 continue;
             }
         }
+
         switch (header_frame_type) {
-            case FRAME_TYPE_CONNECT_REQUEST:
-                EnterCriticalSection(&client->lock);
-                client->last_activity_time = time(NULL);
-                fprintf(stdout, "Client %s:%d Requested connection. Responding to connect request with Session ID: %u\n", client->ip, src_port, client->sid);
-                send_connect_response(header_seq_num, 
-                                        client->sid, 
-                                        server.session_timeout, 
-                                        server.server_status, 
-                                        server.name, 
-                                        server.socket, 
-                                        &client->client_addr
-                                    );
-                // Release the client's lock.
-                LeaveCriticalSection(&client->lock);
-                break;
 
             case FRAME_TYPE_ACK:
                 EnterCriticalSection(&client->lock);
@@ -1202,14 +1206,11 @@ BOOL validate_file_hash(FileStream *fstream){
     for(int i = 0; i < 32; i++){
         fprintf(stdout, "%02x", (uint8_t)fstream->received_sha256[i]);
     }
-    fprintf(stdout, "\n");
 
     fprintf(stdout, "File hash calculated: ");
     for(int i = 0; i < 32; i++){
         fprintf(stdout, "%02x", (uint8_t)fstream->calculated_sha256[i]);
     }
-    fprintf(stdout, "\n");
-
 
     for(int i = 0; i < 32; i++){
         if((uint8_t)fstream->calculated_sha256[i] != (uint8_t)fstream->received_sha256[i]){

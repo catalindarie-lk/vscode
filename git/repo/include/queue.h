@@ -13,9 +13,11 @@
 #define RET_VAL_ERROR -1
 #endif
 
-#define QUEUE_ACK_SIZE                          131072     // Queue buffer size
-#define FRAME_QUEUE_SIZE                        65536
 
+#define FRAME_QUEUE_SIZE                        65536
+#define QUEUE_ACK_SIZE                          131072     // Queue buffer size
+
+//#pragma pack(push, 1) 
 typedef struct{
     UdpFrame frame; // The UDP frame to be sent
     struct sockaddr_in src_addr; // Destination address for the frame
@@ -29,6 +31,7 @@ typedef struct{
     SOCKET src_socket;
     struct sockaddr_in dest_addr; // Address of the sender
 }QueueAckEntry;
+//#pragma pack(pop)
 
 typedef struct {
     QueueFrameEntry frame_entry[FRAME_QUEUE_SIZE];

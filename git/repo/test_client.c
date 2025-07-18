@@ -65,7 +65,7 @@ static int init_client_session(){
     client.fid_count = 0;
     client.mid_count = 0;
 
-    client.sid = 0;
+    client.sid = FRAME_TYPE_CONNECT_REQUEST_SID;
     client.server_status = STATUS_CLOSED;
     client.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
     // Initialize client data
@@ -81,7 +81,7 @@ static int reset_client_session(){
     client.fid_count = 0;
     client.mid_count = 0;
 
-    client.sid = 0;
+    client.sid = FRAME_TYPE_CONNECT_REQUEST_SID;
     client.server_status = STATUS_CLOSED;
     client.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
     // Initialize client data
@@ -530,9 +530,9 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                     }
                 }
 
-                if(recv_seq_num == FRAME_TYPE_DISCONNECT_SEQ_NUM && recv_op_code == STS_CONFIRM_DISCONNECT){
+                if(recv_seq_num == FRAME_TYPE_DISCONNECT_SEQ && recv_op_code == STS_CONFIRM_DISCONNECT){
                     SetEvent(client.hevent_connection_closed);
-                    fprintf(stdout, "Received disconnect ACK code: %lu; for seq num: %llu\n", frame->payload.ack.op_code, recv_seq_num);
+                    fprintf(stdout, "Received disconnect ACK code: %lu; for seq num: %llx\n", frame->payload.ack.op_code, recv_seq_num);
                 }
 
                 if(recv_op_code == STS_FRAME_DATA_ACK || 
@@ -1044,9 +1044,9 @@ int main() {
                             );
         fflush(stdout);
 
-        if(client.session_status == CONNECTION_CLOSED){
-            reset_client_session();
-        }     
+        // if(client.session_status == CONNECTION_CLOSED){
+        //     reset_client_session();
+        // }     
         Sleep(250); // Simulate some delay between messages        
     }
     if (hthread_client_command) {
@@ -1074,13 +1074,17 @@ void request_connect(){
     DWORD wait_connection_established = WaitForSingleObject(client.hevent_connection_established, ESTABLISHED_TIMEOUT_MS);
     if (wait_connection_established == WAIT_OBJECT_0) {
         client.session_status = CONNECTION_ESTABLISHED;
-        fprintf(stdout, "Connection established...\n");          
+        fprintf(stdout, "Connection established...\n");
     } else if (wait_connection_established == WAIT_TIMEOUT) {
-        client.session_status = CONNECTION_CLOSED;
+        ht_clean(&buffers.ht_frame);
+        reset_client_session();
         fprintf(stderr, "Connection closed...\n");
-    } else {    
-        client.session_status = CONNECTION_CLOSED;
+        return;
+    } else {
+        ht_clean(&buffers.ht_frame);
+        reset_client_session();
         fprintf(stderr, "Unexpected error for established event: %lu\n", wait_connection_established);
+        return;
     }
     return;
 }
@@ -1098,13 +1102,10 @@ void request_disconnect(){
     DWORD wait_connection_closed = WaitForSingleObject(client.hevent_connection_closed, DISCONNECTED_TIMEOUT_MS);
 
     if (wait_connection_closed == WAIT_OBJECT_0) {
-        client.session_status = CONNECTION_CLOSED;
         fprintf(stderr, "Connection closed\n"); 
     } else if (wait_connection_closed == WAIT_TIMEOUT) {
-        client.session_status = CONNECTION_CLOSED;
         fprintf(stdout, "Connection close timeout - closing connection anyway\n");
     } else {    
-        client.session_status = CONNECTION_CLOSED;
         fprintf(stderr, "Unexpected error for disconnect event: %lu\n", wait_connection_closed);
     }
        
@@ -1115,6 +1116,7 @@ void request_disconnect(){
         SetEvent(client.mstream[i].hevent_close_message_stream_thread);
     }
     ht_clean(&buffers.ht_frame);
+    reset_client_session();
     return;
 }
 
@@ -1126,13 +1128,10 @@ void force_disconnect(){
     SetEvent(client.hevent_connection_closed);
     DWORD wait_connection_closed = WaitForSingleObject(client.hevent_connection_closed, DISCONNECTED_TIMEOUT_MS);
     if (wait_connection_closed == WAIT_OBJECT_0) {
-        client.session_status = CONNECTION_CLOSED;
         fprintf(stderr, "Connection closed\n"); 
     } else if (wait_connection_closed == WAIT_TIMEOUT) {
-        client.session_status = CONNECTION_CLOSED;
         fprintf(stdout, "CONNECTION CLOSE BY SERVER (TIMEOUT?)-> SHOULD NOT HAPPEN\n");
     } else {    
-        client.session_status = CONNECTION_CLOSED;
         fprintf(stderr, "Unexpected error for disconnect event: %lu\n", wait_connection_closed);
     }
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
@@ -1142,6 +1141,7 @@ void force_disconnect(){
         SetEvent(client.mstream[i].hevent_close_message_stream_thread);
     }
     ht_clean(&buffers.ht_frame);
+    reset_client_session();
     return;
 }
 

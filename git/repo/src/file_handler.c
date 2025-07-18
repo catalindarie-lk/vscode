@@ -21,28 +21,14 @@
 
 // Handle file fragment helper functions
 static int file_match_frame(Client *client, const uint32_t session_id, const uint32_t file_id){
-    // Iterate through all possible file stream slots associated with this client.
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-        // Acquire the critical section lock for the current file stream slot.
-        // This prevents other threads from modifying or accessing this specific file stream's data
-        // (like its busy status, session ID, or file ID) while this function is checking it.
         EnterCriticalSection(&client->fstream[i].lock);
-        // Check if the current file stream slot matches the incoming fragment:
-        // 1. client->file_stream[i].busy == TRUE: Ensure the slot is currently active and in use for a transfer.
-        // 2. client->file_stream[i].sid == session_id: Match the session ID from the incoming fragment.
-        // 3. client->file_stream[i].fid == file_id: Match the file ID from the incoming fragment.
         if(client->fstream[i].fstream_busy == TRUE && client->fstream[i].sid == session_id && client->fstream[i].fid == file_id){
-            // If a matching file stream slot is found, release its lock.
             LeaveCriticalSection(&client->fstream[i].lock);
-            // Return the index of the matching slot.
             return i;
         }
-        // If the current file stream slot does not match the fragment, release its lock
-        // before proceeding to check the next slot. This is crucial to avoid deadlocks.
         LeaveCriticalSection(&client->fstream[i].lock);
     }
-    // If the loop completes without finding any file stream slot that matches the session_id and file_id,
-    // it means no active transfer for this client corresponds to the incoming fragment.
     return RET_VAL_ERROR; // Return an error value to indicate no match was found.
 }
 static int file_check_metadata(Client *client, UdpFrame *frame, const uint32_t session_id, const uint32_t file_id){
@@ -59,30 +45,16 @@ static int file_check_metadata(Client *client, UdpFrame *frame, const uint32_t s
 }
 static int file_get_available_stream_channel(Client *client){
     
-    // Iterate through all possible file stream slots allocated for this client.
-    // MAX_CLIENT_FILE_STREAMS defines the maximum number of concurrent file transfers a single client can handle.
     for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-        // Acquire the critical section lock for the current file stream slot.
         EnterCriticalSection(&client->fstream[i].lock);
-        // Check if the current file stream slot is not busy.
-        // A 'busy' status of FALSE indicates that this slot is currently free and available.
         if(client->fstream[i].fstream_busy == FALSE){
-            // If an available slot is found, immediately mark it as busy.
-            // This claims the slot for the current operation and prevents other threads
-            // from simultaneously claiming the same slot.
             client->fstream[i].fstream_busy = TRUE;
-            // Release the critical section lock for this file stream, as its state has been updated.
             LeaveCriticalSection(&client->fstream[i].lock);
-            // Return the index of the newly claimed (and now busy) slot.
             return i;
         }
-        // If the current file stream slot is busy, release its lock before checking the next slot.
-        // It's important to release the lock for a busy slot so other threads can still access it.
         LeaveCriticalSection(&client->fstream[i].lock);
     }
-    // If the loop completes without finding any available (non-busy) file stream slots,
-    // it means all slots are currently in use.
-    return RET_VAL_ERROR; // Return an error value to indicate no slot was found.
+    return RET_VAL_ERROR;
 }
 static void file_attach_fragment_to_chunk(FileStream *fstream, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size, ServerBuffers* buffers){
 
@@ -230,8 +202,6 @@ exit_error:
 
 }
 
-
-
 // Process received file metadata frame
 int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers) {
 
@@ -242,8 +212,6 @@ int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers
 
     EnterCriticalSection(&client->lock);
 
-    QueueAckEntry ack_entry = {0};
-
     client->last_activity_time = time(NULL);
 
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
@@ -251,29 +219,26 @@ int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers
     uint32_t recv_file_id = _ntohl(frame->payload.file_metadata.file_id);
     uint64_t recv_file_size = _ntohll(frame->payload.file_metadata.file_size);
 
+    QueueAckEntry ack_entry = {0};
+    uint8_t op_code = 0;
+
     if(file_check_metadata(client, frame, recv_session_id, recv_file_id) == RET_VAL_ERROR){
         fprintf(stderr, "Duplicated file metadata received!\n");
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_DUPLICATE_FRAME, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_DUPLICATE_FRAME;
+        goto exit_err;
     }
 
     if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received metadata frame Seq: %llu for old completed fID: %u sID %u\n", recv_seq_num, recv_file_id, recv_session_id);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_EXISTING_FILE, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_EXISTING_FILE;
+        goto exit_err;
     }
 
     int slot = file_get_available_stream_channel(client);
     if(slot == RET_VAL_ERROR){
         fprintf(stderr, "All file transfers streams are in use!\n");
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_RESOURCE_LIMIT, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_RESOURCE_LIMIT;
+        goto exit_err;
     }
 
     fprintf(stdout, "Received metadata Seq: %llu; sID: %d; fID: %d; fsize: %llu;\n", recv_seq_num, recv_session_id, recv_file_id, recv_file_size);
@@ -281,25 +246,26 @@ int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers
 
     if(file_stream_init(&client->fstream[slot], recv_session_id, recv_file_id, recv_file_size, buffers) == RET_VAL_ERROR){
         fprintf(stderr, "Error initializing file stream\n");
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_STREAM_INIT, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_STREAM_INIT;
+        goto exit_err;
     }
 
     if(ht_insert_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_WAITING_FRAGMENTS) == RET_VAL_ERROR){
         fprintf(stderr, "Failed to allocate memory for file ID in hash table\n");
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MEMORY_ALLOCATION, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_MEMORY_ALLOCATION;
+        goto exit_err;
     }
 
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_METADATA, client->srv_socket, &client->client_addr);
     push_ack(&buffers->queue_priority_ack, &ack_entry);
-    
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
+
+exit_err:
+    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
+    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    LeaveCriticalSection(&client->lock);
+    return RET_VAL_ERROR;
 }
 // Process received file fragment frame
 int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers){
@@ -311,8 +277,6 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
 
     EnterCriticalSection(&client->lock);
 
-    QueueAckEntry ack_entry = {0};
-
     client->last_activity_time = time(NULL);
 
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
@@ -321,47 +285,40 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
     uint64_t recv_fragment_offset = _ntohll(frame->payload.file_fragment.offset);
     uint32_t recv_fragment_size = _ntohl(frame->payload.file_fragment.size);
 
+    QueueAckEntry ack_entry = {0};
+    uint8_t op_code = 0;
+
     if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received fragment frame Seq: %llu; for old completed fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_EXISTING_FILE, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_EXISTING_FILE;
+        goto exit_err;
     }
 
     int slot = file_match_frame(client, recv_session_id, recv_file_id);
     if(slot == RET_VAL_ERROR){
         fprintf(stderr, "Received fragment frame Seq: %llu for unknown fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MISSING_METADATA, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_MISSING_METADATA;
+        goto exit_err;
     }
 
     if(check_fragment_received(client->fstream[slot].bitmap, recv_fragment_offset, FILE_FRAGMENT_SIZE)){
         fprintf(stderr, "Received duplicate file fragment Seq: %llu; fID: %u; sID: %u; \n", recv_seq_num, recv_file_id, recv_session_id);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_DUPLICATE_FRAME, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_DUPLICATE_FRAME;
+        goto exit_err;
     }
 
     if(recv_fragment_offset >= client->fstream[slot].fsize){
        fprintf(stderr, "Fragment offset past limits - offset: %llu, fragment size: %u, file size: %llu\n",
                                         recv_fragment_offset, recv_fragment_size, client->fstream[slot].fsize);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MALFORMED_FRAME, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_MALFORMED_FRAME;
+        goto exit_err;
     }
 
     if (recv_fragment_offset + recv_fragment_size > client->fstream[slot].fsize){
         fprintf(stderr, "Fragment extends past file bounds - offset: %llu, fragment size: %u, file size: %llu\n",
                                         recv_fragment_offset, recv_fragment_size, client->fstream[slot].fsize);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MALFORMED_FRAME, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_MALFORMED_FRAME;
+        goto exit_err;
     }
 
     uint64_t i = (recv_fragment_offset / FILE_FRAGMENT_SIZE) / 64ULL; // Assuming 64 fragments per bitmap entry
@@ -371,10 +328,8 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
         // Check if the memory chunk allocation was successful.
         if(client->fstream[slot].pool_block_file_chunk[i] == NULL){
             fprintf(stderr, "Error allocating memory chunk for sID: %u; fID: %u;\n", recv_session_id, recv_file_id);
-            new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_RESOURCE_LIMIT, client->srv_socket, &client->client_addr);
-            push_ack(&buffers->queue_priority_ack, &ack_entry);
-            LeaveCriticalSection(&client->lock);
-            return RET_VAL_ERROR;
+            op_code = ERR_RESOURCE_LIMIT;
+            goto exit_err;
         }
     }
 
@@ -385,6 +340,12 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
 
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
+
+exit_err:
+    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
+    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    LeaveCriticalSection(&client->lock);
+    return RET_VAL_ERROR;
 }
 // Process received file end frame
 int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
@@ -396,29 +357,26 @@ int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
 
     EnterCriticalSection(&client->lock);
 
-    QueueAckEntry ack_entry = {0};
-
     client->last_activity_time = time(NULL);
 
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
     uint32_t recv_session_id = _ntohl(frame->header.session_id); // Session ID from frame header
     uint32_t recv_file_id = _ntohl(frame->payload.file_fragment.file_id); // File ID from fragment payload
 
+    QueueAckEntry ack_entry = {0};
+    uint8_t op_code = 0;
+
     if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received file end frame for completed file Seq: %llu; sID: %u; fID: %u;\n", recv_seq_num, recv_session_id, recv_file_id);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_EXISTING_FILE, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_EXISTING_FILE;
+        goto exit_err;
     }
 
     int slot = file_match_frame(client, recv_session_id, recv_file_id);
     if(slot == RET_VAL_ERROR){
         fprintf(stderr, "Received end frame Seq: %llu for unknown fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, ERR_MISSING_METADATA, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
-        LeaveCriticalSection(&client->lock);
-        return RET_VAL_ERROR;
+        op_code = ERR_MISSING_METADATA;
+        goto exit_err;
     }
 
     FileStream *fstream = &client->fstream[slot];
@@ -436,5 +394,10 @@ int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
 
+exit_err:
+    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
+    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    LeaveCriticalSection(&client->lock);
+    return RET_VAL_ERROR;
 }
 

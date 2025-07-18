@@ -12,16 +12,22 @@
 #define RET_VAL_ERROR -1
 #endif
 
-#define MAX_PAYLOAD_SIZE                1400                // Max size of data within a frame payload (adjust as needed)
-#define FRAME_DELIMITER                 0xAABB              // A magic number to identify valid frames
+#define MAX_PAYLOAD_SIZE                    1400                // Max size of data within a frame payload (adjust as needed)
+#define FRAME_DELIMITER                     0xAABB              // A magic number to identify valid frames
 
-#define TEXT_FRAGMENT_SIZE              ((uint32_t)(MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4))
-#define FILE_FRAGMENT_SIZE              ((uint32_t)(MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t)))
+#define TEXT_FRAGMENT_SIZE                  ((uint32_t)(MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4))
+#define FILE_FRAGMENT_SIZE                  ((uint32_t)(MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t)))
 
-#define NAME_SIZE                       255                 // Maximum size for client/server names
-#define PATH_SIZE                       255                 // Maximum size for file paths
+#define NAME_SIZE                           255                 // Maximum size for client/server names
+#define PATH_SIZE                           255                 // Maximum size for file paths
 
-#define FRAME_TYPE_DISCONNECT_SEQ_NUM   (UINT64_MAX - 100)
+#define FRAME_TYPE_DISCONNECT_SEQ           (UINT64_MAX - 1)
+#define FRAME_TYPE_KEEP_ALIVE_SEQ           (UINT64_MAX - 2)
+#define FRAME_TYPE_CONNECT_REQUEST_SEQ      (UINT64_MAX - 3)
+#define FRAME_TYPE_CONNECT_RESPONSE_SEQ     (UINT64_MAX - 4)
+
+#define FRAME_TYPE_CONNECT_REQUEST_SID      (UINT32_MAX - 1)
+
 
 // --- Frame Types ---
 typedef uint8_t FrameType;
@@ -160,4 +166,4 @@ int send_disconnect(const uint32_t session_id,
                 );
 
 
-#endif // FRAMES_H
+#endif
