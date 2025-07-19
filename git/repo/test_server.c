@@ -2,12 +2,14 @@
 #include <stdio.h>                      // For printf, fprintf
 #include <string.h>                     // For memset, memcpy
 #include <stdint.h>                     // For fixed-width integer types    
-//#include <winsock2.h>
-#include <ws2tcpip.h>                   // For modern IP address functions (inet_pton, inet_ntop)
 #include <time.h>                       // For time functions
-#include <process.h>                    // For _beginthreadex
+#include <process.h>                    // For _beginthreadex  
+#include <winsock2.h>
+#include <ws2tcpip.h>                   // For modern IP address functions (inet_pton, inet_ntop)
 #include <windows.h>                    // For Windows-specific functions like CreateThread, Sleep
+#include <mswsock.h>                    // Optional: For WSARecvFrom and advanced I/O
 #include <iphlpapi.h>                   // For IP Helper API functions
+
 
 #pragma comment(lib, "Ws2_32.lib")      // Link against Winsock library
 #pragma comment(lib, "iphlpapi.lib")    // Link against IP Helper API library
@@ -16,13 +18,15 @@
 #include "include/protocol_frames.h"    // For protocol frame definitions
 #include "include/netendians.h"         // For network byte order conversions
 #include "include/checksum.h"           // For checksum validation
+#include "include/sha256.h"
 #include "include/mem_pool.h"           // For memory pool management
 #include "include/fileio.h"             // For file transfer functions
 #include "include/queue.h"              // For queue management
 #include "include/bitmap.h"             // For bitmap management
 #include "include/hash.h"               // For hash table management
 #include "include/file_handler.h"       // For frame handling functions
-#include "include/message_handler.h"       // For frame handling functions
+#include "include/message_handler.h"    // For frame handling functions
+
 
 ServerData server;
 ServerBuffers buffers;
@@ -94,24 +98,44 @@ static int init_server_session(){
     server.server_status = STATUS_NONE;
     server.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
     server.session_id_counter = 0;
-    snprintf(server.name, NAME_SIZE, "%.*s", NAME_SIZE - 1, SERVER_NAME);
+    snprintf(server.name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, SERVER_NAME);
 
     return RET_VAL_SUCCESS;
 }
 static int init_server_config(){
     WSADATA wsaData;
+
+    int rcvBufSize = 50 * 1024 * 1024;  // 50MB
+    int sndBufSize = 5 * 1024 * 1024;  // 5MB
+
+
     int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (iResult != 0) {
         fprintf(stderr, "WSAStartup failed: %d\n", iResult);
         exit(EXIT_FAILURE);
     }
 
-    server.socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    //server.socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    // if (server.socket == INVALID_SOCKET) {
+    //     fprintf(stderr, "socket failed with error: %d\n", WSAGetLastError());
+    //     WSACleanup();
+    //     return RET_VAL_ERROR;
+    // }
+
+    server.socket = WSASocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED);
     if (server.socket == INVALID_SOCKET) {
-        fprintf(stderr, "socket failed with error: %d\n", WSAGetLastError());
+        fprintf(stderr, "WSASocket failed: %d\n", WSAGetLastError());
+        closesocket(server.socket);
         WSACleanup();
         return RET_VAL_ERROR;
     }
+
+        // Set receive buffer
+    setsockopt(server.socket, SOL_SOCKET, SO_RCVBUF, (char*)&rcvBufSize, sizeof(rcvBufSize));
+
+    // Set send buffer
+    setsockopt(server.socket, SOL_SOCKET, SO_SNDBUF, (char*)&sndBufSize, sizeof(sndBufSize));
+
     server.server_addr.sin_family = AF_INET;
     server.server_addr.sin_port = _htons(SERVER_PORT);
     inet_pton(AF_INET, server_ip, &server.server_addr.sin_addr);
@@ -124,6 +148,40 @@ static int init_server_config(){
     }
 
     printf("Server listening on port %d...\n", SERVER_PORT);
+
+
+    server.iocp_handle = CreateIoCompletionPort((HANDLE)server.socket, NULL, 0, 0);
+    if (server.iocp_handle == NULL || server.iocp_handle == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "CreateIoCompletionPort failed: %d\n", GetLastError());
+        closesocket(server.socket);
+        WSACleanup();
+        return RET_VAL_ERROR;
+    }
+
+    // IOCP_CONTEXT* iocp_context = &server.iocp_context;
+    // ZeroMemory(&server.iocp_context, sizeof(IOCP_CONTEXT));
+    // server.iocp_context.src_addr_len = sizeof(struct sockaddr_in);
+    // server.iocp_context.wsaBuf.buf = server.iocp_context.buffer;
+    // server.iocp_context.wsaBuf.len = sizeof(UdpFrame);
+
+    // DWORD flags = 0;
+    // int result = WSARecvFrom(
+    //     server.socket,
+    //     &server.iocp_context.wsaBuf,
+    //     1,
+    //     NULL,
+    //     &flags,
+    //     (SOCKADDR*)&server.iocp_context.src_addr,
+    //     &server.iocp_context.src_addr_len,
+    //     &server.iocp_context.overlapped,
+    //     NULL
+    // );
+
+    // if (result == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+    //     fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
+    //     RET_VAL_ERROR;
+    // }
+
     return RET_VAL_SUCCESS;
 
 }
@@ -192,13 +250,13 @@ static int init_server_buffers(){
 }
 static int start_threads() {
     // Create threads for receiving and processing frames
-    hthread_receive_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_receive_frame, NULL, 0, NULL);
+    hthread_receive_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_receive_frame, &server, 0, NULL);
     if (hthread_receive_frame == NULL) {
         fprintf(stderr, "Failed to create receive frame thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
 
-    hthread_process_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_process_frame, NULL, 0, NULL);
+    hthread_process_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_process_frame, &server, 0, NULL);
     if (hthread_process_frame == NULL) {
         fprintf(stderr, "Failed to create process frame thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
@@ -389,7 +447,7 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
     
     // Formats and copies the client's name from the received frame's payload into the new client's structure.
     // 'snprintf' is used for safe string copying, preventing buffer overflows.
-    snprintf(new_client->name, NAME_SIZE, "%.*s", NAME_SIZE - 1, recv_frame->payload.connection_request.client_name);
+    snprintf(new_client->name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, recv_frame->payload.connection_request.client_name);
 
     // Converts the client's IP address from binary form to a human-readable string (IPv4).
     inet_ntop(AF_INET, &client_addr->sin_addr, new_client->ip, INET_ADDRSTRLEN);
@@ -458,7 +516,6 @@ int create_output_file(const char *buffer, const uint64_t size, const char *path
     fprintf(stderr, "Creating output file: %s\n", path);
     return RET_VAL_SUCCESS;
 }
-
 // update file transfer progress and speed in MBs
 void update_statistics(Client * client){
 
@@ -481,68 +538,90 @@ void update_statistics(Client * client){
     fprintf(stdout, "\rFile transfer progress: %.2f %% - Speed: %.2f MB/s", client->statistics.file_transfer_progress, client->statistics.file_transfer_speed);
     fflush(stdout);
 }
-// --- Receive Thread Function ---
+
+// --- Receive frame thread function ---
 DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
 
-    UdpFrame received_frame;
-    QueueFrameEntry frame_entry;
+    ServerData *server = (ServerData*)lpParam;
 
-    struct sockaddr_in src_addr;
-    int src_addr_len = sizeof(src_addr);
-    int recv_error_code;
-
-    int bytes_received;
-
-    DWORD timeout = RECVFROM_TIMEOUT_MS;
-    if (setsockopt(server.socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout)) == SOCKET_ERROR) {
-        fprintf(stderr, "receive_thread_func: setsockopt SO_RCVTIMEO failed with error: %d\n", WSAGetLastError());
+    if(issue_WSARecvFrom(server->socket, &server->iocp_context) == RET_VAL_ERROR){
+        fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
+        //TODO initiate some kind of global error and stop client?
+        goto exit_thread;
     }
 
-    while (server.server_status == STATUS_READY) {
+    HANDLE CompletitionPort = server->iocp_handle;
+    DWORD NrOfBytesTransferred;
+    ULONG_PTR lpCompletitionKey;
+    LPOVERLAPPED lpOverlapped;
 
-        memset(&received_frame, 0, sizeof(UdpFrame));
-        memset(&src_addr, 0, sizeof(src_addr));
 
-        bytes_received = recvfrom(server.socket, (char*)&received_frame, sizeof(UdpFrame), 0, (struct sockaddr*)&src_addr, &src_addr_len);
+    while (server->server_status == STATUS_READY) {
 
-        if (bytes_received == SOCKET_ERROR) {
-            recv_error_code = WSAGetLastError();
-            if (recv_error_code != WSAETIMEDOUT) {
-                fprintf(stderr, "recvfrom failed with error: %d\n", recv_error_code);
+        BOOL getqcompl_result = GetQueuedCompletionStatus(
+            CompletitionPort,
+            &NrOfBytesTransferred,
+            &lpCompletitionKey,
+            &lpOverlapped,
+            WSARECV_TIMEOUT_MS
+            );
+
+            if (!getqcompl_result) {
+                int wsa_error = WSAGetLastError();
+                // GETQCOMPL_TIMEOUT is expected if no data for WSARECV_TIMEOUT_MS
+                if (wsa_error == GETQCOMPL_TIMEOUT) {
+                    continue;
+                } else {
+                    fprintf(stderr, "GetQueuedCompletionStatus failed with error: %d\n", wsa_error);
+                    continue;
+                }
             }
-        } else if (bytes_received > 0) {
-            if(bytes_received > sizeof(UdpFrame)){
+
+        if (lpOverlapped == NULL) {
+            fprintf(stderr, "Warning: NULL pOverlapped received. IOCP may be shutting down.\n");
+            continue;
+        }
+
+        IOCP_CONTEXT* iocp_overlapped = (IOCP_CONTEXT*)lpOverlapped;
+        
+        // Validate and dispatch frame
+        if (NrOfBytesTransferred > 0 && NrOfBytesTransferred <= sizeof(UdpFrame)) {
+            QueueFrameEntry frame_entry = {0};
+            memcpy(&frame_entry.frame, iocp_overlapped->buffer, NrOfBytesTransferred);
+            memcpy(&frame_entry.src_addr, &iocp_overlapped->src_addr, sizeof(struct sockaddr_in));
+            frame_entry.frame_size = NrOfBytesTransferred;
+
+            if(frame_entry.frame_size > sizeof(UdpFrame)){
                 fprintf(stdout, "Frame received with bytes > max frame size!\n");
                 continue;
             }
 
-            memset(&frame_entry, 0, sizeof(QueueFrameEntry));
-            memcpy(&frame_entry.frame, &received_frame, bytes_received);
-            memcpy(&frame_entry.src_addr, &src_addr, sizeof(struct sockaddr_in));
-            frame_entry.frame_size = bytes_received;
-
             uint8_t frame_type = frame_entry.frame.header.frame_type;
             BOOL is_high_priority_frame = (frame_type == FRAME_TYPE_KEEP_ALIVE ||
-                                           frame_type == FRAME_TYPE_CONNECT_REQUEST ||
-                                           frame_type == FRAME_TYPE_FILE_METADATA ||
-                                           frame_type == FRAME_TYPE_DISCONNECT);
+                                            frame_type == FRAME_TYPE_CONNECT_REQUEST ||
+                                            frame_type == FRAME_TYPE_FILE_METADATA ||
+                                            frame_type == FRAME_TYPE_DISCONNECT);
 
-            QueueFrame *target_queue = NULL;
-
+            QueueFrame* target_queue = NULL;
             if (is_high_priority_frame == TRUE) {
-                target_queue = &buffers.queue_priority_frame; // High-priority frames
+                target_queue = &buffers.queue_priority_frame;
             } else {
-                target_queue = &buffers.queue_frame;      // Other frames go to the general `queue_frame`.
+                target_queue = &buffers.queue_frame;
             }
-
-            if (push_frame(target_queue, &frame_entry) != RET_VAL_SUCCESS) {
+            if (push_frame(target_queue, &frame_entry) == RET_VAL_ERROR) {
                 fprintf(stderr, "Failed to push frame to queue. Queue full?\n");
-                continue; // Discard this frame (as it couldn't be queued) and proceed to the next receive attempt.
             }
         }
+
+        if(issue_WSARecvFrom(server->socket, iocp_overlapped) == RET_VAL_ERROR){
+            fprintf(stderr, "WSARecvFrom re-issue failed: %d\n", WSAGetLastError());
+            continue;
+        }
     }
+exit_thread:
+    fprintf(stdout, "recv thread exiting\n");
     _endthreadex(0);
-    return 0; // Return 0 to indicate successful thread termination.
+    return 0;
 }
 // --- Processes a received frame ---
 DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
@@ -771,7 +850,6 @@ DWORD WINAPI thread_proc_send_ack(LPVOID lpParam){
     _endthreadex(0);
     return 0;
 }
-
 // --- Client timeout thread function ---
 DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
 
@@ -980,7 +1058,7 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
                 if(fstream->file_complete){           
                     
                     ht_update_id_status(&buffers.ht_fid, fstream->sid, fstream->fid, ID_RECV_COMPLETE);
-                    fprintf(stdout, "File '%s' received written to disk and validated", fstream->fn);
+                    fprintf(stdout, "File '%s' received written to disk and validated", fstream->fnm);
 
                     QueueAckEntry ack_entry;
                     new_ack_entry(&ack_entry, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, fstream->srv_socket, &fstream->client_addr);
@@ -1046,7 +1124,7 @@ void file_cleanup_stream(FileStream *fstream, ServerBuffers* buffers){
     }
     if(fstream->fp && fstream->fstream_busy && !fstream->file_complete){
         fclose(fstream->fp);
-        remove(fstream->fn);
+        remove(fstream->fnm);
         fstream->fp = NULL;
     }
     if(fstream->fp != NULL){
@@ -1056,7 +1134,7 @@ void file_cleanup_stream(FileStream *fstream, ServerBuffers* buffers){
             int fclosed = fclose(fstream->fp);
             Sleep(50); // Sleep for 50 milliseconds to ensure the file is properly closed before proceeding.
             if(fclosed != 0){
-                fprintf(stderr, "Error closing the file stream: %s (errno: %d)\n", fstream->fn, errno);
+                fprintf(stderr, "Error closing the file stream: %s (errno: %d)\n", fstream->fnm, errno);
             }
             fstream->fp = NULL; // Set the file pointer to NULL after closing.
         }
@@ -1102,7 +1180,7 @@ void file_cleanup_stream(FileStream *fstream, ServerBuffers* buffers){
     memset(&fstream->received_sha256, 0, 32);
     memset(&fstream->calculated_sha256, 0, 32);
 
-    memset(fstream->fn, 0, PATH_SIZE);
+    memset(fstream->fnm, 0, MAX_NAME_SIZE);
     return;
 }
 // Clean up the message stream resources after a file transfer is completed or aborted.
@@ -1128,7 +1206,7 @@ void message_cleanup_stream(MessageStream *mstream, ServerBuffers* buffers){
     mstream->fragment_count = 0; // Reset fragment count.
     mstream->chars_received = 0; // Reset characters received counter.
     mstream->bitmap_entries_count = 0; // Reset bitmap entries count.
-    memset(mstream->file_name, 0, PATH_SIZE); // Clear the file name buffer by filling it with zeros.
+    memset(mstream->fnm, 0, MAX_NAME_SIZE); // Clear the file name buffer by filling it with zeros.
     return;
 
 }
@@ -1184,7 +1262,7 @@ void cleanup_client(Client *client, ServerBuffers* buffers){
     // Reset the client's unique identifier to zero.
     client->cid = 0;
     // Reset the client's name buffer by filling it with zeros.
-    memset(&client->name, 0, NAME_SIZE);
+    memset(&client->name, 0, MAX_NAME_SIZE);
     // Reset any client-specific flags to zero.
     client->flags = 0;
     // Set the client's connection status to disconnected.

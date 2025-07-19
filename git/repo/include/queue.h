@@ -14,7 +14,7 @@
 #endif
 
 
-#define FRAME_QUEUE_SIZE                        65536
+#define FRAME_QUEUE_SIZE                        32768
 #define QUEUE_ACK_SIZE                          131072     // Queue buffer size
 
 //#pragma pack(push, 1) 

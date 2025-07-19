@@ -15,7 +15,7 @@
 #endif
 
 //--------------------------------------------------------------------------------------------------------------------------
-#define HASH_SIZE_FRAME                (32768)
+#define HASH_SIZE_FRAME                (8192)
 
 typedef struct FramePendingAck{
     UdpFrame frame;

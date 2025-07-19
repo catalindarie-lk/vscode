@@ -27,7 +27,7 @@ int send_connect_request(const uint64_t seq_num,
     frame.payload.connection_request.client_id = _htonl(client_id);
     frame.payload.connection_request.flags = flags;
 
-    snprintf(frame.payload.connection_request.client_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, client_name);
+    snprintf(frame.payload.connection_request.client_name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, client_name);
 
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(ConnectRequestPayload)));
@@ -83,14 +83,14 @@ int send_file_metadata(const uint64_t seq_num,
         fprintf(stderr, "ERROR: Invalid file name pointer (NULL).\n");
         return RET_VAL_ERROR;
     }
-    uint32_t file_name_len = (uint32_t)strnlen(file_name, NAME_SIZE - 1);
+    uint32_t file_name_len = (uint32_t)strnlen(file_name, MAX_NAME_SIZE - 1);
  
     if(file_name_len == 0){
         fprintf(stderr, "ERROR: File name is 0 length.\n");
         return RET_VAL_ERROR;
     }
-    if(file_name_len >= NAME_SIZE - 1){
-        fprintf(stderr, "ERROR: File name is too long. Max length is %d characters.\n", NAME_SIZE - 1);
+    if(file_name_len >= MAX_NAME_SIZE - 1){
+        fprintf(stderr, "ERROR: File name is too long. Max length is %d characters.\n", MAX_NAME_SIZE - 1);
         return RET_VAL_ERROR;
     }
     file_name_len += 1; // Add 1 for null terminator
@@ -234,12 +234,12 @@ int send_long_text_fragment(const uint64_t seq_num,
     frame.header.seq_num = _htonll(seq_num);
     frame.header.session_id = _htonl(session_id);
     // Set the payload fields
-    frame.payload.long_text_msg.message_id = _htonl(message_id);
-    frame.payload.long_text_msg.message_len = _htonl(message_len);
-    frame.payload.long_text_msg.fragment_len = _htonl(fragment_len);
-    frame.payload.long_text_msg.fragment_offset = _htonl(fragment_offset);
+    frame.payload.text_fragment.message_id = _htonl(message_id);
+    frame.payload.text_fragment.message_len = _htonl(message_len);
+    frame.payload.text_fragment.fragment_len = _htonl(fragment_len);
+    frame.payload.text_fragment.fragment_offset = _htonl(fragment_offset);
     
-    memcpy(frame.payload.long_text_msg.fragment_text, fragment_buffer, fragment_len);
+    memcpy(frame.payload.text_fragment.chars, fragment_buffer, fragment_len);
     
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(LongTextPayload)));  

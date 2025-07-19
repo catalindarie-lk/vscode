@@ -2,7 +2,11 @@
 #define FRAMES_H
 
 #include <stdint.h>
-#include <ws2tcpip.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>                   // For modern IP address functions (inet_pton, inet_ntop)
+#include <windows.h>                    // For Windows-specific functions like CreateThread, Sleep
+#include <mswsock.h>                    // Optional: For WSARecvFrom and advanced I/O
+#include <iphlpapi.h>                   // For IP Helper API functions
 
 
 #ifndef RET_VAL_SUCCESS
@@ -12,14 +16,14 @@
 #define RET_VAL_ERROR -1
 #endif
 
-#define MAX_PAYLOAD_SIZE                    1400                // Max size of data within a frame payload (adjust as needed)
-#define FRAME_DELIMITER                     0xAABB              // A magic number to identify valid frames
+#define SERVER_PORT                         (32768)               // Port the server listens on
+#define MAX_PAYLOAD_SIZE                    (1024)                // Max size of data within a frame payload (adjust as needed)
+#define FRAME_DELIMITER                     (0xAABB)              // A magic number to identify valid frames
 
 #define TEXT_FRAGMENT_SIZE                  ((uint32_t)(MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4))
 #define FILE_FRAGMENT_SIZE                  ((uint32_t)(MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t)))
 
-#define NAME_SIZE                           255                 // Maximum size for client/server names
-#define PATH_SIZE                           255                 // Maximum size for file paths
+#define MAX_NAME_SIZE                       (255)                 // Maximum size for client/server names
 
 #define FRAME_TYPE_DISCONNECT_SEQ           (UINT64_MAX - 1)
 #define FRAME_TYPE_KEEP_ALIVE_SEQ           (UINT64_MAX - 2)
@@ -27,6 +31,12 @@
 #define FRAME_TYPE_CONNECT_RESPONSE_SEQ     (UINT64_MAX - 4)
 
 #define FRAME_TYPE_CONNECT_REQUEST_SID      (UINT32_MAX - 1)
+
+#define WSARECV_TIMEOUT_MS                  (100)         // Timeout in milliseconds in the receive frame thread
+#define GETQCOMPL_TIMEOUT                   (258L)
+
+#define TEST_FILE_PATH                      "G:\\test_file.txt"
+#define SAVE_FILE_PATH                      "G:\\"
 
 
 // --- Frame Types ---
@@ -86,14 +96,14 @@ typedef struct {
 // Payload Structures for different frame types
 typedef struct {
     uint32_t client_id;                                     // Unique identifier of the sender
-    uint8_t  flags;                                          // Protocol the client supports
-    char     client_name[NAME_SIZE];                    // Optional: human-readable identifier
+    uint8_t  flags;                                         // Protocol the client supports
+    char     client_name[MAX_NAME_SIZE];                    // Optional: human-readable identifier
 } ConnectRequestPayload;
 
 typedef struct {
     uint32_t session_timeout;                               // Suggested timeout period for client inactivity
     uint8_t  server_status;                                 // BUSY (0) READY (1) or ERR (x), etc
-    char     server_name[NAME_SIZE];                    // Optional: human-readable identifier
+    char     server_name[MAX_NAME_SIZE];                    // Optional: human-readable identifier
 } ConnectResponsePayload;
 
 typedef struct {
@@ -103,7 +113,7 @@ typedef struct {
 typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t file_size;                                     // Total size of the file being transferred
-    char     filename[NAME_SIZE];                           // Max filename length
+    char     filename[MAX_NAME_SIZE];                           // Max filename length
 }FileMetadataPayload;
 
 typedef struct {
@@ -115,7 +125,7 @@ typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t offset;                                        // Offset of this fragment within the file
     uint32_t size;                                          // Length of actual data in 'fragment_data'
-    char  bytes[FILE_FRAGMENT_SIZE];                        // Adjusted size
+    uint8_t  bytes[FILE_FRAGMENT_SIZE];                        // Adjusted size
 }FileFragmentPayload;
 
 typedef struct{
@@ -134,7 +144,7 @@ typedef struct {
     uint32_t message_len;                                   // Total length of the original message
     uint32_t fragment_len;                                  // Length of actual text data in 'fragment_data'
     uint32_t fragment_offset;                               // Offset of this fragment within the long message
-    char     fragment_text[TEXT_FRAGMENT_SIZE];             // Adjusted size
+    char     chars[TEXT_FRAGMENT_SIZE];             // Adjusted size
 } LongTextPayload;
 
 // Main UDP Frame Structure
@@ -149,11 +159,19 @@ typedef struct {
         FileFragmentPayload file_fragment;                  // File data fragment
         FileEndPayload file_end;
         FileCompletePayload file_complete;
-        LongTextPayload long_text_msg;                      // Fragment of a long text message
+        LongTextPayload text_fragment;                      // Fragment of a long text message
         uint8_t raw_payload[MAX_PAYLOAD_SIZE];              // For generic access or padding
     } payload;
 } UdpFrame;
 #pragma pack(pop)
+
+typedef struct {
+    OVERLAPPED overlapped;
+    WSABUF wsaBuf;
+    CHAR buffer[sizeof(UdpFrame)];
+    struct sockaddr_in src_addr;
+    int src_addr_len;
+} IOCP_CONTEXT;
 
 int send_frame(const UdpFrame *frame, 
                     const SOCKET src_socket, 
@@ -166,4 +184,7 @@ int send_disconnect(const uint32_t session_id,
                 );
 
 
-#endif
+int issue_WSARecvFrom(const SOCKET socket, 
+                    IOCP_CONTEXT *iocp_context);
+
+#endif 

@@ -27,6 +27,8 @@
         "netendians.h": "c",
         "protocol_frames.h": "c",
         "message_handler.h": "c",
-        "fileio.h": "c"
+        "fileio.h": "c",
+        "file_handler.h": "c",
+        "ws2tcpip.h": "c"
     }
 }

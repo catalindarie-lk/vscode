@@ -2,7 +2,6 @@
 #define SERVER_H
 
 #include <stdint.h>
-#include <windows.h>
 #include "include/protocol_frames.h"
 #include "include/queue.h"
 #include "include/mem_pool.h"
@@ -27,11 +26,8 @@
 #endif
 
 // --- Constants 
-#define SERVER_PORT                     12345       // Port the server listens on
-#define RECVFROM_TIMEOUT_MS             100         // Timeout for recvfrom in milliseconds in the receive thread
 #define SERVER_NAME                     "lkdc UDP Text/File Transfer Server"
-#define MAX_CLIENTS                     20
-#define FILE_PATH                       "E:\\out_file.txt"
+#define MAX_CLIENTS                     (1024)
 
 #define FRAGMENTS_PER_CHUNK             (64ULL)
 #define CHUNK_TRAILING                  (1u << 7) // 0b10000000
@@ -85,7 +81,10 @@ typedef struct{
     uint8_t server_status;                // Status of the server (e.g., busy, ready, error)
     uint32_t session_timeout;           // Timeout period for client inactivity
     volatile uint32_t session_id_counter;   // Global counter for unique session IDs
-    char name[NAME_SIZE];               // Human-readable server name
+    char name[MAX_NAME_SIZE];               // Human-readable server name
+    
+    IOCP_CONTEXT iocp_context;
+    HANDLE iocp_handle;
    
 }ServerData;
 
@@ -123,22 +122,22 @@ typedef struct {
     uint8_t stream_err;                 // Stores an error code if something goes wrong with the stream.
     char *buffer;                       // Pointer to the buffer holding the message data.
     uint64_t *bitmap;                   // Pointer to a bitmap used for tracking received fragments. Each bit represents a fragment.
-    uint32_t sid;                      // Sender ID: Unique identifier for the sender of the message.
-    uint32_t mid;                      // Message ID: Unique identifier for the message itself.
-    uint32_t mlen;                     // Message Length: Total expected length of the complete message in bytes.
+    uint32_t sid;                       // Session ID: Unique identifier for the sender of the message.
+    uint32_t mid;                       // Message ID: Unique identifier for the message itself.
+    uint32_t mlen;                      // Message Length: Total expected length of the complete message in bytes.
     uint32_t chars_received;            // Characters Received: Current number of characters (bytes) received so far for this message.
     uint64_t fragment_count;            // Fragment Count: Total number of expected fragments for the complete message.
     uint64_t bitmap_entries_count;      // Bitmap Entries Count: The number of uint64_t entries in the bitmap array.
 
-    char file_name[PATH_SIZE];          // File Name: Buffer to store the name of the file associated with this message stream.
+    char fnm[MAX_NAME_SIZE];      // File Name: Buffer to store the name of the file associated with this message stream.
 
     CRITICAL_SECTION lock;              // Lock: Spinlock/Mutex to protect access to this MsgStream structure in multithreaded environments.
 } MessageStream;
 
 typedef struct{
 
-    uint32_t client_index;
-    uint32_t fstream_index;
+    uint32_t client_index;              // client_list[index]
+    uint32_t fstream_index;             // client.fstream[index]
 
     SOCKET srv_socket;
     struct sockaddr_in client_addr;
@@ -150,7 +149,6 @@ typedef struct{
     uint64_t *bitmap;                   // Pointer to an array of uint64_t, where each bit represents a file fragment.
                                         // A bit set to 1 means the fragment has been received.
     uint8_t* flag;                      // Pointer to an array of uint8_t, used for custom flags per chunk/bitmap entry.
-                                        // (e.g., 0b10000000 for last partial, 0b00000001 for written, etc.)
     char** pool_block_file_chunk;       // Pointer to an array of char pointers, where each char* points to a
                                         // memory block holding a complete chunk of data (64 fragments).
     BOOL trailing_chunk;                // True if the last bitmap entry represents a partial chunk (less than 64 fragments).
@@ -166,17 +164,17 @@ typedef struct{
  
     BOOL fstream_busy;                  // Indicates if this stream channel is currently in use for a transfer.
     uint8_t fstream_err;                // Stores an error code if something goes wrong with the stream.
-    BOOL file_complete;                 // True if the entire file has been received and written.
-    BOOL file_bytes_received;
-    BOOL file_bytes_written;
-    BOOL file_hash_received;
-    BOOL file_hash_calculated;
-    BOOL file_hash_validated;
+    BOOL file_complete;                 // True if the entire file has been received, written and sha256 validated.
+    BOOL file_bytes_received;           // True if all file bytes have been received.
+    BOOL file_bytes_written;            // True if all file bytes were written to disk
+    BOOL file_hash_received;            // True if end frame with sha256 received from the client
+    BOOL file_hash_calculated;          // True if sha256 was calculated by the server
+    BOOL file_hash_validated;           // True if received sha256 is equal to calculated sha256
 
-    uint8_t received_sha256[32];
-    uint8_t calculated_sha256[32];
+    uint8_t received_sha256[32];        // Buffer for sha256 received from the client
+    uint8_t calculated_sha256[32];      // Buffer for sha256 calculated by the server
 
-    char fn[PATH_SIZE];                 // Array to store the file name/path.
+    char fnm[MAX_NAME_SIZE];            // Array to store the file name+path.
     FILE *fp;                           // File pointer for the file being written to disk.
 
     CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
@@ -194,7 +192,7 @@ typedef struct {
     uint16_t port;
     
     uint32_t cid;                 // Unique ID received from the client
-    char name[NAME_SIZE];               // Optional: human-readable identifier received from the client
+    char name[MAX_NAME_SIZE];               // Optional: human-readable identifier received from the client
     uint8_t flags;                       // Flags received from the client (e.g., protocol version, capabilities)
     uint8_t connection_status;
  

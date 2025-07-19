@@ -27,7 +27,7 @@ int send_connect_response(const uint64_t seq_num,
     frame.payload.connection_response.session_timeout = _htonl(session_timeout);
     frame.payload.connection_response.server_status = status;
 
-    snprintf(frame.payload.connection_response.server_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, server_name);
+    snprintf(frame.payload.connection_response.server_name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, server_name);
 
     // Calculate CRC32 for the ACK frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(ConnectResponsePayload)));

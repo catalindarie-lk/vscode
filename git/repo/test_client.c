@@ -2,11 +2,12 @@
 #include <stdio.h>                      // For printf, fprintf
 #include <string.h>                     // For memset, memcpy
 #include <stdint.h>                     // For fixed-width integer types
-//#include <winsock2.h>
-#include <ws2tcpip.h>                   // For modern IP address functions (inet_pton, inet_ntop)
 #include <time.h>                       // For time functions
 #include <process.h>                    // For _beginthreadex
+#include <winsock2.h>
+#include <ws2tcpip.h>                   // For modern IP address functions (inet_pton, inet_ntop)
 #include <windows.h>                    // For Windows-specific functions like CreateThread, Sleep
+#include <mswsock.h>                    // Optional: For WSARecvFrom and advanced I/O
 #include <iphlpapi.h>                   // For IP Helper API functions
 
 #pragma comment(lib, "Ws2_32.lib")      // Link against Winsock library
@@ -17,12 +18,12 @@
 #include "include/protocol_frames.h"    // For protocol frame definitions
 #include "include/netendians.h"         // For network byte order conversions
 #include "include/checksum.h"           // For checksum validation
+#include "include/sha256.h"
 #include "include/mem_pool.h"           // For memory pool management
 #include "include/fileio.h"             // For file transfer functions
 #include "include/queue.h"              // For queue management
 #include "include/bitmap.h"             // For bitmap management
 #include "include/hash.h"               // For hash table management
-#include "include/sha256.h"
 
 ClientData client;
 ClientBuffers buffers;
@@ -58,7 +59,7 @@ static int init_client_session(){
     client.cid = CLIENT_ID;
     
     client.flags = 0;
-    snprintf(client.client_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, CLIENT_NAME);
+    snprintf(client.client_name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, CLIENT_NAME);
     client.last_active_time = time(NULL);
 
     client.frame_count = (uint64_t)UINT32_MAX;
@@ -69,7 +70,7 @@ static int init_client_session(){
     client.server_status = STATUS_CLOSED;
     client.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
     // Initialize client data
-    memset(client.server_name, 0, NAME_SIZE);
+    memset(client.server_name, 0, MAX_NAME_SIZE);
     
     return RET_VAL_SUCCESS;     
 }
@@ -85,12 +86,14 @@ static int reset_client_session(){
     client.server_status = STATUS_CLOSED;
     client.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
     // Initialize client data
-    memset(client.server_name, 0, NAME_SIZE);
+    memset(client.server_name, 0, MAX_NAME_SIZE);
     return RET_VAL_SUCCESS;
 }
 static int init_client_config(){
     
     WSADATA wsaData;
+    int rcvBufSize = 5 * 1024 * 1024;  // 2MB
+    int sndBufSize = 5 * 1024 * 1024;  // 2MB
     int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (iResult != 0) {
         fprintf(stderr, "WSAStartup failed: %d\n", iResult);
@@ -98,9 +101,9 @@ static int init_client_config(){
         return RET_VAL_ERROR;
     }
 
-    client.socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    client.socket = WSASocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED);
     if (client.socket == INVALID_SOCKET) {
-        fprintf(stderr, "Socket creation failed. Error: %d\n", WSAGetLastError());
+        fprintf(stderr, "WSASocket failed: %d\n", WSAGetLastError());
         closesocket(client.socket);
         WSACleanup();
         return RET_VAL_ERROR;
@@ -110,18 +113,33 @@ static int init_client_config(){
     client.client_addr.sin_port = _htons(0); // Let OS choose port
     client.client_addr.sin_addr.s_addr = inet_addr(client_ip);
 
+            // Set receive buffer
+    setsockopt(client.socket, SOL_SOCKET, SO_RCVBUF, (char*)&rcvBufSize, sizeof(rcvBufSize));
+    // Set send buffer
+    setsockopt(client.socket, SOL_SOCKET, SO_SNDBUF, (char*)&sndBufSize, sizeof(sndBufSize));
+
     if (bind(client.socket, (struct sockaddr *)&client.client_addr, sizeof(client.client_addr)) == SOCKET_ERROR) {
         printf("Bind failed: %d\n", WSAGetLastError());
+        closesocket(client.socket);
         WSACleanup();
         return RET_VAL_ERROR;
     }
    
-    // Define server address
+    client.iocp_handle = CreateIoCompletionPort((HANDLE)client.socket, NULL, 0, 0);
+    if (client.iocp_handle == NULL || client.iocp_handle == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "CreateIoCompletionPort failed: %d\n", GetLastError());
+        closesocket(client.socket);
+        WSACleanup();
+        return RET_VAL_ERROR;
+    }
+
+     // Define server address
     memset(&client.server_addr, 0, sizeof(client.server_addr));
     client.server_addr.sin_family = AF_INET;
     client.server_addr.sin_port = _htons(SERVER_PORT);
     if (inet_pton(AF_INET, server_ip, &client.server_addr.sin_addr) <= 0){
         fprintf(stderr, "Invalid address or address not supported.\n");
+        closesocket(client.socket);
         WSACleanup();
         return RET_VAL_ERROR;
     };
@@ -220,7 +238,7 @@ static void start_threads(){
         client.session_status = CONNECTION_CLOSED;
         client.client_status = STATUS_CLOSED; // Signal immediate shutdown
     }
-    hthread_recieve_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_receive_frame, NULL, 0, NULL);
+    hthread_recieve_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_receive_frame, &client, 0, NULL);
     if (hthread_recieve_frame == NULL) {
         fprintf(stderr, "Failed to create receive frame thread. Error: %d\n", GetLastError());
         client.session_status = CONNECTION_CLOSED;
@@ -319,77 +337,97 @@ static void client_shutdown(){
     
 }
 
-// --- Receive frame ---
+// --- Receive frame thread function ---
 DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
 
-    UdpFrame recv_frame;
-    QueueFrameEntry frame_entry;
-    DWORD timeout = RECV_TIMEOUT_MS;
-    int bytes_received;
-
-    struct sockaddr_in src_addr;
-    int src_addr_len = sizeof(src_addr);
-    int error_code;
-
-    if (setsockopt(client.socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout)) == SOCKET_ERROR) {
-        fprintf(stderr, "receive_thread_func: setsockopt SO_RCVTIMEO failed with error: %d\n", WSAGetLastError());
-        // Do not exit, but log the error
+    ClientData *client = (ClientData*)lpParam;
+  
+    if(issue_WSARecvFrom(client->socket, &client->iocp_context) == RET_VAL_ERROR){
+        fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
+        client->client_status = STATUS_ERROR;
+        //TODO initiate some kind of global error and stop client?
+        goto exit_thread;
     }
 
-    HANDLE events[2] = {client.hevent_connection_listening, client.hevent_shutdown};
-   
-    while(client.client_status == STATUS_READY){
-        
-        DWORD wait_result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+    HANDLE CompletitionPort = client->iocp_handle;
+    DWORD NrOfBytesTransferred;
+    ULONG_PTR lpCompletitionKey;
+    LPOVERLAPPED lpOverlapped;
 
-        if (wait_result == WAIT_OBJECT_0) {
+    HANDLE events[2] = {client->hevent_connection_listening, client->hevent_shutdown};
+    DWORD wait_events;
+    DWORD check_shutdown;
+   
+    while(client->client_status == STATUS_READY){
+        
+        wait_events = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+
+        if (wait_events == WAIT_OBJECT_0) {
             fprintf(stdout, "Started listening...\n");
-            client.session_status = CONNECTION_LISTENING;
-        } else if (wait_result == WAIT_OBJECT_0 + 1){
+            client->session_status = CONNECTION_LISTENING;
+        } else if (wait_events == WAIT_OBJECT_0 + 1){
             goto exit_thread;
 
         } else {
-            fprintf(stderr, "Unexpected error for listening event: %lu\n", wait_result);
+            fprintf(stderr, "Unexpected error for listening event: %lu\n", wait_events);
             break;
         }
 
-        while(TRUE){
+        while(1){
 
-            DWORD check_shutdown = WaitForSingleObject(client.hevent_shutdown, 0);
+            check_shutdown = WaitForSingleObject(client->hevent_shutdown, 0);
             if (check_shutdown == WAIT_OBJECT_0) {
                 goto exit_thread;
             }
 
-            if(client.session_status == CONNECTION_CLOSED){
+            if(client->session_status == CONNECTION_CLOSED){
                 fprintf(stderr, "Stopped listening...\n");
                 break;
             }
 
-            memset(&recv_frame, 0, sizeof(UdpFrame));
-            
-            bytes_received = recvfrom(client.socket, (char*)&recv_frame, sizeof(UdpFrame), 0, (SOCKADDR*)&src_addr, &src_addr_len);
-            if (bytes_received == SOCKET_ERROR) {
-                error_code = WSAGetLastError();
-                if (error_code != WSAETIMEDOUT) { // WSAETIMEDOUT is expected if no data for RECV_TIMEOUT_MS
-                    fprintf(stderr, "recvfrom failed with error: %d\n", error_code);
+            BOOL getqcompl_result = GetQueuedCompletionStatus(
+                CompletitionPort,
+                &NrOfBytesTransferred,
+                &lpCompletitionKey,
+                &lpOverlapped,
+                WSARECV_TIMEOUT_MS
+            );
+            if (!getqcompl_result) {
+                int wsa_error = WSAGetLastError();
+                // GETQCOMPL_TIMEOUT is expected if no data for WSARECV_TIMEOUT_MS
+                if (wsa_error == GETQCOMPL_TIMEOUT) {
+                    continue;
+                } else {
+                    fprintf(stderr, "GetQueuedCompletionStatus failed with error: %d\n", wsa_error);
                     continue;
                 }
-            } else if (bytes_received > 0) {
-                // Push the received frame to the frame queue           
-                memset(&frame_entry, 0, sizeof(QueueFrameEntry));
-                memcpy(&frame_entry.frame, &recv_frame, sizeof(UdpFrame));
-                memcpy(&frame_entry.src_addr, &src_addr, sizeof(struct sockaddr_in));          
-                frame_entry.frame_size = bytes_received;
+            }
+            
+            if (lpOverlapped == NULL) {
+                fprintf(stderr, "Warning: NULL pOverlapped received. IOCP may be shutting down.\n");
+                continue;
+            }
+
+            IOCP_CONTEXT* iocp_overlapped = (IOCP_CONTEXT*)lpOverlapped;
+
+            // Validate and dispatch frame
+            if (NrOfBytesTransferred > 0 && NrOfBytesTransferred <= sizeof(UdpFrame)) {
+                
+                QueueFrameEntry frame_entry = {0};
+                memcpy(&frame_entry.frame, iocp_overlapped->buffer, NrOfBytesTransferred);
+                memcpy(&frame_entry.src_addr, &iocp_overlapped->src_addr, sizeof(struct sockaddr_in));
+                frame_entry.frame_size = NrOfBytesTransferred;
+
                 if(frame_entry.frame_size > sizeof(UdpFrame)){
                     fprintf(stdout, "Frame received with bytes > max frame size!\n");
                     continue;
                 }
-
+    
                 uint8_t frame_type = frame_entry.frame.header.frame_type;
                 uint8_t op_code = frame_entry.frame.payload.ack.op_code;
                 
                 BOOL is_high_priority_frame = (frame_type == FRAME_TYPE_CONNECT_RESPONSE ||
-                                                frame_type == FRAME_TYPE_DISCONNECT ||
+                                                 frame_type == FRAME_TYPE_DISCONNECT ||
                                                 (frame_type == FRAME_TYPE_ACK && op_code == STS_KEEP_ALIVE) ||
                                                 (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_DISCONNECT) ||
                                                 (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_FILE_METADATA) ||
@@ -397,16 +435,24 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
                                                 (frame_type == FRAME_TYPE_ACK && op_code == ERR_DUPLICATE_FRAME) ||
                                                 (frame_type == FRAME_TYPE_ACK && op_code == ERR_EXISTING_FILE)
                                             );
-    
+
                 QueueFrame *target_queue = NULL;
                 if (is_high_priority_frame == TRUE) {
                     target_queue = &buffers.queue_priority_frame;
                 } else {
                     target_queue = &buffers.queue_frame;
                 }
-                push_frame(target_queue, &frame_entry);                
+                if (push_frame(target_queue, &frame_entry) == RET_VAL_ERROR) {
+                    fprintf(stderr, "Failed to push frame to queue. Queue full?\n");
+                }          
             }
-        } // end of while(TRUE)
+
+            if(issue_WSARecvFrom(client->socket, iocp_overlapped) == RET_VAL_ERROR){
+                fprintf(stderr, "WSARecvFrom re-issue failed: %d\n", WSAGetLastError());
+                continue;
+            }
+
+        } // end of while(1)
     } // end of while(client.client_status == STATUS_READY)
 exit_thread:
     fprintf(stdout,"receive frame thread closed...\n");
@@ -505,7 +551,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 client.server_status = recv_server_status;
                 client.session_timeout = recv_session_timeout;
                 client.sid = recv_session_id;
-                snprintf(client.server_name, NAME_SIZE, "%.*s", NAME_SIZE - 1, frame->payload.connection_response.server_name);
+                snprintf(client.server_name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, frame->payload.connection_response.server_name);
                 client.last_active_time = time(NULL);
                 SetEvent(client.hevent_connection_established);
                 break;
@@ -615,33 +661,37 @@ DWORD WINAPI thread_proc_resend_frame(LPVOID lpParam){
         
         DWORD check_shutdown = WaitForSingleObject(client.hevent_shutdown, 0);
         if (check_shutdown == WAIT_OBJECT_0) {
+            ht_clean(&buffers.ht_frame);
             goto exit_thread;
         }
-
         if(client.session_status == CONNECTION_CLOSED){
-            ht_clean(&buffers.ht_frame);            
-            Sleep(1000);
+            ht_clean(&buffers.ht_frame);
+            Sleep(100);
             continue;
         }
         time_t current_time = time(NULL);
-        EnterCriticalSection(&buffers.ht_frame.mutex);
-        for (int i = 0; i < HASH_SIZE_FRAME; i++) {
-            FramePendingAck *ptr = buffers.ht_frame.entry[i];
-            while (ptr) {
-                if(current_time - ptr->time > (time_t)RESEND_TIMEOUT){
-                    send_frame(&ptr->frame, client.socket, &client.server_addr);
-                    ptr->time = current_time;
-                }
-                ptr = ptr->next;
-            }                                         
+        if(buffers.ht_frame.count == 0){
+            Sleep(100);
+            continue;
         }
-        LeaveCriticalSection(&buffers.ht_frame.mutex);
-        uint64_t sleep_time = RESEND_TIME_IDLE;
         for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
-            if(client.fstream[i].remaining_bytes_to_send > 0){
-                sleep_time = RESEND_TIME_TRANSFER;
+            BOOL frames_to_resend = client.fstream[i].remaining_bytes_to_send == 0 || client.fstream[i].throttle;
+            if(!frames_to_resend){
+                Sleep(100);
+                continue;
             }
-            Sleep(sleep_time);
+            EnterCriticalSection(&buffers.ht_frame.mutex);
+            for (int i = 0; i < HASH_SIZE_FRAME; i++) {
+                FramePendingAck *ptr = buffers.ht_frame.entry[i];
+                while (ptr) {
+                    if(current_time - ptr->time > (time_t)RESEND_TIMEOUT_SEC){
+                        send_frame(&ptr->frame, client.socket, &client.server_addr);
+                        ptr->time = current_time;
+                    }
+                    ptr = ptr->next;
+                }                                         
+            }
+            LeaveCriticalSection(&buffers.ht_frame.mutex);
         }
         Sleep(100);
     }
@@ -686,7 +736,7 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
             goto clean;
         }
         
-        fstream->fpath = "D:\\E\\test_file.txt";
+        fstream->fpath = TEST_FILE_PATH;
         fstream->fname = "test_file.txt";
 
         sha256_init(&sha256_ctx);
@@ -807,7 +857,7 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
                                                                 &buffers
                                                             );
                 if(fragment_bytes_sent == RET_VAL_ERROR){
-                    Sleep(10);
+                    Sleep(100);
                     continue;
                 }
 
@@ -868,19 +918,19 @@ DWORD WINAPI thread_proc_message_send(LPVOID lpParam){
             goto clean;
         }
         
-        mstream->fpath = "D:\\E\\test_file.txt";
+        mstream->fpath = TEST_FILE_PATH;
         mstream->fname = "test_file.txt";       
         
         mstream->fp = NULL;
         mstream->message_buffer = NULL;
         
-        mstream->text_file_size = get_file_size(mstream->fpath);  
+        mstream->text_file_size = get_file_size(mstream->fpath);
       
         if(mstream->text_file_size == RET_VAL_ERROR){
             goto clean;
         }
-        if(mstream->text_file_size > MAX_MESSAGE_SIZE){
-            fprintf(stdout, "Message file is too large! Message Size: %llu > Max size: %u\n", mstream->text_file_size, MAX_MESSAGE_SIZE);
+        if(mstream->text_file_size > MAX_MESSAGE_SIZE_BYTES){
+            fprintf(stdout, "Message file is too large! Message Size: %llu > Max size: %u\n", mstream->text_file_size, MAX_MESSAGE_SIZE_BYTES);
             goto clean;
         }
         mstream->message_len = (uint32_t)mstream->text_file_size;
@@ -932,7 +982,7 @@ DWORD WINAPI thread_proc_message_send(LPVOID lpParam){
                 mstream->throttle = FALSE;
             }
             if(mstream->throttle){
-                Sleep(10);
+                Sleep(5);
                 continue;
             }
 
@@ -1071,7 +1121,7 @@ void request_connect(){
                             client.socket, 
                             &client.server_addr
                         );
-    DWORD wait_connection_established = WaitForSingleObject(client.hevent_connection_established, ESTABLISHED_TIMEOUT_MS);
+    DWORD wait_connection_established = WaitForSingleObject(client.hevent_connection_established, CONNECT_REQUEST_TIMEOUT_MS);
     if (wait_connection_established == WAIT_OBJECT_0) {
         client.session_status = CONNECTION_ESTABLISHED;
         fprintf(stdout, "Connection established...\n");
@@ -1096,10 +1146,8 @@ void request_disconnect(){
     }
     // send disconnect frame
     send_disconnect(client.sid, client.socket, &client.server_addr);
-    // wait for disconnect frame to be confirmed by the server
-    //HANDLE events[2] = {hevent_disconnected, hevent_stop_listen};
-
-    DWORD wait_connection_closed = WaitForSingleObject(client.hevent_connection_closed, DISCONNECTED_TIMEOUT_MS);
+ 
+    DWORD wait_connection_closed = WaitForSingleObject(client.hevent_connection_closed, DISCONNECT_REQUEST_TIMEOUT_MS);
 
     if (wait_connection_closed == WAIT_OBJECT_0) {
         fprintf(stderr, "Connection closed\n"); 
@@ -1126,7 +1174,7 @@ void force_disconnect(){
         return;
     }
     SetEvent(client.hevent_connection_closed);
-    DWORD wait_connection_closed = WaitForSingleObject(client.hevent_connection_closed, DISCONNECTED_TIMEOUT_MS);
+    DWORD wait_connection_closed = WaitForSingleObject(client.hevent_connection_closed, DISCONNECT_REQUEST_TIMEOUT_MS);
     if (wait_connection_closed == WAIT_OBJECT_0) {
         fprintf(stderr, "Connection closed\n"); 
     } else if (wait_connection_closed == WAIT_TIMEOUT) {

@@ -1,11 +1,47 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <ws2tcpip.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>                   // For modern IP address functions (inet_pton, inet_ntop)
+#include <windows.h>                    // For Windows-specific functions like CreateThread, Sleep
+#include <mswsock.h>                    // Optional: For WSARecvFrom and advanced I/O
+#include <iphlpapi.h>                   // For IP Helper API functions
 
 #include "include/protocol_frames.h"
 #include "include/checksum.h"
 #include "include/netendians.h"
+
+
+int issue_WSARecvFrom(const SOCKET socket, 
+                        IOCP_CONTEXT *iocp_context
+                ){
+
+    ZeroMemory(iocp_context, sizeof(IOCP_CONTEXT));
+    iocp_context->src_addr_len = sizeof(struct sockaddr_in);
+    iocp_context->wsaBuf.buf = iocp_context->buffer;
+    iocp_context->wsaBuf.len = sizeof(UdpFrame);
+
+    DWORD recvfrom_flags = 0;
+    int recvfrom_result = WSARecvFrom(
+        socket,
+        &iocp_context->wsaBuf,
+        1,
+        NULL,
+        &recvfrom_flags,
+        (SOCKADDR*)&iocp_context->src_addr,
+        &iocp_context->src_addr_len,
+        &iocp_context->overlapped,
+        NULL
+    );
+
+    if (recvfrom_result == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+        //fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
+        return RET_VAL_ERROR;
+    }
+    return RET_VAL_SUCCESS;
+}
+
+
 
 int send_frame(const UdpFrame *frame, 
                     const SOCKET src_socket, 

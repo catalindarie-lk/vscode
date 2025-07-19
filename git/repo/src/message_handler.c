@@ -21,7 +21,7 @@
 static int msg_match_fragment(Client *client, UdpFrame *frame){
 
     uint32_t session_id = _ntohl(frame->header.session_id);    
-    uint32_t message_id = _ntohl(frame->payload.long_text_msg.message_id);
+    uint32_t message_id = _ntohl(frame->payload.text_fragment.message_id);
 
     for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
         EnterCriticalSection(&client->mstream[i].lock);
@@ -42,10 +42,10 @@ static int msg_validate_fragment(Client *client, const int index, UdpFrame *fram
 
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
     uint32_t recv_session_id = _ntohl(frame->header.session_id);
-    uint32_t recv_message_id = _ntohl(frame->payload.long_text_msg.message_id);
-    uint32_t recv_message_len = _ntohl(frame->payload.long_text_msg.message_len);
-    uint32_t recv_fragment_len = _ntohl(frame->payload.long_text_msg.fragment_len);
-    uint32_t recv_fragment_offset = _ntohl(frame->payload.long_text_msg.fragment_offset);
+    uint32_t recv_message_id = _ntohl(frame->payload.text_fragment.message_id);
+    uint32_t recv_message_len = _ntohl(frame->payload.text_fragment.message_len);
+    uint32_t recv_fragment_len = _ntohl(frame->payload.text_fragment.fragment_len);
+    uint32_t recv_fragment_offset = _ntohl(frame->payload.text_fragment.fragment_offset);
 
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
@@ -128,7 +128,7 @@ static int msg_init_stream(MessageStream *mstream, const uint32_t session_id, co
     memset(mstream->buffer, 0, message_len);
 
     // Constructs a filename for storing the received message, incorporating session and message IDs for uniqueness.
-    snprintf(mstream->file_name, PATH_SIZE, "D:\\E\\msg_SID_%d_UID%d.txt", session_id, message_id);
+    snprintf(mstream->fnm, MAX_NAME_SIZE, SAVE_FILE_PATH"xmessage_SID_%d_ID%d.txt", session_id, message_id);
 
     LeaveCriticalSection(&mstream->lock);
     return RET_VAL_SUCCESS;
@@ -159,7 +159,7 @@ static int msg_check_completion_and_record(MessageStream *mstream, ServerBuffers
     // --- Null terminate the message ---
     mstream->buffer[mstream->mlen] = '\0';
     // Attempt to write the in-memory buffer to a file on disk.
-    int msg_creation_status = create_output_file(mstream->buffer, mstream->chars_received, mstream->file_name);
+    int msg_creation_status = create_output_file(mstream->buffer, mstream->chars_received, mstream->fnm);
     
     ht_update_id_status(&buffers->ht_mid, mstream->sid, mstream->mid, ID_RECV_COMPLETE);
     
@@ -168,7 +168,7 @@ static int msg_check_completion_and_record(MessageStream *mstream, ServerBuffers
     if (msg_creation_status != RET_VAL_SUCCESS) {
         // If file creation failed, return an error.
         fprintf(stderr, "Error: Failed to create output message for file_id %d\n", mstream->mid);
-        remove(mstream->file_name);
+        remove(mstream->fnm);
         LeaveCriticalSection(&mstream->lock);
         return RET_VAL_ERROR;
     }
@@ -192,10 +192,10 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
     
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
     uint32_t recv_session_id = _ntohl(frame->header.session_id);
-    uint32_t recv_message_id = _ntohl(frame->payload.long_text_msg.message_id);
-    uint32_t recv_message_len = _ntohl(frame->payload.long_text_msg.message_len);
-    uint32_t recv_fragment_len = _ntohl(frame->payload.long_text_msg.fragment_len);
-    uint32_t recv_fragment_offset = _ntohl(frame->payload.long_text_msg.fragment_offset);
+    uint32_t recv_message_id = _ntohl(frame->payload.text_fragment.message_id);
+    uint32_t recv_message_len = _ntohl(frame->payload.text_fragment.message_len);
+    uint32_t recv_fragment_len = _ntohl(frame->payload.text_fragment.fragment_len);
+    uint32_t recv_fragment_offset = _ntohl(frame->payload.text_fragment.fragment_offset);
 
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
@@ -212,7 +212,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
             LeaveCriticalSection(&client->lock);
             return RET_VAL_ERROR;
         }
-        msg_attach_fragment(&client->mstream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);
+        msg_attach_fragment(&client->mstream[slot], frame->payload.text_fragment.chars, recv_fragment_offset, recv_fragment_len);
         
         if (msg_check_completion_and_record(&client->mstream[slot], buffers) == RET_VAL_ERROR){
             fprintf(stderr, "Final check of the message failed\n");
@@ -245,7 +245,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
         fprintf(stdout, "Received first message fragment Session ID: %u, Message ID: %d, Size: %u\n", recv_session_id, recv_message_id, recv_message_len);
         fprintf(stdout, "Opened message stream: %u\n", slot);
 
-        msg_attach_fragment(&client->mstream[slot], frame->payload.long_text_msg.fragment_text, recv_fragment_offset, recv_fragment_len);       
+        msg_attach_fragment(&client->mstream[slot], frame->payload.text_fragment.chars, recv_fragment_offset, recv_fragment_len);       
 
         if(ht_insert_id(&buffers->ht_mid, recv_session_id, recv_message_id, ID_WAITING_FRAGMENTS) == RET_VAL_ERROR){
             fprintf(stderr, "Failed to allocate memory for message ID in hash table\n");

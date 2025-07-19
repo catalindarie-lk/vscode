@@ -99,7 +99,7 @@ static void file_attach_fragment_to_chunk(FileStream *fstream, char *fragment_bu
         // Check if all expected bytes for the entire file have been received.
         if(fstream->recv_bytes_count == fstream->fsize){
             fstream->trailing_chunk_complete = TRUE;
-            fprintf(stdout, "Received complete file: %s, Size: %llu, Last chunk size: %llu\n", fstream->fn, fstream->recv_bytes_count, fstream->trailing_chunk_size);
+            fprintf(stdout, "Received complete file: %s, Size: %llu, Last chunk size: %llu\n", fstream->fnm, fstream->recv_bytes_count, fstream->trailing_chunk_size);
         }
     }
 
@@ -174,17 +174,12 @@ static int file_stream_init(FileStream *fstream, const uint32_t session_id, cons
     //memset(fstream->pool_block_file_chunk, 0, fstream->bitmap_entries_count * sizeof(char*));
 
     // Construct file name and open file
-    // Using snprintf for buffer overflow safety
-    int snprintf_res = snprintf(fstream->fn, PATH_SIZE, "D:\\E\\test_file_SID_%d_UID_%d.txt", session_id, file_id);
-    if (snprintf_res < 0 || snprintf_res >= PATH_SIZE) {
-        fprintf(stderr, "Error: File name construction failed or buffer too small.\n");
-        fstream->fstream_err = STREAM_ERR_FILENAME; // Suggest adding this error code
-        goto exit_error;
-    }
+    snprintf(fstream->fnm, MAX_NAME_SIZE, SAVE_FILE_PATH"xfile_SID_%d_ID_%d.txt", session_id, file_id);
+
     //creating output file
-    fstream->fp = fopen(fstream->fn, "wb+"); // "wb+" allows writing and reading, creates or truncates
+    fstream->fp = fopen(fstream->fnm, "wb+"); // "wb+" allows writing and reading, creates or truncates
     if(fstream->fp == NULL){
-        fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fn, errno);
+        fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fnm, errno);
         fstream->fstream_err = STREAM_ERR_FP;
         goto exit_error;
     }

@@ -8,7 +8,6 @@
 #include "include/queue.h"
 #include "include/mem_pool.h"
 #include "include/hash.h"
-#include "sha256.h"
 
 #ifndef RET_VAL_SUCCESS
 #define RET_VAL_SUCCESS 0
@@ -28,26 +27,22 @@
 
 
 // --- Constants ---
-#define SERVER_PORT                     12345       // Port the server listens on
-#define FRAME_DELIMITER                 0xAABB      // A magic number to identify valid frames
-#define RECV_TIMEOUT_MS                 100         // Timeout for recvfrom in milliseconds in the receive thread
-#define CLIENT_ID                       0xAA        // Example client ID, can be set dynamically
+
+#define CLIENT_ID                       (0xFF)        // Example client ID, can be set dynamically
 #define CLIENT_NAME                     "lkdc UDP Text/File Transfer Client"
 
-#define ESTABLISHED_TIMEOUT_MS          2500
-#define DISCONNECTED_TIMEOUT_MS         2500
+#define CONNECT_REQUEST_TIMEOUT_MS      (2500)
+#define DISCONNECT_REQUEST_TIMEOUT_MS   (2500)
 
 #define TEXT_CHUNK_SIZE                 (TEXT_FRAGMENT_SIZE * 128)
 #define FILE_CHUNK_SIZE                 (FILE_FRAGMENT_SIZE * 128)
 
-#define RESEND_TIMEOUT                  10           //seconds
-#define RESEND_TIME_TRANSFER            1000        //miliseconds
-#define RESEND_TIME_IDLE                10          //miliseconds
+#define RESEND_TIMEOUT_SEC              (10)           //seconds
 
-#define MAX_MESSAGE_SIZE                (INT32_MAX - 1)         // Max size of a long text message
+#define MAX_MESSAGE_SIZE_BYTES          (INT32_MAX - 1)         // Max size of a long text message
 
-#define HASH_FRAME_HIGH_WATERMARK       (HASH_SIZE_FRAME * 0.4)
-#define HASH_FRAME_LOW_WATERMARK        (HASH_SIZE_FRAME * 0.2)
+#define HASH_FRAME_HIGH_WATERMARK       (HASH_SIZE_FRAME * 0.5)
+#define HASH_FRAME_LOW_WATERMARK        (HASH_SIZE_FRAME * 0.25)
 
 #define BLOCK_SIZE_FRAME                ((uint64_t)(sizeof(FramePendingAck)))
 #define BLOCK_COUNT_FRAME               ((uint64_t)(HASH_FRAME_HIGH_WATERMARK * 2))
@@ -66,7 +61,7 @@ typedef uint8_t SessionStatus;
 enum SessionStatus{
     CONNECTION_CLOSED = 0,
     CONNECTION_LISTENING = 1,
-    CONNECTION_ESTABLISHED = 2
+    CONNECTION_ESTABLISHED = 2,
 };
 
 typedef struct{
@@ -84,7 +79,7 @@ typedef struct{
     uint32_t message_id;
     uint32_t message_len;
     uint32_t remaining_bytes_to_send;
-    BOOL throttle;  
+    BOOL throttle;
 
     HANDLE hevent_start_message_send;
     HANDLE hevent_close_message_stream_thread;
@@ -121,7 +116,7 @@ typedef struct{
     uint8_t session_status;     // 0-DISCONNECTED; 1-CONNECTED
     uint32_t cid;
     uint8_t flags;
-    char client_name[NAME_SIZE];
+    char client_name[MAX_NAME_SIZE];
     time_t last_active_time;
    
     volatile uint64_t frame_count;       // this will be sent as seq_num
@@ -131,7 +126,7 @@ typedef struct{
     uint32_t sid;        // session id received from the server after connection accepted
     uint8_t server_status;      // 0-NOK; 1-OK (connection confirmed by server)
     uint32_t session_timeout;   // timeout received from the server; to be used to send KEEP_ALIVE frames
-    char server_name[NAME_SIZE];       // Human readable server name
+    char server_name[MAX_NAME_SIZE];       // Human readable server name
     
     HANDLE hevent_connection_listening;
     HANDLE hevent_connection_established;
@@ -142,7 +137,8 @@ typedef struct{
     FileStream fstream[MAX_CLIENT_FILE_STREAMS];
     MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
 
-    char log_path[PATH_SIZE];
+    IOCP_CONTEXT iocp_context;
+    HANDLE iocp_handle;
  
 } ClientData;
 
