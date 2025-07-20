@@ -143,6 +143,37 @@ void ht_remove_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_
     LeaveCriticalSection(&ht->mutex);
     return;
 }
+void ht_remove_all_sid(HashTableIdentifierNode *ht, const uint32_t sid) {
+    EnterCriticalSection(&ht->mutex);
+
+    for (size_t i = 0; i < HASH_SIZE_ID; ++i) {
+        IdentifierNode *curr = ht->entry[i];
+        IdentifierNode *prev = NULL;
+
+        while (curr) {
+            if (curr->sid == sid) {
+                IdentifierNode *to_remove = curr;
+
+                if (prev) {
+                    prev->next = curr->next;
+                } else {
+                    ht->entry[i] = curr->next;
+                }
+                curr = curr->next;
+                fprintf(stdout, "Removed from hash table SID: %d - ID: %d\n", to_remove->sid, to_remove->id);
+                free(to_remove);
+                ht->count--;
+            } else {
+                prev = curr;
+                curr = curr->next;
+            }
+        }
+    }
+
+    LeaveCriticalSection(&ht->mutex);
+}
+
+
 BOOL ht_search_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status) {
     
     EnterCriticalSection(&ht->mutex);

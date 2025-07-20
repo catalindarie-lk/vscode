@@ -17,13 +17,16 @@
 #ifndef MAX_CLIENT_MESSAGE_STREAMS
 #define MAX_CLIENT_MESSAGE_STREAMS      10
 #endif
-#ifndef MAX_CLIENT_FILE_STREAMS
-#define MAX_CLIENT_FILE_STREAMS         10
-#endif
+// #ifndef MAX_CLIENT_FILE_STREAMS
+// #define MAX_CLIENT_FILE_STREAMS         10
+// #endif
 
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
 #define DEFAULT_SESSION_TIMEOUT_SEC     120
 #endif
+
+#define MAX_ACTIVE_FILE_STREAMS         10
+
 
 // --- Constants 
 #define SERVER_NAME                     "lkdc UDP Text/File Transfer Server"
@@ -88,22 +91,6 @@ typedef struct{
    
 }ServerData;
 
-typedef struct {
-    MemPool pool_file_chunk;
-
-    QueueFrame queue_frame;
-    QueueFrame queue_priority_frame;
-
-    QueueAck mqueue_ack;
-    QueueAck fqueue_ack;
-    QueueAck queue_priority_ack;
-
-    HashTableFramePendingAck ht_frame;
-    HashTableIdentifierNode ht_fid;
-    HashTableIdentifierNode ht_mid;
-
-}ServerBuffers;
-
 typedef struct{
     FILETIME ft;
     ULARGE_INTEGER prev_uli;
@@ -136,10 +123,10 @@ typedef struct {
 
 typedef struct{
 
-    uint32_t client_index;              // client_list[index]
-    uint32_t fstream_index;             // client.fstream[index]
+    // uint32_t client_index;              // client_list[index]
+    // uint32_t fstream_index;             // client.fstream[index]
 
-    SOCKET srv_socket;
+    // SOCKET srv_socket;
     struct sockaddr_in client_addr;
 
     uint32_t sid;                       // Session ID associated with this file stream.
@@ -179,11 +166,11 @@ typedef struct{
 
     CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
 
-    HANDLE hevent_recv_file;
-    HANDLE htread_recv_file;
-    HANDLE hevent_close_stream;
+    // HANDLE hevent_recv_file;
+    // HANDLE htread_recv_file;
+    // HANDLE hevent_close_stream;
 
-}FileStream;
+}ServerFileStream;
 
 typedef struct {
     SOCKET srv_socket;
@@ -203,7 +190,7 @@ typedef struct {
     uint8_t status_index;                // 0->FREE; 1->BUSY
  
     MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
-    FileStream fstream[MAX_CLIENT_FILE_STREAMS];
+//    ServerFileStream fstream[MAX_CLIENT_FILE_STREAMS];
      
     Statistics statistics;
 
@@ -213,8 +200,33 @@ typedef struct {
  
 typedef struct{
     Client client[MAX_CLIENTS];     // Array of connected clients
-    CRITICAL_SECTION lock;              // For thread-safe access to connected_clients
+    CRITICAL_SECTION lock;          // For thread-safe access to connected_clients
 }ClientList;
 
+typedef struct{
+    uint32_t map[MAX_CLIENTS];
+    CRITICAL_SECTION lock;
+}ClientMap;
+
+typedef struct {
+    MemPool pool_file_chunk;
+
+    QueueFrame queue_frame;
+    QueueFrame queue_priority_frame;
+
+    QueueAck mqueue_ack;
+    QueueAck fqueue_ack;
+    QueueAck queue_priority_ack;
+
+    QueueFstream queue_fstream;
+    ServerFileStream fstream[MAX_ACTIVE_FILE_STREAMS];
+    // CRITICAL_SECTION fstream_list_lock;
+    // uint32_t available_fstreams;
+
+    HashTableFramePendingAck ht_frame;
+    HashTableIdentifierNode ht_fid;
+    HashTableIdentifierNode ht_mid;
+
+}ServerBuffers;
 
 #endif

@@ -772,7 +772,8 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
         }
 
         //TODO - fix bug?
-        wait_metadata_response = WaitForSingleObject(fstream->hevent_metadata_response, TIMEOUT_METADATA_RESPONSE_MS);
+//        wait_metadata_response = WaitForSingleObject(fstream->hevent_metadata_response, TIMEOUT_METADATA_RESPONSE_MS);
+        wait_metadata_response = WaitForSingleObject(fstream->hevent_metadata_response, INFINITE);
         
         if (wait_metadata_response == WAIT_OBJECT_0) {
         // The event was signaled within the timeout —> proceed sending the rest of the file fragments

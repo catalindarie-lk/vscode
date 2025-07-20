@@ -57,12 +57,12 @@ typedef struct{
     IdentifierNode *entry[HASH_SIZE_ID];
     CRITICAL_SECTION mutex;
     uint32_t count;
-    MemPool pool;
 }HashTableIdentifierNode;
 
 uint64_t ht_get_hash_id(uint32_t id);
 int ht_insert_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
 void ht_remove_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id);
+void ht_remove_all_sid(HashTableIdentifierNode *ht, const uint32_t sid);
 BOOL ht_search_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
 int ht_update_id_status(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
 void ht_clean_id(HashTableIdentifierNode *ht);

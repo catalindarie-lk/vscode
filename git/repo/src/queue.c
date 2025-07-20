@@ -8,8 +8,6 @@
 #include "include/protocol_frames.h"             // For UdpFrame structure
 #include "include/queue.h"
 
-// ---------------------- QUEUE FOR BUFFERING RECEIVED FRAMES ----------------------
-// Push frame data to queue - received frames are buffered to a queue before processing; receive thread pushes the frame to the queue
 int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry){
     // Check if the queue is initialized
     if (queue == NULL || &queue->mutex == NULL) {
@@ -35,7 +33,6 @@ int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry){
     LeaveCriticalSection(&queue->mutex);
     return RET_VAL_SUCCESS;
 }
-// Pop frame data from queue - frames are poped from the queue by the frame processing thread
 int pop_frame(QueueFrame *queue, QueueFrameEntry *frame_entry){       
     // Check if the queue is initialized
     if (queue == NULL || &queue->mutex == NULL) {
@@ -69,7 +66,6 @@ void new_ack_entry(QueueAckEntry *entry, const uint64_t seq, const uint32_t sid,
     memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
     return;
 }
-
 int push_ack(QueueAck *queue, QueueAckEntry *entry){
     // Check if the queue is initialized
     if (queue == NULL || &queue->mutex == NULL){
@@ -93,13 +89,13 @@ int push_ack(QueueAck *queue, QueueAckEntry *entry){
     LeaveCriticalSection(&queue->mutex);
     return RET_VAL_SUCCESS;
 }
-
 int pop_ack(QueueAck *queue, QueueAckEntry *entry){       
     // Check if the queue is initialized
     if (queue == NULL || &queue->mutex == NULL){
-        //fprintf(stderr, "Pop - Ack queue not initialized\n");
+        fprintf(stderr, "Pop - Ack queue not initialized\n");
         return RET_VAL_ERROR;
     }
+    //WaitForSingleObject(queue->semaphore, INFINITE);
     EnterCriticalSection(&queue->mutex);
     // Check if the queue is empty before removing an entry
     if (queue->head == queue->tail) {
@@ -115,5 +111,56 @@ int pop_ack(QueueAck *queue, QueueAckEntry *entry){
     (queue->head)++;
     queue->head %= QUEUE_ACK_SIZE;
     LeaveCriticalSection(&queue->mutex);
+    return RET_VAL_SUCCESS;
+}
+
+int push_fstream(QueueFstream *queue, QueueFstreamEntry *entry){
+    // Check if the queue is initialized
+    if (queue == NULL || &queue->lock == NULL){
+        fprintf(stderr, "Push - fstream queue not initialized\n");
+        return RET_VAL_ERROR;
+    }
+    EnterCriticalSection(&queue->lock);
+    // Check if the queue is full
+    if((queue->tail + 1) % QUEUE_FSTREAM_SIZE == queue->head){
+        LeaveCriticalSection(&queue->lock);
+        //fprintf(stderr, "Push - fream queue Full\n");
+        return RET_VAL_ERROR;
+    }
+    // Add the entry to the fstream queue 
+    memcpy(&queue->entry[queue->tail], entry, sizeof(QueueFstreamEntry));
+    // Move the tail index forward    
+    (queue->tail)++;
+    queue->tail %= QUEUE_FSTREAM_SIZE;
+    ReleaseSemaphore(queue->semaphore, 1, NULL);
+    InterlockedIncrement(&queue->pending);
+    // Release the lock after modifying the queue
+    LeaveCriticalSection(&queue->lock);
+    return RET_VAL_SUCCESS;
+
+
+}
+int pop_fstream(QueueFstream *queue, QueueFstreamEntry *entry){
+    // Check if the queue is initialized
+    if (queue == NULL || &queue->lock == NULL){
+        fprintf(stderr, "Pop - fstream queue not initialized\n");
+        return RET_VAL_ERROR;
+    }
+    EnterCriticalSection(&queue->lock);
+    // Check if the queue is empty before removing an entry
+    if (queue->head == queue->tail) {
+        LeaveCriticalSection(&queue->lock);
+        //fprintf(stderr, "Pop - fstream queue empty\n");
+        return RET_VAL_ERROR;
+    }
+    // Copy the entry to buffer
+    memcpy(entry, &queue->entry[queue->head], sizeof(QueueFstreamEntry));
+    // Remove the entry in the ACK queue
+    memset(&queue->entry[queue->head], 0, sizeof(QueueFstreamEntry));
+    // Move the head index forward
+    (queue->head)++;
+    queue->head %= QUEUE_FSTREAM_SIZE;
+    InterlockedDecrement(&queue->pending);
+    LeaveCriticalSection(&queue->lock);
     return RET_VAL_SUCCESS;
 }
