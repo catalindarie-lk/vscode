@@ -25,7 +25,8 @@
 #define DEFAULT_SESSION_TIMEOUT_SEC     120
 #endif
 
-#define MAX_ACTIVE_FILE_STREAMS         10
+//#define TOTAL_FSTREAMS                  100
+#define MAX_ACTIVE_FSTREAMS             10
 
 
 // --- Constants 
@@ -219,7 +220,7 @@ typedef struct {
     QueueAck queue_priority_ack;
 
     QueueFstream queue_fstream;
-    ServerFileStream fstream[MAX_ACTIVE_FILE_STREAMS];
+    ServerFileStream fstream[MAX_ACTIVE_FSTREAMS];
     // CRITICAL_SECTION fstream_list_lock;
     // uint32_t available_fstreams;
 

@@ -25,6 +25,8 @@
 #define DEFAULT_SESSION_TIMEOUT_SEC     120
 #endif
 
+#define MAX_ACTIVE_FSTREAMS             5
+
 
 // --- Constants ---
 
@@ -92,20 +94,19 @@ typedef struct{
     char *fpath;
     char *fname;
     long long fsize;
-
-    uint32_t fid;
-    uint64_t remaining_bytes_to_send;
-    uint64_t pending_metadata_seq_num;
-
-    BOOL throttle;
     FileHash fhash;
 
-    HANDLE hevent_start_file_transfer;
-    HANDLE hevent_close_file_stream_thread;
-    HANDLE hevent_metadata_response;
-    HANDLE hthread_file_transfer;
+    uint32_t fid;
 
-}FileStream;
+    BOOL fstream_busy;
+    BOOL throttle;
+    uint64_t pending_bytes;
+    uint64_t pending_metadata_seq_num;
+        
+    CRITICAL_SECTION lock;
+    HANDLE hevent_metadata_response;
+    HANDLE hevent_stop_file_transfer;
+}ClientFileStream;
 
 typedef struct{
     SOCKET socket;
@@ -134,7 +135,7 @@ typedef struct{
 
     HANDLE hevent_shutdown;
 
-    FileStream fstream[MAX_CLIENT_FILE_STREAMS];
+//    ClientFileStream fstream[MAX_CLIENT_FILE_STREAMS];
     MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
 
     IOCP_CONTEXT iocp_context;
@@ -142,13 +143,23 @@ typedef struct{
  
 } ClientData;
 
+
+
+
 typedef struct {
     QueueFrame queue_frame;
     QueueFrame queue_priority_frame;
     HashTableFramePendingAck ht_frame;
+
+    QueueFstream queue_fstream;
+    ClientFileStream fstream[QUEUE_FSTREAM_SIZE];
+    HANDLE fstream_semaphore;
+
+    QueueCommand queue_command;
+    HANDLE command_semaphore;
+
 }ClientBuffers;
 
-static void clean_file_stream(FileStream *fstream);
 static void clean_message_stream(MessageStream *mstream);
 
 uint64_t get_new_seq_num();
@@ -159,4 +170,4 @@ void request_connect();
 void transfer_file();
 void send_text_message();
 
-#endif
+#endif 

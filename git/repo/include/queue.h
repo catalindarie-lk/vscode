@@ -17,7 +17,8 @@
 
 #define FRAME_QUEUE_SIZE                        32768
 #define QUEUE_ACK_SIZE                          131072     // Queue buffer size
-#define QUEUE_FSTREAM_SIZE                      100
+#define QUEUE_FSTREAM_SIZE                      1024
+#define QUEUE_COMMAND_SIZE                      1024
 
 
 //----------------------------------------------------------------------------------------------------------------
@@ -34,8 +35,6 @@ typedef struct {
     CRITICAL_SECTION mutex; // Mutex for thread-safe access to frame_buffer
     HANDLE semaphore;
 }QueueFrame;
-
-
 
 int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
 int pop_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
@@ -62,12 +61,43 @@ void new_ack_entry(QueueAckEntry *entry, const uint64_t seq, const uint32_t sid,
 int push_ack(QueueAck *queue, QueueAckEntry *entry);
 int pop_ack(QueueAck *queue, QueueAckEntry *entry);
 //----------------------------------------------------------------------------------------------------------------
+// typedef struct{
+//     intptr_t fstream_ptr;
+// }QueueFstreamEntry;
+
+// typedef struct{
+//     QueueFstreamEntry entry[QUEUE_FSTREAM_SIZE];
+//     uint32_t head;
+//     uint32_t tail;
+//     uint32_t pending;
+//     CRITICAL_SECTION lock;
+//     HANDLE semaphore;
+// }QueueFstream;
+
+// int push_fstream(QueueFstream *queue, QueueFstreamEntry *entry);
+// int pop_fstream(QueueFstream *queue, QueueFstreamEntry *entry);
+
+//----------------------------------------------------------------------------------------------------------------
 typedef struct{
-    intptr_t fstream_ptr;
-}QueueFstreamEntry;
+    char command[255];
+}QueueCommandEntry;
 
 typedef struct{
-    QueueFstreamEntry entry[QUEUE_FSTREAM_SIZE];
+    QueueCommandEntry entry[QUEUE_COMMAND_SIZE];
+    uint32_t head;
+    uint32_t tail;
+    uint32_t pending;
+    CRITICAL_SECTION lock;
+    HANDLE semaphore;
+}QueueCommand;
+
+int push_command(QueueCommand *queue, QueueCommandEntry *entry);
+int pop_command(QueueCommand *queue, QueueCommandEntry *entry);
+ 
+//----------------------------------------------------------------------------------------------------------------
+
+typedef struct{
+    intptr_t pfstream[QUEUE_FSTREAM_SIZE];
     uint32_t head;
     uint32_t tail;
     uint32_t pending;
@@ -75,7 +105,7 @@ typedef struct{
     HANDLE semaphore;
 }QueueFstream;
 
-int push_fstream(QueueFstream *queue, QueueFstreamEntry *entry);
-int pop_fstream(QueueFstream *queue, QueueFstreamEntry *entry);
- 
+int push_fstream(QueueFstream *queue, const intptr_t pfstream);
+intptr_t pop_fstream(QueueFstream *queue);
+
 #endif

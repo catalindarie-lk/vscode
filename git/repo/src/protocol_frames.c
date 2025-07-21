@@ -43,6 +43,71 @@ int issue_WSARecvFrom(const SOCKET socket,
 
 
 
+// int issue_WSARecvFrom(SOCKET socket, IOCP_CONTEXT* context) {
+//     if (!context) {
+//         fprintf(stderr, "[WSARecvFrom] ERROR: IOCP_CONTEXT is NULL\n");
+//         return RET_VAL_ERROR;
+//     }
+
+//     // Validate OVERLAPPED structure
+//     if (!context->overlapped.hEvent && !context->buffer) {
+//         fprintf(stderr, "[WSARecvFrom] ERROR: OVERLAPPED structure is not properly initialized\n");
+//         return RET_VAL_ERROR;
+//     }
+
+//     // Log socket state
+//     int optval = 0;
+//     int optlen = sizeof(optval);
+//     if (getsockopt(socket, SOL_SOCKET, SO_TYPE, (char*)&optval, &optlen) == SOCKET_ERROR) {
+//         fprintf(stderr, "[WSARecvFrom] WARNING: getsockopt failed: %d\n", WSAGetLastError());
+//     } else {
+//         fprintf(stdout, "[WSARecvFrom] INFO: Socket type = %s\n", (optval == SOCK_DGRAM ? "UDP" : "UNKNOWN"));
+//     }
+
+//     ZeroMemory(context, sizeof(IOCP_CONTEXT));
+//     context->src_addr_len = sizeof(struct sockaddr_in);
+//     context->wsaBuf.buf = context->buffer;
+//     context->wsaBuf.len = sizeof(UdpFrame);
+
+//     DWORD flags = 0;
+//     DWORD bytesReceived = 0;
+//     //int fromLen = sizeof(context->src_addr);
+
+//     int result = WSARecvFrom(
+//         socket,
+//         &context->wsaBuf,
+//         1,
+//         &bytesReceived,
+//         &flags,
+//         (SOCKADDR*)&context->src_addr,
+//         &context->src_addr_len,
+//         &context->overlapped,
+//         NULL
+//     );
+
+//     if (result == SOCKET_ERROR) {
+//         int err = WSAGetLastError();
+//         if (err != WSA_IO_PENDING) {
+//             fprintf(stderr, "[WSARecvFrom] ERROR: WSARecvFrom failed: %d\n", err);
+//             return RET_VAL_ERROR;
+//         } else {
+//             fprintf(stdout, "[WSARecvFrom] INFO: Operation pending (WSA_IO_PENDING)\n");
+//         }
+//     } else {
+//         //fprintf(stdout, "[WSARecvFrom] INFO: Operation completed immediately, bytes received: %lu\n", bytesReceived);
+//     }
+
+//     return RET_VAL_SUCCESS;
+// }
+
+
+
+
+
+
+
+
+
 int send_frame(const UdpFrame *frame, 
                     const SOCKET src_socket, 
                     const struct sockaddr_in *dest_addr

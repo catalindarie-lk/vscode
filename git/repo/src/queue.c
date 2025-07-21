@@ -114,7 +114,108 @@ int pop_ack(QueueAck *queue, QueueAckEntry *entry){
     return RET_VAL_SUCCESS;
 }
 
-int push_fstream(QueueFstream *queue, QueueFstreamEntry *entry){
+// int push_fstream(QueueFstream *queue, QueueFstreamEntry *entry){
+//     // Check if the queue is initialized
+//     if (queue == NULL || &queue->lock == NULL){
+//         fprintf(stderr, "Push - fstream queue not initialized\n");
+//         return RET_VAL_ERROR;
+//     }
+//     EnterCriticalSection(&queue->lock);
+//     // Check if the queue is full
+//     if((queue->tail + 1) % QUEUE_FSTREAM_SIZE == queue->head){
+//         LeaveCriticalSection(&queue->lock);
+//         //fprintf(stderr, "Push - fream queue Full\n");
+//         return RET_VAL_ERROR;
+//     }
+//     // Add the entry to the fstream queue 
+//     memcpy(&queue->entry[queue->tail], entry, sizeof(QueueFstreamEntry));
+//     // Move the tail index forward    
+//     (queue->tail)++;
+//     queue->tail %= QUEUE_FSTREAM_SIZE;
+//     ReleaseSemaphore(queue->semaphore, 1, NULL);
+//     InterlockedIncrement(&queue->pending);
+//     // Release the lock after modifying the queue
+//     LeaveCriticalSection(&queue->lock);
+//     return RET_VAL_SUCCESS;
+// }
+
+// int pop_fstream(QueueFstream *queue, QueueFstreamEntry *entry){
+//     // Check if the queue is initialized
+//     if (queue == NULL || &queue->lock == NULL){
+//         fprintf(stderr, "Pop - fstream queue not initialized\n");
+//         return RET_VAL_ERROR;
+//     }
+//     EnterCriticalSection(&queue->lock);
+//     // Check if the queue is empty before removing an entry
+//     if (queue->head == queue->tail) {
+//         LeaveCriticalSection(&queue->lock);
+//         //fprintf(stderr, "Pop - fstream queue empty\n");
+//         return RET_VAL_ERROR;
+//     }
+//     // Copy the entry to buffer
+//     memcpy(entry, &queue->entry[queue->head], sizeof(QueueFstreamEntry));
+//     // Remove the entry in the ACK queue
+//     memset(&queue->entry[queue->head], 0, sizeof(QueueFstreamEntry));
+//     // Move the head index forward
+//     (queue->head)++;
+//     queue->head %= QUEUE_FSTREAM_SIZE;
+//     InterlockedDecrement(&queue->pending);
+//     LeaveCriticalSection(&queue->lock);
+//     return RET_VAL_SUCCESS;
+// }
+
+
+int push_command(QueueCommand *queue, QueueCommandEntry *entry){
+    // Check if the queue is initialized
+    if (queue == NULL || &queue->lock == NULL){
+        fprintf(stderr, "Push - command queue not initialized\n");
+        return RET_VAL_ERROR;
+    }
+    EnterCriticalSection(&queue->lock);
+    // Check if the queue is full
+    if((queue->tail + 1) % QUEUE_COMMAND_SIZE == queue->head){
+        LeaveCriticalSection(&queue->lock);
+        return RET_VAL_ERROR;
+    }
+    // Add the entry to the fstream queue 
+    memcpy(&queue->entry[queue->tail], entry, sizeof(QueueCommandEntry));
+    // Move the tail index forward    
+    (queue->tail)++;
+    queue->tail %= QUEUE_COMMAND_SIZE;
+    ReleaseSemaphore(queue->semaphore, 1, NULL);
+    InterlockedIncrement(&queue->pending);
+    // Release the lock after modifying the queue
+    LeaveCriticalSection(&queue->lock);
+    return RET_VAL_SUCCESS;
+}
+int pop_command(QueueCommand *queue, QueueCommandEntry *entry){
+    // Check if the queue is initialized
+    if (queue == NULL || &queue->lock == NULL){
+        fprintf(stderr, "Pop - command queue not initialized\n");
+        return RET_VAL_ERROR;
+    }
+    EnterCriticalSection(&queue->lock);
+    // Check if the queue is empty before removing an entry
+    if (queue->head == queue->tail) {
+        LeaveCriticalSection(&queue->lock);
+        return RET_VAL_ERROR;
+    }
+    // Copy the entry to buffer
+    memcpy(entry, &queue->entry[queue->head], sizeof(QueueCommandEntry));
+    // Remove the entry
+    memset(&queue->entry[queue->head], 0, sizeof(QueueCommandEntry));
+    // Move the head index forward
+    (queue->head)++;
+    queue->head %= QUEUE_COMMAND_SIZE;
+    InterlockedDecrement(&queue->pending);
+    LeaveCriticalSection(&queue->lock);
+    return RET_VAL_SUCCESS;
+}
+
+
+
+
+int push_fstream(QueueFstream *queue, const intptr_t pfstream){
     // Check if the queue is initialized
     if (queue == NULL || &queue->lock == NULL){
         fprintf(stderr, "Push - fstream queue not initialized\n");
@@ -128,8 +229,9 @@ int push_fstream(QueueFstream *queue, QueueFstreamEntry *entry){
         return RET_VAL_ERROR;
     }
     // Add the entry to the fstream queue 
-    memcpy(&queue->entry[queue->tail], entry, sizeof(QueueFstreamEntry));
+    //memcpy(&queue->entry[queue->tail], entry, sizeof(QueueFstreamEntry));
     // Move the tail index forward    
+    queue->pfstream[queue->tail] = pfstream;
     (queue->tail)++;
     queue->tail %= QUEUE_FSTREAM_SIZE;
     ReleaseSemaphore(queue->semaphore, 1, NULL);
@@ -137,30 +239,30 @@ int push_fstream(QueueFstream *queue, QueueFstreamEntry *entry){
     // Release the lock after modifying the queue
     LeaveCriticalSection(&queue->lock);
     return RET_VAL_SUCCESS;
-
-
 }
-int pop_fstream(QueueFstream *queue, QueueFstreamEntry *entry){
+intptr_t pop_fstream(QueueFstream *queue){
     // Check if the queue is initialized
     if (queue == NULL || &queue->lock == NULL){
         fprintf(stderr, "Pop - fstream queue not initialized\n");
-        return RET_VAL_ERROR;
+        return 0;
     }
     EnterCriticalSection(&queue->lock);
     // Check if the queue is empty before removing an entry
     if (queue->head == queue->tail) {
         LeaveCriticalSection(&queue->lock);
         //fprintf(stderr, "Pop - fstream queue empty\n");
-        return RET_VAL_ERROR;
+        return 0;
     }
     // Copy the entry to buffer
-    memcpy(entry, &queue->entry[queue->head], sizeof(QueueFstreamEntry));
+    //memcpy(entry, &queue->entry[queue->head], sizeof(QueueFstreamEntry));
+    intptr_t pfstream = queue->pfstream[queue->head];
     // Remove the entry in the ACK queue
-    memset(&queue->entry[queue->head], 0, sizeof(QueueFstreamEntry));
+    //memset(&queue->entry[queue->head], 0, sizeof(QueueFstreamEntry));
+    queue->pfstream[queue->head] = 0;
     // Move the head index forward
     (queue->head)++;
     queue->head %= QUEUE_FSTREAM_SIZE;
     InterlockedDecrement(&queue->pending);
     LeaveCriticalSection(&queue->lock);
-    return RET_VAL_SUCCESS;
+    return pfstream;
 }

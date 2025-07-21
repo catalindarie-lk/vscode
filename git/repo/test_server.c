@@ -37,12 +37,12 @@ HANDLE hthread_process_frame;
 HANDLE hthread_ack_frame;
 HANDLE hthread_send_ack; 
 HANDLE hthread_client_timeout;
-HANDLE hthread_file_stream[MAX_ACTIVE_FILE_STREAMS];
+HANDLE hthread_file_stream[MAX_ACTIVE_FSTREAMS];
 HANDLE hthread_server_command;
 
 ClientMap client_map;
 
-const char *server_ip = "10.10.10.1"; // IPv4 example
+const char *server_ip = "127.0.0.1"; // IPv4 example
 
 // Client management functions
 static Client* find_client(ClientList *client_list, const uint32_t session_id);
@@ -115,13 +115,6 @@ static int init_server_config(){
         exit(EXIT_FAILURE);
     }
 
-    //server.socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    // if (server.socket == INVALID_SOCKET) {
-    //     fprintf(stderr, "socket failed with error: %d\n", WSAGetLastError());
-    //     WSACleanup();
-    //     return RET_VAL_ERROR;
-    // }
-
     server.socket = WSASocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED);
     if (server.socket == INVALID_SOCKET) {
         fprintf(stderr, "WSASocket failed: %d\n", WSAGetLastError());
@@ -157,30 +150,6 @@ static int init_server_config(){
         WSACleanup();
         return RET_VAL_ERROR;
     }
-
-    // IOCP_CONTEXT* iocp_context = &server.iocp_context;
-    // ZeroMemory(&server.iocp_context, sizeof(IOCP_CONTEXT));
-    // server.iocp_context.src_addr_len = sizeof(struct sockaddr_in);
-    // server.iocp_context.wsaBuf.buf = server.iocp_context.buffer;
-    // server.iocp_context.wsaBuf.len = sizeof(UdpFrame);
-
-    // DWORD flags = 0;
-    // int result = WSARecvFrom(
-    //     server.socket,
-    //     &server.iocp_context.wsaBuf,
-    //     1,
-    //     NULL,
-    //     &flags,
-    //     (SOCKADDR*)&server.iocp_context.src_addr,
-    //     &server.iocp_context.src_addr_len,
-    //     &server.iocp_context.overlapped,
-    //     NULL
-    // );
-
-    // if (result == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-    //     fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
-    //     RET_VAL_ERROR;
-    // }
 
     return RET_VAL_SUCCESS;
 
@@ -219,7 +188,8 @@ static int init_server_buffers(){
 
     buffers.queue_fstream.head = 0;
     buffers.queue_fstream.tail = 0;
-    memset(&buffers.queue_fstream.entry, 0, QUEUE_FSTREAM_SIZE * sizeof(QueueFstreamEntry));
+    buffers.queue_fstream.pending = 0;
+    memset(&buffers.queue_fstream.pfstream, 0, QUEUE_FSTREAM_SIZE * sizeof(intptr_t));
     InitializeCriticalSection(&buffers.queue_fstream.lock);
     buffers.queue_fstream.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
  
@@ -231,7 +201,7 @@ static int init_server_buffers(){
     }
     InitializeCriticalSection(&client_list.lock);
 
-    for(int i = 0; i < QUEUE_FSTREAM_SIZE; i++){
+    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
         InitializeCriticalSection(&buffers.fstream[i].lock);
     }
 
@@ -280,7 +250,7 @@ static int start_threads() {
         fprintf(stderr, "Failed to create client timeout thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
-    for(int i = 0; i < MAX_ACTIVE_FILE_STREAMS; i++){
+    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
         hthread_file_stream[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_stream, (LPVOID)(intptr_t)i, 0, NULL);
         if (hthread_file_stream[i] == NULL) {
             fprintf(stderr, "Failed to file stream thread. Error: %d\n", GetLastError());
@@ -538,7 +508,7 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
     if(issue_WSARecvFrom(server->socket, &server->iocp_context) == RET_VAL_ERROR){
         fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
         //TODO initiate some kind of global error and stop client?
-        goto exit_thread;
+        //goto exit_thread;
     }
 
     HANDLE CompletitionPort = server->iocp_handle;
@@ -564,7 +534,7 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
                     continue;
                 } else {
                     fprintf(stderr, "GetQueuedCompletionStatus failed with error: %d\n", wsa_error);
-                    continue;
+                    goto retry;
                 }
             }
 
@@ -603,10 +573,10 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
                 fprintf(stderr, "Failed to push frame to queue. Queue full?\n");
             }
         }
-
+retry:
         if(issue_WSARecvFrom(server->socket, iocp_overlapped) == RET_VAL_ERROR){
             fprintf(stderr, "WSARecvFrom re-issue failed: %d\n", WSAGetLastError());
-            continue;
+            goto retry;
         }
     }
 exit_thread:
@@ -880,18 +850,18 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
  
     int index = (int)(intptr_t)lpParam;
 
-    QueueFstreamEntry fstream_entry;
     SHA256_CTX sha256_ctx;
 
     while (server.server_status == STATUS_READY) { 
         // Wait for file transfer event or client disconnect
         DWORD wait_semaphore = WaitForSingleObject(buffers.queue_fstream.semaphore, INFINITE);
-        if (pop_fstream(&buffers.queue_fstream, &fstream_entry) == RET_VAL_SUCCESS) {
-            // fstream successfully retrieved from the priority queue.
-        } else {
+ 
+        ServerFileStream *fstream = (ServerFileStream*)pop_fstream(&buffers.queue_fstream);
+
+        if(!fstream){
+            fprintf(stderr, "Received null fstream pointer from fstream queue!\n");
             continue;
         }
-        ServerFileStream *fstream = (ServerFileStream*)fstream_entry.fstream_ptr;
 
         sha256_init(&sha256_ctx);                              
         // Check if the file stream is currently active/busy with a transfer.
@@ -1210,7 +1180,7 @@ void cleanup_client(Client *client, ServerBuffers* buffers){
     }
     EnterCriticalSection(&client->lock);
 
-    for(int i = 0; i < MAX_ACTIVE_FILE_STREAMS; i++){
+    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &buffers->fstream[i];
         if(fstream->sid ==  client->sid){
             file_cleanup_stream(fstream, buffers);
@@ -1276,7 +1246,7 @@ BOOL validate_file_hash(ServerFileStream *fstream){
 }
 // Check for any open file streams across all clients.
 void check_open_file_stream(ServerBuffers *buffers){
-    for(int i = 0; i < MAX_ACTIVE_FILE_STREAMS; i++){
+    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
         if(buffers->fstream[i].fstream_busy == TRUE){
             fprintf(stdout, "File stream still open: %d\n", i);
         }
