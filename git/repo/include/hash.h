@@ -31,6 +31,7 @@ typedef struct{
     MemPool pool;
 }HashTableFramePendingAck;
 
+void init_ht_frame(HashTableFramePendingAck *ht);
 uint64_t ht_get_hash_frame(const uint64_t seq_num);
 int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame);
 void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num);
@@ -59,6 +60,7 @@ typedef struct{
     uint32_t count;
 }HashTableIdentifierNode;
 
+void init_ht_id(HashTableIdentifierNode *ht);
 uint64_t ht_get_hash_id(uint32_t id);
 int ht_insert_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
 void ht_remove_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id);

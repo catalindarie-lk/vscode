@@ -162,7 +162,7 @@ typedef struct{
     uint8_t received_sha256[32];        // Buffer for sha256 received from the client
     uint8_t calculated_sha256[32];      // Buffer for sha256 calculated by the server
 
-    char fnm[MAX_NAME_SIZE];            // Array to store the file name+path.
+    char fname[MAX_NAME_SIZE];          // Array to store the file name+path.
     FILE *fp;                           // File pointer for the file being written to disk.
 
     CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
@@ -187,9 +187,9 @@ typedef struct {
     uint32_t sid;                // Unique ID assigned by the server for this clients's session
     volatile time_t last_activity_time; // Last time the client sent a frame (for timeout checks)             
 
-    uint32_t client_index;                  // Index of the slot the client is connected to [0..MAX_CLIENTS-1]
-    uint8_t status_index;                // 0->FREE; 1->BUSY
- 
+    uint32_t slot;                  // Index of the slot the client is connected to [0..MAX_CLIENTS-1]
+    uint8_t slot_status;                // 0->FREE; 1->BUSY
+
     MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
 //    ServerFileStream fstream[MAX_CLIENT_FILE_STREAMS];
      

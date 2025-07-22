@@ -1,11 +1,10 @@
 #ifndef QUEUE_H
 #define QUEUE_H
 
-#include <stdint.h>             // For uint64_t and uint8_t types
-#include <stdbool.h>            // For BOOL type
-#include <windows.h>            // Required for CRITICAL_SECTION and related functions
-#include "include/protocol_frames.h"             // For UdpFrame structure
-//#include "include/server.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <windows.h>
+#include "include/protocol_frames.h"
 
 #ifndef RET_VAL_SUCCESS
 #define RET_VAL_SUCCESS 0
@@ -32,12 +31,14 @@ typedef struct {
     QueueFrameEntry frame_entry[FRAME_QUEUE_SIZE];
     uint32_t head;          
     uint32_t tail;
-    CRITICAL_SECTION mutex; // Mutex for thread-safe access to frame_buffer
+    uint32_t pending;
+    CRITICAL_SECTION lock; // Mutex for thread-safe access to frame_buffer
     HANDLE semaphore;
 }QueueFrame;
 
 int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
 int pop_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
+void init_queue_frame(QueueFrame *queue);
 //----------------------------------------------------------------------------------------------------------------
 typedef struct{
     uint64_t seq;       // The sequence number of the frame that require ack/nak
@@ -51,7 +52,8 @@ typedef struct {
     QueueAckEntry entry[QUEUE_ACK_SIZE];
     uint32_t head;          
     uint32_t tail;
-    CRITICAL_SECTION mutex; // Mutex for thread-safe access to frame_buffer
+    uint32_t pending;
+    CRITICAL_SECTION lock; // Mutex for thread-safe access to frame_buffer
     HANDLE semaphore;
 }QueueAck;
 
@@ -60,22 +62,7 @@ void new_ack_entry(QueueAckEntry *entry, const uint64_t seq, const uint32_t sid,
                         const uint8_t op_code, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
 int push_ack(QueueAck *queue, QueueAckEntry *entry);
 int pop_ack(QueueAck *queue, QueueAckEntry *entry);
-//----------------------------------------------------------------------------------------------------------------
-// typedef struct{
-//     intptr_t fstream_ptr;
-// }QueueFstreamEntry;
-
-// typedef struct{
-//     QueueFstreamEntry entry[QUEUE_FSTREAM_SIZE];
-//     uint32_t head;
-//     uint32_t tail;
-//     uint32_t pending;
-//     CRITICAL_SECTION lock;
-//     HANDLE semaphore;
-// }QueueFstream;
-
-// int push_fstream(QueueFstream *queue, QueueFstreamEntry *entry);
-// int pop_fstream(QueueFstream *queue, QueueFstreamEntry *entry);
+void init_queue_ack(QueueAck *queue);
 
 //----------------------------------------------------------------------------------------------------------------
 typedef struct{
@@ -93,6 +80,7 @@ typedef struct{
 
 int push_command(QueueCommand *queue, QueueCommandEntry *entry);
 int pop_command(QueueCommand *queue, QueueCommandEntry *entry);
+void init_queue_command(QueueCommand *queue);
  
 //----------------------------------------------------------------------------------------------------------------
 
@@ -107,5 +95,6 @@ typedef struct{
 
 int push_fstream(QueueFstream *queue, const intptr_t pfstream);
 intptr_t pop_fstream(QueueFstream *queue);
+void init_queue_fstream(QueueFstream *queue);
 
 #endif

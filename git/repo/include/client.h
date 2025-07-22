@@ -133,8 +133,6 @@ typedef struct{
     HANDLE hevent_connection_established;
     HANDLE hevent_connection_closed;
 
-    HANDLE hevent_shutdown;
-
 //    ClientFileStream fstream[MAX_CLIENT_FILE_STREAMS];
     MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
 

@@ -42,7 +42,7 @@ HANDLE hthread_server_command;
 
 ClientMap client_map;
 
-const char *server_ip = "127.0.0.1"; // IPv4 example
+const char *server_ip = "10.10.10.1"; // IPv4 example
 
 // Client management functions
 static Client* find_client(ClientList *client_list, const uint32_t session_id);
@@ -155,44 +155,17 @@ static int init_server_config(){
 
 }
 static int init_server_buffers(){
-    // initialize queue frames
-    buffers.queue_frame.head = 0;
-    buffers.queue_frame.tail = 0;
-    memset(&buffers.queue_frame.frame_entry, 0, FRAME_QUEUE_SIZE * sizeof(QueueFrameEntry));
-    InitializeCriticalSection(&buffers.queue_frame.mutex);
-    buffers.queue_frame.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
-    // initialize priority queue frames
-    buffers.queue_priority_frame.head = 0;
-    buffers.queue_priority_frame.tail = 0;
-    memset(&buffers.queue_priority_frame.frame_entry, 0, FRAME_QUEUE_SIZE * sizeof(QueueFrameEntry));
-    InitializeCriticalSection(&buffers.queue_priority_frame.mutex);
-    buffers.queue_priority_frame.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
 
-    buffers.queue_priority_ack.head = 0;
-    buffers.queue_priority_ack.tail = 0;
-    memset(&buffers.queue_priority_ack.entry, 0, QUEUE_ACK_SIZE * sizeof(QueueAckEntry));
-    InitializeCriticalSection(&buffers.queue_priority_ack.mutex);
-    buffers.queue_priority_ack.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+    init_queue_frame(&buffers.queue_frame);
+    init_queue_frame(&buffers.queue_priority_frame);
+    init_queue_ack(&buffers.fqueue_ack);
+    init_queue_ack(&buffers.mqueue_ack);
+    init_queue_ack(&buffers.queue_priority_ack);
+    init_queue_fstream(&buffers.queue_fstream);
+    init_ht_id(&buffers.ht_fid);
+    init_ht_id(&buffers.ht_mid);
+    pool_init(&buffers.pool_file_chunk, BLOCK_SIZE_CHUNK, BLOCK_COUNT_CHUNK);
 
-    buffers.mqueue_ack.head = 0;
-    buffers.mqueue_ack.tail = 0;
-    memset(&buffers.mqueue_ack.entry, 0, QUEUE_ACK_SIZE * sizeof(QueueAckEntry));
-    InitializeCriticalSection(&buffers.mqueue_ack.mutex);
-    buffers.mqueue_ack.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
-
-    buffers.fqueue_ack.head = 0;
-    buffers.fqueue_ack.tail = 0;
-    memset(&buffers.fqueue_ack.entry, 0, QUEUE_ACK_SIZE * sizeof(QueueAckEntry));
-    InitializeCriticalSection(&buffers.fqueue_ack.mutex);
-    buffers.fqueue_ack.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
-
-    buffers.queue_fstream.head = 0;
-    buffers.queue_fstream.tail = 0;
-    buffers.queue_fstream.pending = 0;
-    memset(&buffers.queue_fstream.pfstream, 0, QUEUE_FSTREAM_SIZE * sizeof(intptr_t));
-    InitializeCriticalSection(&buffers.queue_fstream.lock);
-    buffers.queue_fstream.semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
- 
     for(int i = 0; i < MAX_CLIENTS; i++){
         InitializeCriticalSection(&client_list.client[i].lock);
         for(int j = 0; j < MAX_CLIENT_MESSAGE_STREAMS; j++){
@@ -204,22 +177,6 @@ static int init_server_buffers(){
     for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
         InitializeCriticalSection(&buffers.fstream[i].lock);
     }
-
-    buffers.pool_file_chunk.block_size = BLOCK_SIZE_CHUNK;
-    buffers.pool_file_chunk.block_count = BLOCK_COUNT_CHUNK;
-    pool_init(&buffers.pool_file_chunk);
-
-    for(int i = 0; i < HASH_SIZE_ID; i++){
-        buffers.ht_fid.entry[i] = NULL;
-    }
-    InitializeCriticalSection(&buffers.ht_fid.mutex);
-    buffers.ht_fid.count = 0;
-
-    for(int i = 0; i < HASH_SIZE_ID; i++){
-        buffers.ht_mid.entry[i] = NULL;
-    }
-    InitializeCriticalSection(&buffers.ht_mid.mutex);
-    buffers.ht_mid.count = 0;
 
     server.server_status = STATUS_READY;
     return RET_VAL_SUCCESS;
@@ -251,7 +208,7 @@ static int start_threads() {
         return RET_VAL_ERROR;
     }
     for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
-        hthread_file_stream[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_stream, (LPVOID)(intptr_t)i, 0, NULL);
+        hthread_file_stream[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_stream, NULL, 0, NULL);
         if (hthread_file_stream[i] == NULL) {
             fprintf(stderr, "Failed to file stream thread. Error: %d\n", GetLastError());
             return RET_VAL_ERROR;
@@ -330,12 +287,12 @@ static void shutdown_server() {
     }
     DeleteCriticalSection(&client_list.lock);
 
-    DeleteCriticalSection(&buffers.mqueue_ack.mutex);
-    DeleteCriticalSection(&buffers.fqueue_ack.mutex);
-    DeleteCriticalSection(&buffers.queue_priority_ack.mutex);
+    DeleteCriticalSection(&buffers.mqueue_ack.lock);
+    DeleteCriticalSection(&buffers.fqueue_ack.lock);
+    DeleteCriticalSection(&buffers.queue_priority_ack.lock);
 
-    DeleteCriticalSection(&buffers.queue_frame.mutex);
-    DeleteCriticalSection(&buffers.queue_priority_frame.mutex);
+    DeleteCriticalSection(&buffers.queue_frame.lock);
+    DeleteCriticalSection(&buffers.queue_priority_frame.lock);
     
 
     closesocket(server.socket);
@@ -346,37 +303,15 @@ static void shutdown_server() {
 // Find client by session ID
 static Client* find_client(ClientList *client_list, const uint32_t session_id) {
     // Search for a client within the provided ClientList that matches the given session ID.
-
-    // Iterate through each possible client slot in the list.
-    EnterCriticalSection(&client_list->lock);
     for (int slot = 0; slot < MAX_CLIENTS; slot++) {
-        
-        // Acquire the critical section lock for the current client slot.
-        EnterCriticalSection(&client_list->client[slot].lock);
-
-        // Check if the current client slot is marked as SLOT_FREE.
-        // A free slot indicates no active client, so it cannot be the one we are searching for.
-        if(client_list->client[slot].status_index == SLOT_FREE){
-            // If the slot is free, release its lock before moving to the next slot.
-            LeaveCriticalSection(&client_list->client[slot].lock);
-            LeaveCriticalSection(&client_list->lock);
+        Client *client = &client_list->client[slot];
+        if(client->slot_status == SLOT_FREE){
             continue; // Move to the next slot in the loop.
         }
-        // If the slot is not free, compare its stored session ID with the target session_id.
-        if(client_list->client[slot].sid == session_id){
-            // If a client with a matching session ID is found, release its lock.
-            LeaveCriticalSection(&client_list->client[slot].lock);
-            LeaveCriticalSection(&client_list->lock);
-            // Return a pointer to the found ClientData structure.
-            return &client_list->client[slot];
+        if(client->sid == session_id){
+            return client;
         }
-        // If the slot is not free, but its session ID does not match,
-        // release the lock for this slot and continue the search.
-        LeaveCriticalSection(&client_list->client[slot].lock);
     }
-    // If the loop completes without finding any client matching the session ID,
-    // return NULL to indicate that no such client is currently active.
-    LeaveCriticalSection(&client_list->lock);
     return NULL;
 }
 // Add a new client
@@ -386,7 +321,7 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
 
     EnterCriticalSection(&client_list->lock);
     while(free_slot < MAX_CLIENTS){
-        if(client_list->client[free_slot].status_index == SLOT_FREE) {
+        if(client_list->client[free_slot].slot_status == SLOT_FREE) {
             break;
         }
         free_slot++;
@@ -404,8 +339,8 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
     // This lock ensures that the client's data is initialized safely without race conditions.
     EnterCriticalSection(&new_client->lock);
 
-    new_client->client_index = free_slot; // Assigns the found slot number to the new client's data structure.
-    new_client->status_index = SLOT_BUSY; // Marks the slot as busy, indicating it's now in use.
+    new_client->slot = free_slot; // Assigns the found slot number to the new client's data structure.
+    new_client->slot_status = SLOT_BUSY; // Marks the slot as busy, indicating it's now in use.
     // Copies the client's network address information (IP and port) from 'client_addr' to the new client's structure.
     new_client->srv_socket = srv_socket;
     memcpy(&new_client->client_addr, client_addr, sizeof(struct sockaddr_in));
@@ -449,7 +384,7 @@ static int remove_client(ClientList *client_list, ServerBuffers* buffers, const 
         fprintf(stderr, "\nInvalid client slot nr:  %d", slot); // Prints an error message if the slot number is out of bounds.
         return RET_VAL_ERROR;
     }
-    fprintf(stdout, "\nRemoving client with session ID: %d from slot %d\n", client_list->client[slot].sid, client_list->client[slot].client_index);
+    fprintf(stdout, "\nRemoving client with session ID: %d from slot %d\n", client_list->client[slot].sid, client_list->client[slot].slot);
     // Enters a critical section associated with the specific client slot.    
     EnterCriticalSection(&client_list->lock);
     // Calls a helper function to perform cleanup operations for the client in the specified slot.
@@ -508,14 +443,13 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
     if(issue_WSARecvFrom(server->socket, &server->iocp_context) == RET_VAL_ERROR){
         fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
         //TODO initiate some kind of global error and stop client?
-        //goto exit_thread;
+        goto retry;
     }
 
     HANDLE CompletitionPort = server->iocp_handle;
     DWORD NrOfBytesTransferred;
     ULONG_PTR lpCompletitionKey;
     LPOVERLAPPED lpOverlapped;
-
 
     while (server->server_status == STATUS_READY) {
 
@@ -649,6 +583,8 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
         }
 
         client = NULL;
+        time_t now = time(NULL);
+
         if(header_frame_type == FRAME_TYPE_CONNECT_REQUEST && header_session_id == FRAME_TYPE_CONNECT_REQUEST_SID){
             client = add_client(&client_list, frame, server.socket, src_addr);
             if (client == NULL) {
@@ -656,8 +592,8 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 continue;
             }
             EnterCriticalSection(&client->lock);
-            client->last_activity_time = time(NULL);
-            fprintf(stdout, "Client %s:%d Requested connection. Responding to connect request with Session ID: %u\n", client->ip, src_port, client->sid);
+            client->last_activity_time = now;
+            LeaveCriticalSection(&client->lock);            
             send_connect_response(header_seq_num, 
                                     client->sid, 
                                     server.session_timeout, 
@@ -666,8 +602,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                                     server.socket, 
                                     &client->client_addr
                                 );
-            // Release the client's lock.
-            LeaveCriticalSection(&client->lock);
+            fprintf(stdout, "Client %s:%d Requested connection. Responding to connect request with Session ID: %u\n", client->ip, src_port, client->sid);
             continue;
 
         } else if (header_frame_type == FRAME_TYPE_CONNECT_REQUEST && header_session_id != FRAME_TYPE_CONNECT_REQUEST_SID) {
@@ -677,8 +612,8 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 continue;
             }
             EnterCriticalSection(&client->lock);
-            client->last_activity_time = time(NULL);
-            fprintf(stdout, "Client %s:%d Requested re-connection. Responding to re-connect request with Session ID: %u\n", client->ip, src_port, client->sid);
+            client->last_activity_time = now;
+            LeaveCriticalSection(&client->lock);
             send_connect_response(header_seq_num, 
                                     client->sid, 
                                     server.session_timeout, 
@@ -687,13 +622,12 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                                     server.socket, 
                                     &client->client_addr
                                 );
-            // Release the client's lock.
-            LeaveCriticalSection(&client->lock);
+            fprintf(stdout, "Client %s:%d Requested re-connection. Responding to re-connect request with Session ID: %u\n", client->ip, src_port, client->sid);
             continue;
         } else {
             client = find_client(&client_list, header_session_id);
             if(client == NULL){
-                fprintf(stderr, "Received frame from unknown client\n");
+                //fprintf(stderr, "Received frame from unknown client\n");
                 continue;
             }
         }
@@ -702,7 +636,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
 
             case FRAME_TYPE_ACK:
                 EnterCriticalSection(&client->lock);
-                client->last_activity_time = time(NULL);
+                client->last_activity_time = now;
                 LeaveCriticalSection(&client->lock);
                 // TODO: Implement the full ACK processing logic here. This typically involves:
                 //   - Removing acknowledged packets from the sender's retransmission queue.
@@ -712,7 +646,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
 
             case FRAME_TYPE_KEEP_ALIVE:
                 EnterCriticalSection(&client->lock);
-                client->last_activity_time = time(NULL);
+                client->last_activity_time = now;
                 LeaveCriticalSection(&client->lock);
 
                 new_ack_entry(&ack_entry, header_seq_num, header_session_id, STS_KEEP_ALIVE, client->srv_socket, &client->client_addr);
@@ -751,7 +685,6 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 // for(int i = 0; i < 32; i++){
                 //     fprintf(stdout, "%02x", (unsigned char)frame->payload.file_end.file_hash[i]);
                 // }
-                fprintf(stdout,"\n");
                 handle_file_end(client, frame, &buffers);
                 break;
 
@@ -763,7 +696,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 fprintf(stdout, "Client %s:%d with session ID: %d requested disconnect...\n", client->ip, src_port, client->sid);
                 new_ack_entry(&ack_entry, header_seq_num, header_session_id, STS_CONFIRM_DISCONNECT, client->srv_socket, &client->client_addr);
                 push_ack(&buffers.queue_priority_ack, &ack_entry);
-                remove_client(&client_list, &buffers, client->client_index);
+                remove_client(&client_list, &buffers, client->slot);
                 break;
 
             default:
@@ -818,26 +751,19 @@ DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
     ClientList *client_list = (ClientList*)lpParam; // Cast the parameter to ClientList.
     while(server.server_status == STATUS_READY) {
         time_now = time(NULL);
-        EnterCriticalSection(&client_list->lock);
         for(int i = 0; i < MAX_CLIENTS; i++){
-            EnterCriticalSection(&client_list->client[i].lock);
-            if(client_list->client[i].status_index == SLOT_FREE){
-                LeaveCriticalSection(&client_list->client[i].lock);
+            if(client_list->client[i].slot_status == SLOT_FREE){
                 continue; // Skip to the next client slot.
             }
 
             if(time_now - (time_t)client_list->client[i].last_activity_time < (time_t)server.session_timeout){
-                LeaveCriticalSection(&client_list->client[i].lock);
                 continue; // Skip to the next client slot.
             }
-
-            LeaveCriticalSection(&client_list->client[i].lock);
 
             fprintf(stdout, "\nClient with Session ID: %d disconnected due to timeout\n", client_list->client[i].sid);
             send_disconnect(client_list->client[i].sid, server.socket, &client_list->client[i].client_addr);
             remove_client(client_list, &buffers, i);
         }
-        LeaveCriticalSection(&client_list->lock);
         Sleep(1000);
     }
 
@@ -847,8 +773,6 @@ DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
 }
 // --- Thread for writing file streams to disk ---
 DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
- 
-    int index = (int)(intptr_t)lpParam;
 
     SHA256_CTX sha256_ctx;
 
@@ -864,10 +788,8 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
         }
 
         sha256_init(&sha256_ctx);                              
-        // Check if the file stream is currently active/busy with a transfer.
         
         while(fstream->fstream_busy){
-
             EnterCriticalSection(&fstream->lock);
             // Iterate through all bitmap entries (chunks) for the current file stream.
             for(long long k = 0; k < fstream->bitmap_entries_count; k++){
@@ -1021,7 +943,7 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
             if(fstream->file_complete){           
                 
                 ht_update_id_status(&buffers.ht_fid, fstream->sid, fstream->fid, ID_RECV_COMPLETE);
-                fprintf(stdout, "File '%s' received written to disk and validated", fstream->fnm);
+                fprintf(stdout, "File '%s' received written to disk and validated", fstream->fname);
 
                 QueueAckEntry ack_entry;
                 new_ack_entry(&ack_entry, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, server.socket, &fstream->client_addr);
@@ -1036,7 +958,6 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
             Sleep(10);
         } // end of while(fstream->busy)
     }
-exit:
     //fprintf(stdout,"stream successfully closed %d\n", fstream->fstream_index);
     _endthreadex(0);
     return 0;
@@ -1084,7 +1005,7 @@ void file_cleanup_stream(ServerFileStream *fstream, ServerBuffers* buffers){
 
     if(fstream->fp && fstream->fstream_busy && !fstream->file_complete){
         fclose(fstream->fp);
-        remove(fstream->fnm);
+        remove(fstream->fname);
         fstream->fp = NULL;
     }
     if(fstream->fp != NULL){
@@ -1094,7 +1015,7 @@ void file_cleanup_stream(ServerFileStream *fstream, ServerBuffers* buffers){
             int fclosed = fclose(fstream->fp);
             Sleep(50); // Sleep for 50 milliseconds to ensure the file is properly closed before proceeding.
             if(fclosed != 0){
-                fprintf(stderr, "Error closing the file stream: %s (errno: %d)\n", fstream->fnm, errno);
+                fprintf(stderr, "Error closing the file stream: %s (errno: %d)\n", fstream->fname, errno);
             }
             fstream->fp = NULL; // Set the file pointer to NULL after closing.
         }
@@ -1137,7 +1058,7 @@ void file_cleanup_stream(ServerFileStream *fstream, ServerBuffers* buffers){
 
     memset(&fstream->received_sha256, 0, 32);
     memset(&fstream->calculated_sha256, 0, 32);
-    memset(fstream->fnm, 0, MAX_NAME_SIZE);
+    memset(fstream->fname, 0, MAX_NAME_SIZE);
     
     fstream->fstream_busy = FALSE;                  // Indicates if this stream channel is currently in use for a transfer.
 
@@ -1217,9 +1138,9 @@ void cleanup_client(Client *client, ServerBuffers* buffers){
     // tracking when the client slot became free or was last active.
     client->last_activity_time = time(NULL);
     // Reset the client's assigned slot number to zero.
-    client->client_index = 0;
+    client->slot = 0;
     // Mark the client slot as free, indicating it's available for a new connection.
-    client->status_index = SLOT_FREE;
+    client->slot_status = SLOT_FREE;
     LeaveCriticalSection(&client->lock);
     return;
 }

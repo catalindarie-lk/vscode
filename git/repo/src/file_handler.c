@@ -23,9 +23,9 @@ ServerFileStream *get_free_file_stream(ServerBuffers *buffers){
     for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &buffers->fstream[i];
         if(!fstream->fstream_busy){
-            EnterCriticalSection(&fstream->lock);
-            fstream->fstream_busy = TRUE;
-            LeaveCriticalSection(&fstream->lock);
+            // EnterCriticalSection(&fstream->lock);
+            // fstream->fstream_busy = TRUE;
+            // LeaveCriticalSection(&fstream->lock);
             return fstream;
         }
     }
@@ -85,7 +85,7 @@ static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragm
         // Check if all expected bytes for the entire file have been received.
         if(fstream->recv_bytes_count == fstream->fsize){
             fstream->trailing_chunk_complete = TRUE;
-            fprintf(stdout, "Received complete file: %s, Size: %llu, Last chunk size: %llu\n", fstream->fnm, fstream->recv_bytes_count, fstream->trailing_chunk_size);
+            fprintf(stdout, "Received complete file: %s, Size: %llu, Last chunk size: %llu\n", fstream->fname, fstream->recv_bytes_count, fstream->trailing_chunk_size);
         }
     }
 
@@ -104,7 +104,7 @@ static int init_file_stream(ServerFileStream *fstream, const uint32_t session_id
 
     // Initialize stream channel context data
     //file_cleanup_stream(fstream, buffers);
-    //fstream->fstream_busy = TRUE;
+    fstream->fstream_busy = TRUE;
     fstream->fstream_err = STREAM_ERR_NONE;
     fstream->sid = session_id;
     fstream->fid = file_id;
@@ -160,12 +160,12 @@ static int init_file_stream(ServerFileStream *fstream, const uint32_t session_id
     //memset(fstream->pool_block_file_chunk, 0, fstream->bitmap_entries_count * sizeof(char*));
 
     // Construct file name and open file
-    snprintf(fstream->fnm, MAX_NAME_SIZE, SAVE_FILE_PATH"xfile_SID_%d_ID_%d.txt", session_id, file_id);
+    snprintf(fstream->fname, MAX_NAME_SIZE, SAVE_FILE_PATH"xfile_SID_%d_ID_%d.txt", session_id, file_id);
 
     //creating output file
-    fstream->fp = fopen(fstream->fnm, "wb+"); // "wb+" allows writing and reading, creates or truncates
+    fstream->fp = fopen(fstream->fname, "wb+"); // "wb+" allows writing and reading, creates or truncates
     if(fstream->fp == NULL){
-        fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fnm, errno);
+        fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fname, errno);
         fstream->fstream_err = STREAM_ERR_FP;
         goto exit_error;
     }

@@ -35,8 +35,8 @@
 #define WSARECV_TIMEOUT_MS                  (100)         // Timeout in milliseconds in the receive frame thread
 #define GETQCOMPL_TIMEOUT                   (258L)
 
-#define TEST_FILE_PATH                      "G:\\test_file.txt"
-#define SAVE_FILE_PATH                      "G:\\"
+#define TEST_FILE_PATH                      "H:\\_test\\test_file.txt"
+#define SAVE_FILE_PATH                      "H:\\_test\\"
 
 
 // --- Frame Types ---

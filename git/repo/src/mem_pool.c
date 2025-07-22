@@ -7,7 +7,11 @@
 #include "include/mem_pool.h"
 
 //--------------------------------------------------------------------------------------------------------------------------
-void pool_init(MemPool* pool) {
+void pool_init(MemPool* pool, const uint64_t block_size, const uint64_t block_count) {
+
+    pool->block_size = block_size;
+    pool->block_count = block_count;
+
     // Allocate memory for 'next' array
     pool->next = (uint64_t*)calloc(pool->block_count, sizeof(uint64_t));
     if (pool->next == NULL) {

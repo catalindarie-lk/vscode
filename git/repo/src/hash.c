@@ -10,7 +10,13 @@
 #include "include/hash.h"
 
 //--------------------------------------------------------------------------------------------------------------------------
-
+void init_ht_frame(HashTableFramePendingAck *ht){
+    for(int i = 0; i < HASH_SIZE_FRAME; i++){
+        ht->entry[i] = NULL;
+    }
+    InitializeCriticalSection(&ht->mutex); 
+    ht->count = 0;
+}
 uint64_t ht_get_hash_frame(const uint64_t seq_num){
     return (seq_num % HASH_SIZE_FRAME);
 }
@@ -96,7 +102,13 @@ void ht_clean(HashTableFramePendingAck *ht){
 }
 
 //--------------------------------------------------------------------------------------------------------------------------
-
+void init_ht_id(HashTableIdentifierNode *ht){
+    for(int i = 0; i < HASH_SIZE_ID; i++){
+        ht->entry[i] = NULL;
+    }
+    InitializeCriticalSection(&ht->mutex); 
+    ht->count = 0;
+}
 uint64_t ht_get_hash_id(uint32_t id) {
     return (id % HASH_SIZE_ID);
 }
@@ -172,8 +184,6 @@ void ht_remove_all_sid(HashTableIdentifierNode *ht, const uint32_t sid) {
 
     LeaveCriticalSection(&ht->mutex);
 }
-
-
 BOOL ht_search_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status) {
     
     EnterCriticalSection(&ht->mutex);

@@ -23,7 +23,7 @@ typedef struct {
 } MemPool;
 
 //--------------------------------------------------------------------------------------------------------------------------
-void pool_init(MemPool* pool);
+void pool_init(MemPool* pool, const uint64_t block_size, const uint64_t block_count);
 void* pool_alloc(MemPool* pool);
 void pool_free(MemPool* pool, void* ptr);
 void pool_destroy(MemPool* pool);
