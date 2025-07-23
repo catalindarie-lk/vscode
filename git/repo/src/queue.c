@@ -147,9 +147,107 @@ int pop_ack(QueueAck *queue, QueueAckEntry *entry){
     return RET_VAL_SUCCESS;
 }
 
+void init_queue_fstream(QueueFstream *queue, const uint32_t size){
+    if (!queue){
+        fprintf(stderr, "Invalid pointer for queue fstream init\n");
+        return;
+    }
+    if(size <= 0){
+        fprintf(stderr, "Invalid size for fstream queue init\n");
+        return;
+    }
+    queue->size = size;
+    queue->pfstream = calloc(queue->size, sizeof(intptr_t));
+//    memset(&queue->pfstream, 0, queue->size * sizeof(intptr_t));
+    queue->head = 0;
+    queue->tail = 0;
+    queue->pending = 0;
+    InitializeCriticalSection(&queue->lock);
+    queue->semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+    return;
+}
+void clean_queue_fstream(QueueFstream *queue){
+    // Check if the queue is initialized
+    if (!queue){
+        fprintf(stderr, "Invalid pointer - fstream queue not initialized\n");
+        return;
+    }
+    if(queue->size <= 0){
+        fprintf(stderr, "Invalid size - fstream queue not initialized\n");
+        return;
+    }
+    EnterCriticalSection(&queue->lock);
+    queue->head = 0;
+    queue->tail = 0;
+    queue->pending = 0;
+    memset(&queue->pfstream, 0, queue->size * sizeof(intptr_t));
+    CloseHandle(queue->semaphore);
+    queue->semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+    LeaveCriticalSection(&queue->lock);
+    return;
+}
+int push_fstream(QueueFstream *queue, const intptr_t pfstream){
+    // Check if the queue is initialized
+    if (!queue){
+        fprintf(stderr, "Invalid pointer - fstream queue not initialized\n");
+        return RET_VAL_ERROR;
+    }
+    if(queue->size <= 0){
+        fprintf(stderr, "Invalid size - fstream queue not initialized\n");
+        return RET_VAL_ERROR;
+    }
+    EnterCriticalSection(&queue->lock);
+    // Check if the queue is full
+    if((queue->tail + 1) % queue->size == queue->head){
+        LeaveCriticalSection(&queue->lock);
+        fprintf(stderr, "Push - fream queue Full\n");
+        return RET_VAL_ERROR;
+    }
+    // Add the entry to the fstream queue 
+    //memcpy(&queue->entry[queue->tail], entry, sizeof(QueueFstreamEntry));
+    // Move the tail index forward    
+    queue->pfstream[queue->tail] = pfstream;
+    (queue->tail)++;
+    queue->tail %= queue->size;
+    ReleaseSemaphore(queue->semaphore, 1, NULL);
+    InterlockedIncrement(&queue->pending);
+    // Release the lock after modifying the queue
+    LeaveCriticalSection(&queue->lock);
+    return RET_VAL_SUCCESS;
+}
+intptr_t pop_fstream(QueueFstream *queue){
+    // Check if the queue is initialized
+    if (!queue){
+        fprintf(stderr, "Invalid pointer - fstream queue not initialized\n");
+        return 0;
+    }
+    if(queue->size <= 0){
+        fprintf(stderr, "Invalid size - fstream queue not initialized\n");
+        return 0;
+    }
+    EnterCriticalSection(&queue->lock);
+    // Check if the queue is empty before removing an entry
+    if (queue->head == queue->tail) {
+        LeaveCriticalSection(&queue->lock);
+        return 0;
+    }
+    // Copy the entry to buffer
+    //memcpy(entry, &queue->entry[queue->head], sizeof(QueueFstreamEntry));
+    intptr_t pfstream = queue->pfstream[queue->head];
+    // Remove the entry in the ACK queue
+    //memset(&queue->entry[queue->head], 0, sizeof(QueueFstreamEntry));
+    queue->pfstream[queue->head] = 0;
+    // Move the head index forward
+    (queue->head)++;
+    queue->head %= queue->size;
+    InterlockedDecrement(&queue->pending);
+    LeaveCriticalSection(&queue->lock);
+    return pfstream;
+}
+
 void init_queue_command(QueueCommand *queue){
     if (!queue){
-        fprintf(stderr, "Invalid queue pointer\n");
+        fprintf(stderr, "Invalid command queue pointer\n");
         return;
     }
     queue->head = 0;
@@ -158,6 +256,25 @@ void init_queue_command(QueueCommand *queue){
     memset(&queue->entry, 0, QUEUE_COMMAND_SIZE * sizeof(QueueCommandEntry));
     InitializeCriticalSection(&queue->lock);
     queue->semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+    return;
+}
+void clean_queue_command(QueueCommand *queue){
+    if (!queue){
+        fprintf(stderr, "Invalid command queue pointer\n");
+        return;
+    }
+    if(!queue->semaphore){
+        fprintf(stderr, "Invalid command queue semaphore\n");
+        return;
+    }
+    EnterCriticalSection(&queue->lock);
+    queue->head = 0;
+    queue->tail = 0;
+    queue->pending = 0;
+    memset(&queue->entry, 0, QUEUE_COMMAND_SIZE * sizeof(QueueCommandEntry));
+    CloseHandle(queue->semaphore);
+    queue->semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+    LeaveCriticalSection(&queue->lock);
     return;
 }
 int push_command(QueueCommand *queue, QueueCommandEntry *entry){
@@ -207,67 +324,3 @@ int pop_command(QueueCommand *queue, QueueCommandEntry *entry){
     return RET_VAL_SUCCESS;
 }
 
-void init_queue_fstream(QueueFstream *queue){
-    if (!queue){
-        fprintf(stderr, "Invalid queue pointer\n");
-        return;
-    }
-    queue->head = 0;
-    queue->tail = 0;
-    queue->pending = 0;
-    memset(&queue->pfstream, 0, QUEUE_FSTREAM_SIZE * sizeof(intptr_t));
-    InitializeCriticalSection(&queue->lock);
-    queue->semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
-    return;
-}
-int push_fstream(QueueFstream *queue, const intptr_t pfstream){
-    // Check if the queue is initialized
-    if (!queue){
-        fprintf(stderr, "Push - fstream queue not initialized\n");
-        return RET_VAL_ERROR;
-    }
-    EnterCriticalSection(&queue->lock);
-    // Check if the queue is full
-    if((queue->tail + 1) % QUEUE_FSTREAM_SIZE == queue->head){
-        LeaveCriticalSection(&queue->lock);
-        //fprintf(stderr, "Push - fream queue Full\n");
-        return RET_VAL_ERROR;
-    }
-    // Add the entry to the fstream queue 
-    //memcpy(&queue->entry[queue->tail], entry, sizeof(QueueFstreamEntry));
-    // Move the tail index forward    
-    queue->pfstream[queue->tail] = pfstream;
-    (queue->tail)++;
-    queue->tail %= QUEUE_FSTREAM_SIZE;
-    ReleaseSemaphore(queue->semaphore, 1, NULL);
-    InterlockedIncrement(&queue->pending);
-    // Release the lock after modifying the queue
-    LeaveCriticalSection(&queue->lock);
-    return RET_VAL_SUCCESS;
-}
-intptr_t pop_fstream(QueueFstream *queue){
-    // Check if the queue is initialized
-    if (!queue){
-        fprintf(stderr, "Pop - fstream queue not initialized\n");
-        return 0;
-    }
-    EnterCriticalSection(&queue->lock);
-    // Check if the queue is empty before removing an entry
-    if (queue->head == queue->tail) {
-        LeaveCriticalSection(&queue->lock);
-        //fprintf(stderr, "Pop - fstream queue empty\n");
-        return 0;
-    }
-    // Copy the entry to buffer
-    //memcpy(entry, &queue->entry[queue->head], sizeof(QueueFstreamEntry));
-    intptr_t pfstream = queue->pfstream[queue->head];
-    // Remove the entry in the ACK queue
-    //memset(&queue->entry[queue->head], 0, sizeof(QueueFstreamEntry));
-    queue->pfstream[queue->head] = 0;
-    // Move the head index forward
-    (queue->head)++;
-    queue->head %= QUEUE_FSTREAM_SIZE;
-    InterlockedDecrement(&queue->pending);
-    LeaveCriticalSection(&queue->lock);
-    return pfstream;
-}

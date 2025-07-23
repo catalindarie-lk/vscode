@@ -10,7 +10,6 @@
 #include <mswsock.h>                    // Optional: For WSARecvFrom and advanced I/O
 #include <iphlpapi.h>                   // For IP Helper API functions
 
-
 #pragma comment(lib, "Ws2_32.lib")      // Link against Winsock library
 #pragma comment(lib, "iphlpapi.lib")    // Link against IP Helper API library
 
@@ -27,7 +26,6 @@
 #include "include/file_handler.h"       // For frame handling functions
 #include "include/message_handler.h"    // For frame handling functions
 
-
 ServerData server;
 ServerBuffers buffers;
 ClientList client_list;
@@ -35,12 +33,12 @@ ClientList client_list;
 HANDLE hthread_receive_frame;
 HANDLE hthread_process_frame;
 HANDLE hthread_ack_frame;
-HANDLE hthread_send_ack; 
+HANDLE hthread_send_ack;
 HANDLE hthread_client_timeout;
 HANDLE hthread_file_stream[MAX_ACTIVE_FSTREAMS];
 HANDLE hthread_server_command;
 
-ClientMap client_map;
+//ClientMap client_map;
 
 const char *server_ip = "10.10.10.1"; // IPv4 example
 
@@ -49,8 +47,8 @@ static Client* find_client(ClientList *client_list, const uint32_t session_id);
 static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, const SOCKET srv_socket, const struct sockaddr_in *client_addr);
 static int remove_client(ClientList *client_list, ServerBuffers* buffers, const uint32_t slot);
 
-void file_cleanup_stream(ServerFileStream *fstream, ServerBuffers* buffers);
-void message_cleanup_stream(MessageStream *mstream, ServerBuffers* buffers);
+void close_file_stream(ServerFileStream *fstream, ServerBuffers* buffers);
+void close_message_stream(MessageStream *mstream, ServerBuffers* buffers);
 void cleanup_client(Client *client, ServerBuffers* buffers);
 BOOL validate_file_hash(ServerFileStream *fstream);
 void check_open_file_stream(ServerBuffers *buffers);
@@ -105,8 +103,8 @@ static int init_server_session(){
 static int init_server_config(){
     WSADATA wsaData;
 
-    int rcvBufSize = 50 * 1024 * 1024;  // 50MB
-    int sndBufSize = 5 * 1024 * 1024;  // 5MB
+    // int rcvBufSize = 50 * 1024 * 1024;  // 50MB
+    // int sndBufSize = 5 * 1024 * 1024;  // 5MB
 
 
     int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -123,11 +121,8 @@ static int init_server_config(){
         return RET_VAL_ERROR;
     }
 
-        // Set receive buffer
-    setsockopt(server.socket, SOL_SOCKET, SO_RCVBUF, (char*)&rcvBufSize, sizeof(rcvBufSize));
-
-    // Set send buffer
-    setsockopt(server.socket, SOL_SOCKET, SO_SNDBUF, (char*)&sndBufSize, sizeof(sndBufSize));
+    // setsockopt(server.socket, SOL_SOCKET, SO_RCVBUF, (char*)&rcvBufSize, sizeof(rcvBufSize));
+    // setsockopt(server.socket, SOL_SOCKET, SO_SNDBUF, (char*)&sndBufSize, sizeof(sndBufSize));
 
     server.server_addr.sin_family = AF_INET;
     server.server_addr.sin_port = _htons(SERVER_PORT);
@@ -161,7 +156,7 @@ static int init_server_buffers(){
     init_queue_ack(&buffers.fqueue_ack);
     init_queue_ack(&buffers.mqueue_ack);
     init_queue_ack(&buffers.queue_priority_ack);
-    init_queue_fstream(&buffers.queue_fstream);
+    init_queue_fstream(&buffers.queue_fstream, MAX_ACTIVE_FSTREAMS);
     init_ht_id(&buffers.ht_fid);
     init_ht_id(&buffers.ht_mid);
     pool_init(&buffers.pool_file_chunk, BLOCK_SIZE_CHUNK, BLOCK_COUNT_CHUNK);
@@ -177,6 +172,8 @@ static int init_server_buffers(){
     for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
         InitializeCriticalSection(&buffers.fstream[i].lock);
     }
+
+    buffers.test_semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
 
     server.server_status = STATUS_READY;
     return RET_VAL_SUCCESS;
@@ -790,6 +787,8 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
         sha256_init(&sha256_ctx);                              
         
         while(fstream->fstream_busy){
+        // while(1){
+        // WaitForSingleObject(buffers.test_semaphore, INFINITE);
             EnterCriticalSection(&fstream->lock);
             // Iterate through all bitmap entries (chunks) for the current file stream.
             for(long long k = 0; k < fstream->bitmap_entries_count; k++){
@@ -855,7 +854,7 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
             }
 
             if(fstream->fstream_err != STREAM_ERR_NONE){
-                file_cleanup_stream(fstream, &buffers); // Clean up the entire file stream.
+                close_file_stream(fstream, &buffers); // Clean up the entire file stream.
                 LeaveCriticalSection(&fstream->lock);
                 break;
             }
@@ -902,7 +901,7 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
             }
 
             if(fstream->fstream_err != STREAM_ERR_NONE){
-                file_cleanup_stream(fstream, &buffers); // Clean up the entire file stream.
+                close_file_stream(fstream, &buffers); // Clean up the entire file stream.
                 LeaveCriticalSection(&fstream->lock);
                 break;
             }
@@ -925,7 +924,7 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
                 if(!fstream->file_hash_validated){
                     fprintf(stderr, "STREAM ERROR: sha256 mismatch!\n");
                     fstream->fstream_err = STREAM_ERR_SHA256_MISMATCH; // Set a specific error code.                        
-                    file_cleanup_stream(fstream, &buffers);
+                    close_file_stream(fstream, &buffers);
                     LeaveCriticalSection(&fstream->lock);
                     break;  //exit the while loop
                 }                                                    
@@ -949,13 +948,13 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
                 new_ack_entry(&ack_entry, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, server.socket, &fstream->client_addr);
                 push_ack(&buffers.queue_priority_ack, &ack_entry);
 
-                file_cleanup_stream(fstream, &buffers);
+                close_file_stream(fstream, &buffers);
                 LeaveCriticalSection(&fstream->lock);
                 break; //exit the while loop
             }
             
             LeaveCriticalSection(&fstream->lock);
-            Sleep(10);
+            Sleep(1);
         } // end of while(fstream->busy)
     }
     //fprintf(stdout,"stream successfully closed %d\n", fstream->fstream_index);
@@ -994,7 +993,7 @@ DWORD WINAPI thread_proc_server_command(LPVOID lpParam){
 }
 
 // Clean up the file stream resources after a file transfer is completed or aborted.
-void file_cleanup_stream(ServerFileStream *fstream, ServerBuffers* buffers){
+void close_file_stream(ServerFileStream *fstream, ServerBuffers* buffers){
 
     if(fstream == NULL){
         fprintf(stderr, "ERROR: Trying to clean a NULL pointer file stream\n");
@@ -1066,7 +1065,7 @@ void file_cleanup_stream(ServerFileStream *fstream, ServerBuffers* buffers){
     return;
 }
 // Clean up the message stream resources after a file transfer is completed or aborted.
-void message_cleanup_stream(MessageStream *mstream, ServerBuffers* buffers){
+void close_message_stream(MessageStream *mstream, ServerBuffers* buffers){
 
     if(mstream == NULL){
         fprintf(stderr, "ERROR: Trying to clean a NULL pointer message stream\n");
@@ -1104,7 +1103,7 @@ void cleanup_client(Client *client, ServerBuffers* buffers){
     for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &buffers->fstream[i];
         if(fstream->sid ==  client->sid){
-            file_cleanup_stream(fstream, buffers);
+            close_file_stream(fstream, buffers);
         }
     }
 
@@ -1115,7 +1114,7 @@ void cleanup_client(Client *client, ServerBuffers* buffers){
         EnterCriticalSection(&client->mstream[i].lock);
         // Call the dedicated cleanup function for the current message stream.
         // This function will free memory, close files, and reset the message stream's state.
-        message_cleanup_stream(&client->mstream[i], buffers);
+        close_message_stream(&client->mstream[i], buffers);
         // Release the critical section lock for the current message stream.
         LeaveCriticalSection(&client->mstream[i].lock);
     }

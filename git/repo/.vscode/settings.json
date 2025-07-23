@@ -29,6 +29,7 @@
         "message_handler.h": "c",
         "fileio.h": "c",
         "file_handler.h": "c",
-        "ws2tcpip.h": "c"
+        "ws2tcpip.h": "c",
+        "client_frames.h": "c"
     }
 }

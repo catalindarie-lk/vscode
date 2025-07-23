@@ -16,7 +16,6 @@
 
 #define FRAME_QUEUE_SIZE                        32768
 #define QUEUE_ACK_SIZE                          131072     // Queue buffer size
-#define QUEUE_FSTREAM_SIZE                      1024
 #define QUEUE_COMMAND_SIZE                      1024
 
 
@@ -76,16 +75,19 @@ typedef struct{
     uint32_t pending;
     CRITICAL_SECTION lock;
     HANDLE semaphore;
+    HANDLE cleared;
 }QueueCommand;
 
+void init_queue_command(QueueCommand *queue);
+void clean_queue_command(QueueCommand *queue);
 int push_command(QueueCommand *queue, QueueCommandEntry *entry);
 int pop_command(QueueCommand *queue, QueueCommandEntry *entry);
-void init_queue_command(QueueCommand *queue);
  
 //----------------------------------------------------------------------------------------------------------------
 
 typedef struct{
-    intptr_t pfstream[QUEUE_FSTREAM_SIZE];
+    uint32_t size;
+    intptr_t *pfstream;
     uint32_t head;
     uint32_t tail;
     uint32_t pending;
@@ -93,8 +95,10 @@ typedef struct{
     HANDLE semaphore;
 }QueueFstream;
 
+void init_queue_fstream(QueueFstream *queue, const uint32_t size);
+void clean_queue_fstream(QueueFstream *queue);
 int push_fstream(QueueFstream *queue, const intptr_t pfstream);
 intptr_t pop_fstream(QueueFstream *queue);
-void init_queue_fstream(QueueFstream *queue);
+
 
 #endif

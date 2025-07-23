@@ -36,7 +36,7 @@
 #define GETQCOMPL_TIMEOUT                   (258L)
 
 #define TEST_FILE_PATH                      "H:\\_test\\test_file.txt"
-#define SAVE_FILE_PATH                      "H:\\_test\\"
+#define SAVE_FILE_PATH                      "H:\\_test\\copied\\"
 
 
 // --- Frame Types ---

@@ -25,7 +25,7 @@
 #define DEFAULT_SESSION_TIMEOUT_SEC     120
 #endif
 
-#define MAX_ACTIVE_FSTREAMS             5
+#define MAX_CLIENT_ACTIVE_FSTREAMS      1
 
 
 // --- Constants ---
@@ -89,11 +89,10 @@ typedef struct{
 }MessageStream;
 
 typedef struct{
-
-    FILE *fp;
-    char *fpath;
-    char *fname;
+    
+    const char *fpath;
     long long fsize;
+    FILE *fp;
     FileHash fhash;
 
     uint32_t fid;
@@ -103,9 +102,9 @@ typedef struct{
     uint64_t pending_bytes;
     uint64_t pending_metadata_seq_num;
         
-    CRITICAL_SECTION lock;
     HANDLE hevent_metadata_response;
-    HANDLE hevent_stop_file_transfer;
+    CRITICAL_SECTION lock;
+
 }ClientFileStream;
 
 typedef struct{
@@ -133,7 +132,6 @@ typedef struct{
     HANDLE hevent_connection_established;
     HANDLE hevent_connection_closed;
 
-//    ClientFileStream fstream[MAX_CLIENT_FILE_STREAMS];
     MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
 
     IOCP_CONTEXT iocp_context;
@@ -150,11 +148,10 @@ typedef struct {
     HashTableFramePendingAck ht_frame;
 
     QueueFstream queue_fstream;
-    ClientFileStream fstream[QUEUE_FSTREAM_SIZE];
+    ClientFileStream fstream[MAX_CLIENT_ACTIVE_FSTREAMS];
     HANDLE fstream_semaphore;
 
     QueueCommand queue_command;
-    HANDLE command_semaphore;
 
 }ClientBuffers;
 

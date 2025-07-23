@@ -163,7 +163,7 @@ static int msg_check_completion_and_record(MessageStream *mstream, ServerBuffers
     
     ht_update_id_status(&buffers->ht_mid, mstream->sid, mstream->mid, ID_RECV_COMPLETE);
     
-    message_cleanup_stream(mstream, buffers);
+    close_message_stream(mstream, buffers);
  
     if (msg_creation_status != RET_VAL_SUCCESS) {
         // If file creation failed, return an error.

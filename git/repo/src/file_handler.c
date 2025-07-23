@@ -103,7 +103,7 @@ static int init_file_stream(ServerFileStream *fstream, const uint32_t session_id
     EnterCriticalSection(&fstream->lock);
 
     // Initialize stream channel context data
-    //file_cleanup_stream(fstream, buffers);
+    //close_file_stream(fstream, buffers);
     fstream->fstream_busy = TRUE;
     fstream->fstream_err = STREAM_ERR_NONE;
     fstream->sid = session_id;
@@ -176,8 +176,8 @@ static int init_file_stream(ServerFileStream *fstream, const uint32_t session_id
     return RET_VAL_SUCCESS;
 
 exit_error:
-    //Call file_cleanup_stream to free any partially allocated resources
-    file_cleanup_stream(fstream, buffers);
+    //Call close_file_stream to free any partially allocated resources
+    close_file_stream(fstream, buffers);
     LeaveCriticalSection(&fstream->lock);
     return RET_VAL_ERROR;
 
@@ -320,6 +320,7 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
     push_ack(&buffers->fqueue_ack, &ack_entry);
 
     LeaveCriticalSection(&client->lock);
+    ReleaseSemaphore(buffers->test_semaphore, 1, NULL);
     return RET_VAL_SUCCESS;
 
 exit_err:

@@ -224,6 +224,8 @@ typedef struct {
     // CRITICAL_SECTION fstream_list_lock;
     // uint32_t available_fstreams;
 
+    HANDLE test_semaphore;
+
     HashTableFramePendingAck ht_frame;
     HashTableIdentifierNode ht_fid;
     HashTableIdentifierNode ht_mid;
