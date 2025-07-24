@@ -83,14 +83,14 @@ int send_file_metadata(const uint64_t seq_num,
         fprintf(stderr, "ERROR: Invalid file name pointer (NULL).\n");
         return RET_VAL_ERROR;
     }
-    uint32_t file_name_len = (uint32_t)strnlen(file_name, MAX_NAME_SIZE - 1);
+    uint32_t file_name_len = (uint32_t)strnlen(file_name, MAX_PATH - 1);
  
     if(file_name_len == 0){
         fprintf(stderr, "ERROR: File name is 0 length.\n");
         return RET_VAL_ERROR;
     }
-    if(file_name_len >= MAX_NAME_SIZE - 1){
-        fprintf(stderr, "ERROR: File name is too long. Max length is %d characters.\n", MAX_NAME_SIZE - 1);
+    if(file_name_len >= MAX_PATH - 1){
+        fprintf(stderr, "ERROR: File name is too long. Max length is %d characters.\n", MAX_PATH - 1);
         return RET_VAL_ERROR;
     }
     file_name_len += 1; // Add 1 for null terminator
@@ -240,6 +240,8 @@ int send_long_text_fragment(const uint64_t seq_num,
     frame.payload.text_fragment.fragment_offset = _htonl(fragment_offset);
     
     memcpy(frame.payload.text_fragment.chars, fragment_buffer, fragment_len);
+
+    fprintf(stdout, "PAYLOAD: %s\n", frame.payload.text_fragment.chars);
     
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(LongTextPayload)));  

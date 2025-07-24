@@ -9,39 +9,43 @@
 #include "include/sha256.h"
 
 #ifndef RET_VAL_SUCCESS
-#define RET_VAL_SUCCESS 0
+#define RET_VAL_SUCCESS                         (0)
 #endif
 #ifndef RET_VAL_ERROR
-#define RET_VAL_ERROR -1
+#define RET_VAL_ERROR                           (-1)
 #endif
 #ifndef MAX_CLIENT_MESSAGE_STREAMS
-#define MAX_CLIENT_MESSAGE_STREAMS      10
+#define MAX_CLIENT_MESSAGE_STREAMS              (10)
 #endif
-// #ifndef MAX_CLIENT_FILE_STREAMS
-// #define MAX_CLIENT_FILE_STREAMS         10
-// #endif
+
 
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
-#define DEFAULT_SESSION_TIMEOUT_SEC     120
+#define DEFAULT_SESSION_TIMEOUT_SEC             (120)
 #endif
 
-//#define TOTAL_FSTREAMS                  100
-#define MAX_ACTIVE_FSTREAMS             10
+#define MAX_SERVER_ACTIVE_FSTREAMS              (10)
 
 
 // --- Constants 
-#define SERVER_NAME                     "lkdc UDP Text/File Transfer Server"
-#define MAX_CLIENTS                     (1024)
+#define SERVER_NAME                             "lkdc UDP Text/File Transfer Server"
+#define MAX_CLIENTS                             (10)
 
-#define FRAGMENTS_PER_CHUNK             (64ULL)
-#define CHUNK_TRAILING                  (1u << 7) // 0b10000000
-#define CHUNK_BODY                      (1u << 6) // 0b01000000
-#define CHUNK_HASHED                    (1u << 5) // 0b00100000
-#define CHUNK_WRITTEN                   (1u << 0) // 0b00000001
-#define CHUNK_NONE                      (0)       // 0b00000000
+#define FRAGMENTS_PER_CHUNK                     (64ULL)
+#define CHUNK_TRAILING                          (1u << 7) // 0b10000000
+#define CHUNK_BODY                              (1u << 6) // 0b01000000
+#define CHUNK_HASHED                            (1u << 5) // 0b00100000
+#define CHUNK_WRITTEN                           (1u << 0) // 0b00000001
+#define CHUNK_NONE                              (0)       // 0b00000000
 
-#define BLOCK_SIZE_CHUNK                ((uint64_t)(FILE_FRAGMENT_SIZE * 64))
-#define BLOCK_COUNT_CHUNK               ((uint64_t)(2048))
+#define BLOCK_SIZE_CHUNK                        ((uint64_t)(FILE_FRAGMENT_SIZE * 64))
+#define BLOCK_COUNT_CHUNK                       ((uint64_t)(1024))
+
+#define SERVER_SIZE_QUEUE_FRAME                 (8192 * MAX_CLIENTS)
+#define SERVER_SIZE_QUEUE_PRIORITY_FRAME        (1024)
+
+#define SERVER_SIZE_FQUEUE_ACK                  (65536)
+#define SERVER_SIZE_MQUEUE_ACK                  (65536)
+#define SERVER_SIZE_QUEUE_PRIORITY_ACK          (1024)
 
 enum Status{
     STATUS_NONE = 0,
@@ -162,7 +166,8 @@ typedef struct{
     uint8_t received_sha256[32];        // Buffer for sha256 received from the client
     uint8_t calculated_sha256[32];      // Buffer for sha256 calculated by the server
 
-    char fname[MAX_NAME_SIZE];          // Array to store the file name+path.
+    char fname[MAX_PATH];          // Array to store the file name+path.
+    char fpath[MAX_PATH];
     FILE *fp;                           // File pointer for the file being written to disk.
 
     CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
@@ -220,7 +225,7 @@ typedef struct {
     QueueAck queue_priority_ack;
 
     QueueFstream queue_fstream;
-    ServerFileStream fstream[MAX_ACTIVE_FSTREAMS];
+    ServerFileStream fstream[MAX_SERVER_ACTIVE_FSTREAMS];
     // CRITICAL_SECTION fstream_list_lock;
     // uint32_t available_fstreams;
 

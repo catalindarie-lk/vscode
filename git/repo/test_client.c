@@ -26,6 +26,7 @@
 #include "include/hash.h"               // For hash table management
 
 ClientData client;
+ClientThreads threads;
 ClientBuffers buffers;
 
 HANDLE hthread_recieve_frame;
@@ -33,7 +34,7 @@ HANDLE hthread_process_frame;
 HANDLE hthread_resend_frame;
 HANDLE hthread_keep_alive;
 HANDLE hthread_client_command;
-HANDLE hthread_file_transfer[MAX_CLIENT_ACTIVE_FSTREAMS];
+//HANDLE hthread_file_transfer[MAX_CLIENT_ACTIVE_FSTREAMS];
 HANDLE hthread_queue_command[MAX_CLIENT_ACTIVE_FSTREAMS];
 
 const char *server_ip = "10.10.10.1"; // loopback address
@@ -43,12 +44,18 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_process_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_keep_alive(LPVOID lpParam);
 DWORD WINAPI thread_proc_resend_frame(LPVOID lpParam);
-DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam);
-DWORD WINAPI thread_proc_message_send(LPVOID lpParam);
+DWORD WINAPI thread_fstream_function(LPVOID lpParam);
+DWORD WINAPI thread_mstream_function(LPVOID lpParam);
 DWORD WINAPI thread_proc_client_command(LPVOID lpParam);
-DWORD WINAPI thread_proc_queue_command(LPVOID lpParam);
 
 static void clean_file_stream(ClientFileStream *fstream);
+
+void SendFile(const char *fpath, const size_t fpath_len, const char *fname, const size_t fname_len);
+void SendAllFilesInFolder(const char *fd_path);
+void SendTextMessage(const char *message_buffer, const size_t message_len);
+
+void sent_text_file();
+
 
 static uint64_t get_new_seq_num(){
     return InterlockedIncrement64(&client.frame_count);
@@ -150,15 +157,23 @@ static int init_client_config(){
 }
 static int init_client_buffers(){
 
-    init_queue_frame(&buffers.queue_frame);
-    init_queue_frame(&buffers.queue_priority_frame);
-    init_queue_fstream(&buffers.queue_fstream, 10);
-    init_queue_command(&buffers.queue_command);
-    init_ht_frame(&buffers.ht_frame);
+    init_queue_frame(&buffers.queue_frame, CLIENT_SIZE_QUEUE_FRAME);
+    init_queue_frame(&buffers.queue_priority_frame, CLIENT_SIZE_QUEUE_PRIORITY_FRAME);
+    
     pool_init(&buffers.ht_frame.pool, BLOCK_SIZE_FRAME, BLOCK_COUNT_FRAME);
+    init_ht_frame(&buffers.ht_frame, HASH_SIZE_FRAME);
+    
+    init_queue_command(&buffers.queue_fstream, CLIENT_SIZE_QUEUE_COMMAND_FSTREAM);
+    init_queue_command(&buffers.queue_mstream, CLIENT_SIZE_QUEUE_COMMAND_MSTREAM);
 
-    buffers.fstream_semaphore = CreateSemaphore(NULL, MAX_CLIENT_ACTIVE_FSTREAMS, LONG_MAX, NULL);
-//    buffers.command_semaphore = CreateSemaphore(NULL, MAX_CLIENT_ACTIVE_FSTREAMS, LONG_MAX, NULL);
+    for(int index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
+        memset(&buffers.fstream[index], 0, sizeof(ClientFileStream));
+        buffers.fstream[index].chunk_buffer = malloc(FILE_CHUNK_SIZE);
+    }
+    for(int index = 0; index < MAX_CLIENT_ACTIVE_MSTREAMS; index++){
+        memset(&buffers.mstream[index], 0, sizeof(ClientMessageStream));
+        buffers.mstream[index].message_buffer = malloc(MAX_MESSAGE_SIZE_BYTES);
+    }
     
     return RET_VAL_SUCCESS;
 }
@@ -181,7 +196,7 @@ static int init_client_handles(){
         return RET_VAL_ERROR;
     }
 
-     // Initialize stream events
+    // Initialize fstreams
     for(int index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
         buffers.fstream[index].hevent_metadata_response = CreateEvent(NULL, FALSE, FALSE, NULL);
         if (buffers.fstream[index].hevent_metadata_response == NULL) {
@@ -192,17 +207,11 @@ static int init_client_handles(){
         }
         InitializeCriticalSection(&buffers.fstream[index].lock);
     }
-
-    for(int index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-        client.mstream[index].hevent_start_message_send = CreateEvent(NULL, TRUE, FALSE, NULL);
-        client.mstream[index].hevent_close_message_stream_thread = CreateEvent(NULL, FALSE, FALSE, NULL);
-        if (client.mstream[index].hevent_start_message_send == NULL || client.mstream[index].hevent_close_message_stream_thread == NULL) {
-            fprintf(stderr, "Failed to create message send events. Error: %d\n", GetLastError());
-            client.session_status = CONNECTION_CLOSED;
-            client.client_status = STATUS_CLOSED;
-            return RET_VAL_ERROR;
-        }
+    // Initialize mstreams
+    for(int index = 0; index < MAX_CLIENT_ACTIVE_MSTREAMS; index++){
+        InitializeCriticalSection(&buffers.mstream[index].lock);
     }
+
     // CLIENT_READY
     client.client_status = STATUS_READY;
     return RET_VAL_SUCCESS;
@@ -240,25 +249,23 @@ static void start_threads(){
         client.session_status = CONNECTION_CLOSED;
         client.client_status = STATUS_CLOSED; // Signal immediate shutdown
     }
+
+    // START FSTREAM WORKER THREADS
+    threads.fstream_semaphore = CreateSemaphore(NULL, MAX_CLIENT_ACTIVE_FSTREAMS, LONG_MAX, NULL);
     for(int index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
-        hthread_queue_command[index] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_queue_command, NULL, 0, NULL);
-        if (hthread_queue_command[index] == NULL) {
-            fprintf(stderr, "Failed to create command queue thread. Error: %d\n", GetLastError());
-            client.session_status = CONNECTION_CLOSED;
-            client.client_status = STATUS_CLOSED; // Signal immediate shutdown
-        }
-    }
-    for(int index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
-        hthread_file_transfer[index] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_transfer, NULL, 0, NULL);
-        if (hthread_file_transfer[index] == NULL){
+        threads.fstream[index] = (HANDLE)_beginthreadex(NULL, 0, thread_fstream_function, NULL, 0, NULL);
+        if (threads.fstream[index] == NULL){
             fprintf(stderr, "Failed to create file send thread. Error: %d\n", GetLastError());
             client.session_status = CONNECTION_CLOSED;
             client.client_status = STATUS_CLOSED; // Signal immediate shutdown
         }
     }
-   for(int index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-        client.mstream[index].hthread_message_send = (HANDLE)_beginthreadex(NULL, 0, thread_proc_message_send, (LPVOID)(intptr_t)index, 0, NULL);
-        if (client.mstream[index].hthread_message_send == NULL){
+
+   // START MSTREAM WORKER THREADS
+    threads.mstream_semaphore = CreateSemaphore(NULL, MAX_CLIENT_ACTIVE_MSTREAMS, LONG_MAX, NULL);
+    for(int index = 0; index < MAX_CLIENT_ACTIVE_MSTREAMS; index++){
+        threads.mstream[index] = (HANDLE)_beginthreadex(NULL, 0, thread_mstream_function, NULL, 0, NULL);
+        if (threads.mstream[index] == NULL){
             fprintf(stderr, "Failed to create message send thread. Error: %d\n", GetLastError());
             client.session_status = CONNECTION_CLOSED;
             client.client_status = STATUS_CLOSED; // Signal immediate shutdown
@@ -272,27 +279,7 @@ static void client_shutdown(){
     } else {
         force_disconnect();
     }
-    CloseHandle(hthread_recieve_frame);
-    CloseHandle(hthread_process_frame);
-    CloseHandle(hthread_resend_frame);
-    CloseHandle(hthread_keep_alive);
-    for(int index = 0; index < MAX_CLIENT_FILE_STREAMS; index++){
-        CloseHandle(buffers.fstream[index].hevent_metadata_response);
-        DeleteCriticalSection(&buffers.fstream[index].lock);
-    }
-    for(int index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-        CloseHandle(client.mstream[index].hthread_message_send);
-        CloseHandle(client.mstream[index].hevent_start_message_send);
-        CloseHandle(client.mstream[index].hevent_close_message_stream_thread);
-    }
-    CloseHandle(client.hevent_connection_listening);
-    CloseHandle(client.hevent_connection_established);
-    CloseHandle(client.hevent_connection_closed);
-
-    DeleteCriticalSection(&buffers.queue_frame.lock);
-    DeleteCriticalSection(&buffers.queue_priority_frame.lock);
-    DeleteCriticalSection(&buffers.ht_frame.mutex);
-
+ 
     closesocket(client.socket);
     WSACleanup();
     client.client_status = STATUS_CLOSED;
@@ -637,40 +624,59 @@ exit_thread:
     return 0;
 }
 // --- File transfer thread function ---
-DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
+DWORD WINAPI thread_fstream_function(LPVOID lpParam){
    
     SHA256_CTX sha256_ctx;
     uint32_t chunk_bytes_to_send;
     uint32_t chunk_fragment_offset;
     uint32_t frame_fragment_size;
     uint64_t frame_fragment_offset;
-
-    uint8_t chunk_buffer[FILE_CHUNK_SIZE];
-    
+   
     DWORD wait_metadata_response;
+
+    QueueCommandEntry entry;
+    HANDLE events[2] = {threads.fstream_semaphore, buffers.queue_fstream.semaphore};
 
     while(client.client_status == STATUS_READY){
 
-        WaitForSingleObject(buffers.queue_fstream.semaphore, INFINITE);
-         
-        ClientFileStream *fstream = (ClientFileStream*)pop_fstream(&buffers.queue_fstream);
-
-        if(!fstream){
-            fprintf(stderr, "Received null fstream pointer from fstream queue!\n");
+        WaitForMultipleObjects(2, events, TRUE, INFINITE);
+        
+        if (pop_command(&buffers.queue_fstream, &entry) == RET_VAL_ERROR) {
+            fprintf(stdout, "ERROR: Popping fstream command from queue\n");
             continue;
         }
+         
+        ClientFileStream *fstream = NULL;
+        for(int index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
+            fstream = &buffers.fstream[index];
+            if(!fstream->fstream_busy){
+                EnterCriticalSection(&fstream->lock);
+                fstream->fstream_busy = TRUE;
+                memcpy(fstream->fpath, &entry.command.send_file.fpath, MAX_PATH);
+                memcpy(fstream->fname, &entry.command.send_file.fname, MAX_PATH);
+                fprintf(stdout, "Free file stream %d opened...\n", index);
+                break;
+            }
+        }
 
-        EnterCriticalSection(&fstream->lock);
+        if(!fstream){
+            LeaveCriticalSection(&fstream->lock);
+            fprintf(stderr, "ERROR: All fstreams are busy!\n");
+            continue;
+        }
 
         sha256_init(&sha256_ctx);
         fstream->fp = NULL;
         
-        fstream->fsize = get_file_size(fstream->fpath);       
+        char _FileName[MAX_PATH] = {0};
+        snprintf(_FileName, MAX_PATH, "%s%s", fstream->fpath, fstream->fname);
+
+        fstream->fsize = get_file_size(_FileName);       
         if(fstream->fsize == RET_VAL_ERROR){
             goto clean;
         }
 
-        fstream->fp = fopen(fstream->fpath, "rb");
+        fstream->fp = fopen(_FileName, "rb");
         if(fstream->fp == NULL){
             fprintf(stdout, "Error opening file!!!\n");
             goto clean;
@@ -683,7 +689,7 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
                                                         client.sid, 
                                                         fstream->fid, 
                                                         fstream->fsize, 
-                                                        fstream->fpath, 
+                                                        fstream->fname, 
                                                         FILE_FRAGMENT_SIZE, 
                                                         client.socket, 
                                                         &client.server_addr,
@@ -701,29 +707,31 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
 
         while(fstream->pending_bytes > 0){
 
-            if(buffers.ht_frame.count > HASH_FRAME_HIGH_WATERMARK){
-                fstream->throttle = TRUE;
-            }
-            if(buffers.ht_frame.count < HASH_FRAME_LOW_WATERMARK){
-                fstream->throttle = FALSE;
-            }
-            if(fstream->throttle){
-                Sleep(10);
-                continue;
-            }
-
-            chunk_bytes_to_send = fread(chunk_buffer, 1, FILE_CHUNK_SIZE, fstream->fp);
+            chunk_bytes_to_send = fread(fstream->chunk_buffer, 1, FILE_CHUNK_SIZE, fstream->fp);
             if (chunk_bytes_to_send == 0 && ferror(fstream->fp)) {
                 fprintf(stderr, "Error reading file\n");
                 goto clean;
             }           
 
-            sha256_update(&sha256_ctx, (const uint8_t *)chunk_buffer, chunk_bytes_to_send);
+            sha256_update(&sha256_ctx, (const uint8_t *)fstream->chunk_buffer, chunk_bytes_to_send);
  
             chunk_fragment_offset = 0;
 
             while (chunk_bytes_to_send > 0){
 
+                // THROTTLE
+                if(buffers.ht_frame.count > HASH_FRAME_HIGH_WATERMARK){
+                    fstream->throttle = TRUE;
+                }
+                if(buffers.ht_frame.count < HASH_FRAME_LOW_WATERMARK){
+                    fstream->throttle = FALSE;
+                }
+                if(fstream->throttle){
+                    Sleep(1);
+                    continue;
+                }
+
+                // CONTINUE
                 if(chunk_bytes_to_send > FILE_FRAGMENT_SIZE){
                     frame_fragment_size = FILE_FRAGMENT_SIZE;
                 } else {
@@ -732,7 +740,7 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
                 
                 char buffer[FILE_FRAGMENT_SIZE];
 
-                const char *offset = chunk_buffer + chunk_fragment_offset;
+                const char *offset = fstream->chunk_buffer + chunk_fragment_offset;
                 memcpy(buffer, offset, frame_fragment_size);
                 if(frame_fragment_size < FILE_FRAGMENT_SIZE){
                     memset(buffer + frame_fragment_size, 0, FILE_FRAGMENT_SIZE - frame_fragment_size);
@@ -756,6 +764,7 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
                 frame_fragment_offset += frame_fragment_size;                       
                 chunk_bytes_to_send -= frame_fragment_size;
                 fstream->pending_bytes -= frame_fragment_size;
+                
             }     
         }                  
 
@@ -772,7 +781,7 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
     clean:
         clean_file_stream(fstream);
         LeaveCriticalSection(&fstream->lock);
-        ReleaseSemaphore(buffers.fstream_semaphore, 1, NULL);
+        ReleaseSemaphore(threads.fstream_semaphore, 1, NULL);
     }
 
     fprintf(stderr, "EXITING FILE STREAM THREAD\n");
@@ -780,80 +789,63 @@ DWORD WINAPI thread_proc_file_transfer(LPVOID lpParam){
     return 0;               
 }
 // --- Send message thread function ---
-DWORD WINAPI thread_proc_message_send(LPVOID lpParam){
+DWORD WINAPI thread_mstream_function(LPVOID lpParam){
 
-    int index = (int)(intptr_t)lpParam;
-    MessageStream *mstream = &client.mstream[index];
-
+    
     uint32_t frame_fragment_offset;
     uint32_t frame_fragment_len;
 
-    DWORD wait_message_events;
-    DWORD check_stop_send;
-    DWORD check_client_shutdown;
-    HANDLE message_events[2] = {mstream->hevent_start_message_send, mstream->hevent_close_message_stream_thread};
+ 
+    QueueCommandEntry entry;
+    HANDLE events_mstream[2] = {threads.mstream_semaphore, buffers.queue_mstream.semaphore};
 
     while(client.client_status == STATUS_READY){
-        
-        wait_message_events = WaitForMultipleObjects(2, message_events, FALSE, INFINITE);
 
-        if(wait_message_events == WAIT_OBJECT_0){
-            // start message event
-        } else if (wait_message_events == WAIT_OBJECT_0 + 1){
-            // stop message send event
-            goto clean;
-        } else if (wait_message_events == WAIT_OBJECT_0 + 2){
-            goto exit_thread; 
-        } else {
-            fprintf(stderr, "Unexpected wait message events result: %lu\n", wait_message_events);
-            goto clean;
+        WaitForMultipleObjects(2, events_mstream, TRUE, INFINITE);
+        
+        if (pop_command(&buffers.queue_mstream, &entry) == RET_VAL_ERROR) {
+            fprintf(stdout, "ERROR: Popping mstream command from queue\n");
+            continue;
         }
         
-        mstream->fpath = TEST_FILE_PATH;
-        mstream->fname = "test_file.txt";       
-        
-        mstream->fp = NULL;
-        mstream->message_buffer = NULL;
-        
-        mstream->text_file_size = get_file_size(mstream->fpath);
-      
-        if(mstream->text_file_size == RET_VAL_ERROR){
-            goto clean;
-        }
-        if(mstream->text_file_size > MAX_MESSAGE_SIZE_BYTES){
-            fprintf(stdout, "Message file is too large! Message Size: %llu > Max size: %u\n", mstream->text_file_size, MAX_MESSAGE_SIZE_BYTES);
-            goto clean;
-        }
-        mstream->message_len = (uint32_t)mstream->text_file_size;
-
-        mstream->fp = fopen(mstream->fpath, "rb");
-        if(mstream->fp == NULL){
-            fprintf(stdout, "Error opening file!\n");
-            goto clean;
+        if(entry.command.send_message.message_len >= MAX_MESSAGE_SIZE_BYTES){
+            fprintf(stderr, "ERROR: Message size is too big.\n");
+            continue;
         }
 
+        if(entry.command.send_message.message_len <= 0){
+            fprintf(stderr, "ERROR: Message size not valid (0 or less).\n");
+            continue;
+        }
+        
+        ClientMessageStream *mstream = NULL;
+        for(int index = 0; index < MAX_CLIENT_ACTIVE_MSTREAMS; index++){
+            mstream = &buffers.mstream[index];
+            if(!mstream->mstream_busy){
+                EnterCriticalSection(&mstream->lock);
+                mstream->mstream_busy = TRUE;
+                mstream->message_len = entry.command.send_message.message_len;
+                memcpy(mstream->message_buffer, entry.command.send_message.message_buffer, mstream->message_len);
+                mstream->message_buffer[mstream->message_len] = '\0';
+                fprintf(stdout, "Free message stream %d opened...\n", index);
+                break;
+            }
+        }
+
+        if(!mstream){
+            LeaveCriticalSection(&mstream->lock);
+            fprintf(stderr, "ERROR: All fstreams are busy!\n");
+            continue;
+        }
+        
         mstream->message_id = InterlockedIncrement(&client.mid_count);
         frame_fragment_offset = 0;
 
-        mstream->message_buffer = malloc(mstream->message_len + 1);
-        if(mstream->message_buffer == NULL){
-            fprintf(stdout, "Error allocating memeory buffer for message!\n");
-            goto clean;
-        }
+        mstream->remaining_bytes_to_send = mstream->message_len;
 
-        mstream->remaining_bytes_to_send = fread(mstream->message_buffer, 1, mstream->message_len, mstream->fp);
-        mstream->message_buffer[mstream->message_len] = '\0';
-        if (mstream->remaining_bytes_to_send == 0 && ferror(mstream->fp)) {
-            fprintf(stdout, "Error reading message file!\n");
-            goto clean;
-        }
+        fprintf(stdout, "MESSAGE3: %s:%d\n", mstream->message_buffer, strlen(mstream->message_buffer));
 
         while(mstream->remaining_bytes_to_send > 0){
-
-            check_stop_send = WaitForSingleObject(mstream->hevent_close_message_stream_thread, 0);
-            if (check_stop_send == WAIT_OBJECT_0) {
-                goto clean;
-            }
 
             if(mstream->remaining_bytes_to_send > TEXT_FRAGMENT_SIZE){
                 frame_fragment_len = TEXT_FRAGMENT_SIZE;
@@ -868,7 +860,7 @@ DWORD WINAPI thread_proc_message_send(LPVOID lpParam){
                 mstream->throttle = FALSE;
             }
             if(mstream->throttle){
-                Sleep(5);
+                Sleep(1);
                 continue;
             }
 
@@ -899,54 +891,15 @@ DWORD WINAPI thread_proc_message_send(LPVOID lpParam){
             mstream->remaining_bytes_to_send -= frame_fragment_len;
         }
 
-    clean:
         clean_message_stream(mstream);
+        ReleaseSemaphore(threads.fstream_semaphore, 1, NULL);
+        LeaveCriticalSection(&mstream->lock);
+
     }
-exit_thread:
-    clean_message_stream(mstream);
-    fprintf(stdout,"message thread [%d] exiting...\n", index);
     _endthreadex(0);
     return 0; 
 }
 
-// --- Queue command ---
-DWORD WINAPI thread_proc_queue_command(LPVOID lpParam){
-
-    QueueCommandEntry entry;
-
-    HANDLE events[2] = {buffers.fstream_semaphore, buffers.queue_command.semaphore};
-
-    while (client.client_status == STATUS_READY) {
-
-        WaitForMultipleObjects(2, events, TRUE, INFINITE);
-        
-        if (pop_command(&buffers.queue_command, &entry) == RET_VAL_ERROR) {
-            fprintf(stdout, "Error popping command from queue\n");
-            continue;
-        }
-        
-        ClientFileStream *fstream = NULL;
-        int index;
-        for(index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
-            fstream = &buffers.fstream[index];
-            EnterCriticalSection(&fstream->lock);
-            if(fstream->fstream_busy){
-                LeaveCriticalSection(&fstream->lock);
-                continue;
-            }
-            fstream->fstream_busy = TRUE;
-            fstream->fpath = TEST_FILE_PATH;
-            LeaveCriticalSection(&fstream->lock);
-            fprintf(stdout, "Free file stream %d opened...\n", index);
-            push_fstream(&buffers.queue_fstream, (intptr_t)fstream);
-            break;
-        }
-    } // end of while (client.client_status == STATUS_READY) 
-
-    fprintf(stdout, "EXITING COMMAND THREAD\n\n\n");
-    _endthreadex(0);
-    return 0;
-}
 // --- Process command ---
 DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
 
@@ -982,17 +935,12 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                 if(client.session_status != CONNECTION_ESTABLISHED){
                     break;
                 }
-                char command[255] = {0};
-                command[0] = 'f';
-                QueueCommandEntry entry;
-                memcpy(&entry.command, &command, 255);
-                push_command(&buffers.queue_command, &entry);
-                //transfer_file();
+                SendAllFilesInFolder(SRC_FPATH);
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
             case 't':
             case 'T':
-                send_text_message();
+                sent_text_file();
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
             case '\n':
@@ -1021,10 +969,10 @@ int main() {
     while(client.client_status == STATUS_READY){
         fprintf(stdout, "\r\033[2K-- File: %.2f , Text: %.2f , Hash F: %u, Free B: %llu; Pending: %d", 
                             (float)(buffers.fstream[0].fsize - buffers.fstream[0].pending_bytes) / (float)buffers.fstream[0].fsize * 100.0, 
-                            (float)(client.mstream[0].message_len - client.mstream[0].remaining_bytes_to_send) / (float)client.mstream[0].message_len * 100.0,
+                            (float)(buffers.mstream[0].message_len - buffers.mstream[0].remaining_bytes_to_send) / (float)buffers.mstream[0].message_len * 100.0,
                             buffers.ht_frame.count,
                             buffers.ht_frame.pool.free_blocks,
-                            buffers.queue_command.pending
+                            buffers.queue_fstream.pending
                             );
         fflush(stdout);
 
@@ -1091,9 +1039,6 @@ void request_disconnect(){
     } else {    
         fprintf(stderr, "Unexpected error for disconnect event: %lu\n", wait_connection_closed);
     }  
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        SetEvent(client.mstream[i].hevent_close_message_stream_thread);
-    }
     ht_clean(&buffers.ht_frame);
     reset_client_session();
     return;
@@ -1114,9 +1059,6 @@ void force_disconnect(){
     } else {    
         fprintf(stderr, "Unexpected error for disconnect event: %lu\n", wait_connection_closed);
     }
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
-        SetEvent(client.mstream[i].hevent_close_message_stream_thread);
-    }
     ht_clean(&buffers.ht_frame);
     reset_client_session();
     return;
@@ -1125,60 +1067,6 @@ void force_disconnect(){
 void timeout_disconnect(){
     return;
 }
-
-void transfer_file(const char *file_name){
-
-    int index;
-
-    if(client.session_status != CONNECTION_ESTABLISHED){
-        fprintf(stdout, "Not connected to server\n");
-        return;
-    }
-    ClientFileStream *fstream = NULL;
-    for(index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
-        fstream = &buffers.fstream[index];
-        if(fstream->fstream_busy){
-            continue;
-        }
-        fstream->fpath = file_name;
-        fprintf(stdout, "Free file stream %d opened...\n", index);
-        push_fstream(&buffers.queue_fstream, (intptr_t)fstream);
-        return;
-    }
-    if(index == MAX_CLIENT_ACTIVE_FSTREAMS){
-        fprintf(stderr, "Max fstream threads reached!\n");
-    }
-    return;
-
-}
-
-void send_text_message(){
-
-    int index;
-
-    if(client.session_status != CONNECTION_ESTABLISHED){
-        fprintf(stdout, "Not connected to server\n");
-        return;
-    }
-    
-    for(index = 0; index < MAX_CLIENT_MESSAGE_STREAMS; index++){
-        DWORD check_message_send = WaitForSingleObject(client.mstream[index].hevent_start_message_send, 0);
-        if (check_message_send == WAIT_OBJECT_0) {
-            // Event is signaled
-            continue;
-        } else if (check_message_send == WAIT_TIMEOUT) {
-            // Event is not signaled
-            SetEvent(client.mstream[index].hevent_start_message_send);
-            fprintf(stdout, "Message stream %d opened...\n", index);
-            return;
-        }
-    }
-    if(index == MAX_CLIENT_MESSAGE_STREAMS){
-        fprintf(stderr, "Max message threads reached!\n");
-    }
-    return;
-}
-
 
 
 static void clean_file_stream(ClientFileStream *fstream){
@@ -1197,39 +1085,175 @@ static void clean_file_stream(ClientFileStream *fstream){
     return;
 }
 
-static void clean_message_stream(MessageStream *mstream){
-    if(mstream->message_buffer != NULL){
-        free(mstream->message_buffer);
-        mstream->message_buffer = NULL;
-    }
-    if(mstream->fp != NULL){
-        fclose(mstream->fp);
-        mstream->fp = NULL;
-    }
+static void clean_message_stream(ClientMessageStream *mstream){
+    EnterCriticalSection(&mstream->lock);
+    memset(mstream->message_buffer, 0, MAX_MESSAGE_SIZE_BYTES);
     mstream->message_id = 0;
     mstream->message_len = 0;
-    mstream->text_file_size = 0;
     mstream->remaining_bytes_to_send = 0;
     mstream->throttle = FALSE;
-    ResetEvent(mstream->hevent_start_message_send);
+    mstream->mstream_busy = FALSE;
+    LeaveCriticalSection(&mstream->lock);
+    return;
+}
+
+
+
+void sent_text_file(){
+
+
+        char *fpath = "H:\\_test\\";
+        char *fname = "test_file.txt";
+        
+        char full_path[MAX_PATH] = {0};
+        snprintf(full_path, MAX_PATH, "%s%s", fpath, fname);
+        
+        FILE *fp = NULL;
+        
+        size_t text_file_size = get_file_size(full_path);
+      
+        uint32_t message_len = (uint32_t)text_file_size;
+
+        fp = fopen(full_path, "rb");
+        if(fp == NULL){
+            fprintf(stdout, "Error opening file!\n");
+            return;
+        }
+
+        char *message_buffer = malloc(message_len + 1);
+        if(message_buffer == NULL){
+            fprintf(stdout, "Error allocating memeory buffer for message!\n");
+            return;
+        }
+
+
+        size_t bytes_read = fread(message_buffer, 1, message_len, fp);
+        message_buffer[message_len] = '\0';
+        if (bytes_read == 0 && ferror(fp)) {
+            fprintf(stdout, "Error reading message file!\n");
+            return;
+        }
+        fprintf(stdout, "MESSAGE: %s:%d\n", message_buffer, strlen(message_buffer));
+        SendTextMessage(message_buffer, message_len);
+ 
     return;
 }
 
 
 
 
-void ClientCommand(const char *command_text, const char *arg){
+void SendTextMessage(const char *message_buffer, const size_t message_len) {
 
-    const char transfer[] = "transfer";
-    const char disconnect[] = "disconnect";
+    QueueCommandEntry entry;
 
+    if(!message_buffer){
+        fprintf(stderr, "ERROR: Message buffer invalid pointer.\n");
+        return;
+    }
+    if(message_len <= 0){
+        fprintf(stderr, "ERROR: Message length zero or less lenght.\n");
+        return;
+    }
+    if(message_len >= MAX_MESSAGE_SIZE_BYTES){
+        fprintf(stderr, "ERROR: Message size too long.\n");
+        return;
+    }
+    // if (strnlen(message_buffer, message_len) == message_len) {
+    //     fprintf(stderr, "ERROR: Message not null-terminated.\n");
+    //     return;
+    // }
 
-    if(strncmp(command_text, transfer, strlen(transfer)) == 0){
-        transfer_file(arg);
-    } else if (strncmp(command_text, disconnect, strlen(disconnect)) == 0){
-        request_connect();
-    } else if (strncmp(command_text, disconnect, strlen(disconnect)) == 0){
-        request_disconnect();        
+    snprintf(entry.command.send_message.text, sizeof("SendTextMessage"), "%s", "SendTextMessage");
+    entry.command.send_message.message_len = message_len;
+    entry.command.send_message.message_buffer = malloc(message_len + 1);
+    memcpy(entry.command.send_message.message_buffer, message_buffer, message_len);
+    entry.command.send_message.message_buffer[message_len] = '\0';
+
+    fprintf(stdout, "MESSAGE: %s:%d\n", entry.command.send_message.message_buffer, strlen(entry.command.send_message.message_buffer));
+
+    push_command(&buffers.queue_mstream, &entry);
+    return;
+}
+
+void SendFile(const char *fpath, const size_t fpath_len, const char *fname, const size_t fname_len) {
+
+    QueueCommandEntry entry;
+
+    if(!fpath){
+        fprintf(stderr, "ERROR: File path string invalid pointer.\n");
+        return;
+    }
+    if(fpath_len <= 0){
+        fprintf(stderr, "ERROR: File path string zero lenght.\n");
+        return;
+    }
+    if(fpath_len > MAX_PATH){
+        fprintf(stderr, "ERROR: File path string too long (max 260 chars).\n");
+        return;
+    }
+    if (strnlen(fpath, fpath_len) == fpath_len) {
+        fprintf(stderr, "ERROR: File path not null-terminated within %zu bytes.\n", fpath_len);
+        return;
     }
 
+    if(!fname){
+        fprintf(stderr, "ERROR: File name string invalid pointer.\n");
+        return;
+    }
+    if(fname_len <= 0){
+        fprintf(stderr, "ERROR: File name string zero lenght.\n");
+        return;
+    }
+    if(fname_len > MAX_PATH){
+        fprintf(stderr, "ERROR: File name string too long (max 260 chars).\n");
+        return;
+    }
+    if (strnlen(fname, fname_len) == fname_len) {
+        fprintf(stderr, "ERROR: File name not null-terminated within %zu bytes.\n", fname_len);
+        return;
+    }
+    if(fpath_len + fname_len > MAX_PATH){
+        fprintf(stderr, "ERROR: File path + name string too long (max 260 chars).\n");
+        return;
+    }
+
+    snprintf(entry.command.send_file.text, sizeof("sendfile"), "%s", "sendfile");
+    snprintf(entry.command.send_file.fpath, fpath_len, "%s", fpath);
+    snprintf(entry.command.send_file.fname, fname_len, "%s", fname);
+
+    push_command(&buffers.queue_fstream, &entry);
+    return;
 }
+void SendAllFilesInFolder(const char *fd_path){
+
+    WIN32_FIND_DATA findFileData;
+    HANDLE hFind;
+
+    char folderPath[MAX_PATH];
+    snprintf(folderPath, MAX_PATH, "%s*", fd_path);
+
+    hFind = FindFirstFile(folderPath, &findFileData);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        printf("Could not open folder.\n");
+        return;
+    } 
+
+    do {
+        // Skip directories
+        if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            // Combine folder path and file name
+            char fpath[MAX_PATH];
+            char fname[MAX_PATH];
+            snprintf(fpath, MAX_PATH, SRC_FPATH);
+            snprintf(fname, MAX_PATH, "%s", findFileData.cFileName);
+            SendFile(fpath, strlen(fpath) + 1, fname, strlen(fname) + 1);
+            printf("File: %s%s;\n", fpath, fname);
+        }
+    } while (FindNextFile(hFind, &findFileData) != 0);
+
+    FindClose(hFind);
+    return;
+
+}
+

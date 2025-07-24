@@ -10,22 +10,40 @@
 #include "include/hash.h"
 
 //--------------------------------------------------------------------------------------------------------------------------
-void init_ht_frame(HashTableFramePendingAck *ht){
-    for(int i = 0; i < HASH_SIZE_FRAME; i++){
-        ht->entry[i] = NULL;
+void init_ht_frame(HashTableFramePendingAck *ht, const uint32_t size){
+    if(size <= 0){
+        fprintf(stderr, "ERROR: Invalid size for hash table init\n");
+        return;
     }
-    InitializeCriticalSection(&ht->mutex); 
+    ht->size = size;
+    ht->entry = calloc(ht->size, sizeof(intptr_t));
+    if(!ht->entry){
+        fprintf(stderr, "ERROR: Unable to allocate memory for frame hash table\n");
+        return;
+    }
+    InitializeCriticalSection(&ht->mutex);
     ht->count = 0;
+    return;
 }
-uint64_t ht_get_hash_frame(const uint64_t seq_num){
-    return (seq_num % HASH_SIZE_FRAME);
+uint64_t ht_get_hash_frame(const uint64_t seq_num, const uint32_t size){
+    if(size <= 0){
+        fprintf(stderr, "ERROR: Invalid size for hash table get_seq_num()\n");
+        return RET_VAL_ERROR;
+    }
+    return (seq_num % size);
 }
 int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame){
-    
+    if(!ht->entry){
+        fprintf(stderr, "ERROR: Invalid hash table pointer for insert_frame()\n");
+        return RET_VAL_ERROR;
+    }
+    if(ht->size <= 0){
+        fprintf(stderr, "ERROR: Invalid size for hash table insert_frame()\n");
+        return RET_VAL_ERROR;
+    }
     EnterCriticalSection(&ht->mutex);
-    
     uint64_t seq_num = _ntohll(frame->header.seq_num);
-    uint64_t index = ht_get_hash_frame(seq_num);
+    uint64_t index = ht_get_hash_frame(seq_num, ht->size);
     //fprintf(stdout, "SeqNum: %llu inserted at index: %llu\n", seq_num, index);
     FramePendingAck *node = (FramePendingAck *)pool_alloc(&ht->pool);
     if(node == NULL){
@@ -33,7 +51,7 @@ int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame){
     }
     memcpy(&node->frame, frame, sizeof(UdpFrame));
     node->time = time(NULL);
-    node->counter = 1;
+    node->sent_count = 1;
 
     node->next = (FramePendingAck *)ht->entry[index];  // Insert at the head (linked list)
     ht->entry[index] = node;
@@ -42,10 +60,16 @@ int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame){
     return RET_VAL_SUCCESS;
 }
 void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num){
-   
+    if(!ht->entry){
+        fprintf(stderr, "ERROR: Invalid hash table pointer for remove_frame()\n");
+        return;
+    }
+    if(ht->size <= 0){
+        fprintf(stderr, "ERROR: Invalid size for hash table remove_frame()\n");
+        return;
+    }
     EnterCriticalSection(&ht->mutex);
-
-    uint64_t index = ht_get_hash_frame(seq_num);
+    uint64_t index = ht_get_hash_frame(seq_num, ht->size);
     //fprintf(stdout, "Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
     FramePendingAck *curr = ht->entry[index];
     FramePendingAck *prev = NULL;
@@ -73,11 +97,17 @@ void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num){
  
 }
 void ht_clean(HashTableFramePendingAck *ht){
-    
+    if(!ht->entry){
+        fprintf(stderr, "ERROR: Invalid hash table pointer for remove_frame()\n");
+        return;
+    }
+    if(ht->size <= 0){
+        fprintf(stderr, "ERROR: Invalid size for hash table remove_frame()\n");
+        return;
+    }
     EnterCriticalSection(&ht->mutex);
-    
     FramePendingAck *head = NULL;
-    for (int i = 0; i < HASH_SIZE_FRAME; i++) {
+    for (int i = 0; i < ht->size; i++) {
         if(ht->entry[i]){       
             FramePendingAck *ptr = ht->entry[i];
             while (ptr) {

@@ -10,18 +10,18 @@
 
 
 #ifndef RET_VAL_SUCCESS
-#define RET_VAL_SUCCESS 0
+#define RET_VAL_SUCCESS                     (0)
 #endif
 #ifndef RET_VAL_ERROR
-#define RET_VAL_ERROR -1
+#define RET_VAL_ERROR                       (-1)
 #endif
 
 #define SERVER_PORT                         (32768)               // Port the server listens on
 #define MAX_PAYLOAD_SIZE                    (1024)                // Max size of data within a frame payload (adjust as needed)
 #define FRAME_DELIMITER                     (0xAABB)              // A magic number to identify valid frames
 
-#define TEXT_FRAGMENT_SIZE                  ((uint32_t)(MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4))
-#define FILE_FRAGMENT_SIZE                  ((uint32_t)(MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t)))
+#define TEXT_FRAGMENT_SIZE                  (MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4)
+#define FILE_FRAGMENT_SIZE                  (MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t))
 
 #define MAX_NAME_SIZE                       (255)                 // Maximum size for client/server names
 
@@ -35,8 +35,11 @@
 #define WSARECV_TIMEOUT_MS                  (100)         // Timeout in milliseconds in the receive frame thread
 #define GETQCOMPL_TIMEOUT                   (258L)
 
-#define TEST_FILE_PATH                      "H:\\_test\\test_file.txt"
-#define SAVE_FILE_PATH                      "H:\\_test\\copied\\"
+//#define TEST_FILE_PATH                      "D:\\_test\\test_file.txt"
+//#define SAVE_FILE_PATH                      "D:\\_test\\copied\\"
+
+#define SRC_FPATH                           "H:\\_test\\_src\\"
+#define DEST_FPATH                          "H:\\_test\\_dest\\"
 
 
 // --- Frame Types ---
@@ -113,7 +116,7 @@ typedef struct {
 typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t file_size;                                     // Total size of the file being transferred
-    char     filename[MAX_NAME_SIZE];                           // Max filename length
+    char     filename[MAX_PATH];                           // Max filename length
 }FileMetadataPayload;
 
 typedef struct {

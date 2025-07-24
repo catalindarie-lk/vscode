@@ -128,7 +128,7 @@ static int msg_init_stream(MessageStream *mstream, const uint32_t session_id, co
     memset(mstream->buffer, 0, message_len);
 
     // Constructs a filename for storing the received message, incorporating session and message IDs for uniqueness.
-    snprintf(mstream->fnm, MAX_NAME_SIZE, SAVE_FILE_PATH"xmessage_SID_%d_ID%d.txt", session_id, message_id);
+    snprintf(mstream->fnm, MAX_PATH, DEST_FPATH"xmessage_SID_%d_ID%d.txt", session_id, message_id);
 
     LeaveCriticalSection(&mstream->lock);
     return RET_VAL_SUCCESS;

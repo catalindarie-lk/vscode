@@ -35,12 +35,12 @@ HANDLE hthread_process_frame;
 HANDLE hthread_ack_frame;
 HANDLE hthread_send_ack;
 HANDLE hthread_client_timeout;
-HANDLE hthread_file_stream[MAX_ACTIVE_FSTREAMS];
+HANDLE hthread_file_stream[MAX_SERVER_ACTIVE_FSTREAMS];
 HANDLE hthread_server_command;
 
 //ClientMap client_map;
 
-const char *server_ip = "10.10.10.1"; // IPv4 example
+const char *server_ip = "10.10.10.1";
 
 // Client management functions
 static Client* find_client(ClientList *client_list, const uint32_t session_id);
@@ -151,12 +151,12 @@ static int init_server_config(){
 }
 static int init_server_buffers(){
 
-    init_queue_frame(&buffers.queue_frame);
-    init_queue_frame(&buffers.queue_priority_frame);
-    init_queue_ack(&buffers.fqueue_ack);
-    init_queue_ack(&buffers.mqueue_ack);
-    init_queue_ack(&buffers.queue_priority_ack);
-    init_queue_fstream(&buffers.queue_fstream, MAX_ACTIVE_FSTREAMS);
+    init_queue_frame(&buffers.queue_frame, SERVER_SIZE_QUEUE_FRAME);
+    init_queue_frame(&buffers.queue_priority_frame, SERVER_SIZE_QUEUE_PRIORITY_FRAME);
+    init_queue_ack(&buffers.fqueue_ack, SERVER_SIZE_FQUEUE_ACK);
+    init_queue_ack(&buffers.mqueue_ack, SERVER_SIZE_MQUEUE_ACK);
+    init_queue_ack(&buffers.queue_priority_ack, SERVER_SIZE_QUEUE_PRIORITY_ACK);
+    init_queue_fstream(&buffers.queue_fstream, MAX_SERVER_ACTIVE_FSTREAMS);
     init_ht_id(&buffers.ht_fid);
     init_ht_id(&buffers.ht_mid);
     pool_init(&buffers.pool_file_chunk, BLOCK_SIZE_CHUNK, BLOCK_COUNT_CHUNK);
@@ -169,7 +169,7 @@ static int init_server_buffers(){
     }
     InitializeCriticalSection(&client_list.lock);
 
-    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
+    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         InitializeCriticalSection(&buffers.fstream[i].lock);
     }
 
@@ -204,7 +204,7 @@ static int start_threads() {
         fprintf(stderr, "Failed to create client timeout thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
-    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
+    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         hthread_file_stream[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_stream, NULL, 0, NULL);
         if (hthread_file_stream[i] == NULL) {
             fprintf(stderr, "Failed to file stream thread. Error: %d\n", GetLastError());
@@ -1100,7 +1100,7 @@ void cleanup_client(Client *client, ServerBuffers* buffers){
     }
     EnterCriticalSection(&client->lock);
 
-    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
+    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &buffers->fstream[i];
         if(fstream->sid ==  client->sid){
             close_file_stream(fstream, buffers);
@@ -1166,7 +1166,7 @@ BOOL validate_file_hash(ServerFileStream *fstream){
 }
 // Check for any open file streams across all clients.
 void check_open_file_stream(ServerBuffers *buffers){
-    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
+    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         if(buffers->fstream[i].fstream_busy == TRUE){
             fprintf(stdout, "File stream still open: %d\n", i);
         }

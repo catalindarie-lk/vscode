@@ -20,12 +20,12 @@
 
 
 ServerFileStream *get_free_file_stream(ServerBuffers *buffers){
-    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
+    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &buffers->fstream[i];
         if(!fstream->fstream_busy){
-            // EnterCriticalSection(&fstream->lock);
-            // fstream->fstream_busy = TRUE;
-            // LeaveCriticalSection(&fstream->lock);
+            EnterCriticalSection(&fstream->lock);
+            fstream->fstream_busy = TRUE;
+            LeaveCriticalSection(&fstream->lock);
             return fstream;
         }
     }
@@ -33,7 +33,7 @@ ServerFileStream *get_free_file_stream(ServerBuffers *buffers){
 }
 
 ServerFileStream *search_file_stream(ServerBuffers *buffers, const uint32_t session_id, const uint32_t file_id){
-    for(int i = 0; i < MAX_ACTIVE_FSTREAMS; i++){
+    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &buffers->fstream[i];
         if(fstream->fstream_busy == TRUE && fstream->sid == session_id && fstream->fid == file_id){
             return fstream;
@@ -97,18 +97,21 @@ static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragm
     return;
 
 }
-static int init_file_stream(ServerFileStream *fstream, const uint32_t session_id, const uint32_t file_id, const uint64_t file_size, ServerBuffers* buffers) {
+static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBuffers* buffers) {
 
-    // Acquire stream channel lock
     EnterCriticalSection(&fstream->lock);
 
-    // Initialize stream channel context data
-    //close_file_stream(fstream, buffers);
-    fstream->fstream_busy = TRUE;
+    uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
+    fstream->sid = _ntohl(frame->header.session_id);
+    fstream->fid = _ntohl(frame->payload.file_metadata.file_id);
+    fstream->fsize = _ntohll(frame->payload.file_metadata.file_size);
+    memcpy(fstream->fname, frame->payload.file_metadata.filename, MAX_PATH);
+
     fstream->fstream_err = STREAM_ERR_NONE;
-    fstream->sid = session_id;
-    fstream->fid = file_id;
-    fstream->fsize = file_size;
+
+    // fstream->sid = session_id;
+    // fstream->fid = file_id;
+    // fstream->fsize = file_size;
 
     // Calculate total fragments
     fstream->fragment_count = (fstream->fsize + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
@@ -139,7 +142,6 @@ static int init_file_stream(ServerFileStream *fstream, const uint32_t session_id
         fprintf(stderr, "Memory allocation fail for file bitmap mem!!!\n");
         goto exit_error;
     }
-    //memset(fstream->bitmap, 0, fstream->bitmap_entries_count * sizeof(uint64_t));
 
     // Allocate memory for flags
     fstream->flag = calloc(fstream->bitmap_entries_count, sizeof(uint8_t));
@@ -148,7 +150,6 @@ static int init_file_stream(ServerFileStream *fstream, const uint32_t session_id
         fprintf(stderr, "Memory allocation fail for file entry flag!!!\n");
         goto exit_error;
     }
-    //memset(fstream->flag, CHUNK_NONE, fstream->bitmap_entries_count * sizeof(uint8_t));
 
     // Allocate memory for chunk memory block pointers
     fstream->pool_block_file_chunk = calloc(fstream->bitmap_entries_count, sizeof(char*));
@@ -157,13 +158,26 @@ static int init_file_stream(ServerFileStream *fstream, const uint32_t session_id
         fprintf(stderr, "Memory allocation fail for chunk mem blocks!!!\n");
         goto exit_error;
     }
-    //memset(fstream->pool_block_file_chunk, 0, fstream->bitmap_entries_count * sizeof(char*));
 
-    // Construct file name and open file
-    snprintf(fstream->fname, MAX_NAME_SIZE, SAVE_FILE_PATH"xfile_SID_%d_ID_%d.txt", session_id, file_id);
+    char folderName[MAX_PATH];
+    snprintf(folderName, MAX_PATH, DEST_FPATH"SesionID_%d\\", fstream->sid);
 
-    //creating output file
-    fstream->fp = fopen(fstream->fname, "wb+"); // "wb+" allows writing and reading, creates or truncates
+    if (CreateDirectory(folderName, NULL)) {
+        printf("Folder created successfully.\n");
+    } else {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS) {
+            printf("Folder already exists.\n");
+        } else {
+            printf("Failed to create folder. Error code: %lu\n", error);
+            goto exit_error;
+        }
+    }
+    snprintf(fstream->fpath, MAX_PATH, "%s%s", folderName, fstream->fname);
+    fprintf(stdout, "FILE COMPLETE PATH: %s", fstream->fpath);
+
+    // creating output file
+    fstream->fp = fopen(fstream->fpath, "wb+"); // "wb+" allows writing and reading, creates or truncates
     if(fstream->fp == NULL){
         fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fname, errno);
         fstream->fstream_err = STREAM_ERR_FP;
@@ -225,7 +239,7 @@ int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers
 
     memcpy(&fstream->client_addr, &client->client_addr, sizeof(struct sockaddr_in));
 
-    if(init_file_stream(fstream, recv_session_id, recv_file_id, recv_file_size, buffers) == RET_VAL_ERROR){
+    if(init_file_stream(fstream, frame, buffers) == RET_VAL_ERROR){
         fprintf(stderr, "Error initializing file stream\n");
         op_code = ERR_STREAM_INIT;
         goto exit_err;

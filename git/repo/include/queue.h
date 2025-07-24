@@ -13,12 +13,6 @@
 #define RET_VAL_ERROR -1
 #endif
 
-
-#define FRAME_QUEUE_SIZE                        32768
-#define QUEUE_ACK_SIZE                          131072     // Queue buffer size
-#define QUEUE_COMMAND_SIZE                      1024
-
-
 //----------------------------------------------------------------------------------------------------------------
 typedef struct{
     UdpFrame frame; // The UDP frame to be sent
@@ -27,7 +21,8 @@ typedef struct{
 }QueueFrameEntry;
 
 typedef struct {
-    QueueFrameEntry frame_entry[FRAME_QUEUE_SIZE];
+    uint32_t size; 
+    QueueFrameEntry *entry;
     uint32_t head;          
     uint32_t tail;
     uint32_t pending;
@@ -35,9 +30,10 @@ typedef struct {
     HANDLE semaphore;
 }QueueFrame;
 
+void init_queue_frame(QueueFrame *queue, const uint32_t size);
 int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
 int pop_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
-void init_queue_frame(QueueFrame *queue);
+
 //----------------------------------------------------------------------------------------------------------------
 typedef struct{
     uint64_t seq;       // The sequence number of the frame that require ack/nak
@@ -48,7 +44,8 @@ typedef struct{
 }QueueAckEntry;
 
 typedef struct {
-    QueueAckEntry entry[QUEUE_ACK_SIZE];
+    uint32_t size;
+    QueueAckEntry *entry;
     uint32_t head;          
     uint32_t tail;
     uint32_t pending;
@@ -59,17 +56,37 @@ typedef struct {
 
 void new_ack_entry(QueueAckEntry *entry, const uint64_t seq, const uint32_t sid, 
                         const uint8_t op_code, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
+void init_queue_ack(QueueAck *queue, const uint32_t size);
 int push_ack(QueueAck *queue, QueueAckEntry *entry);
 int pop_ack(QueueAck *queue, QueueAckEntry *entry);
-void init_queue_ack(QueueAck *queue);
 
 //----------------------------------------------------------------------------------------------------------------
+#define MAX_ENTRY_SIZE (MAX_PATH + MAX_PATH + 32)
+#pragma pack(push, 1)
 typedef struct{
-    char command[255];
-}QueueCommandEntry;
+    char text[32];
+    char fpath[MAX_PATH];
+    char fname[MAX_PATH];
+}QueueCommandEntrySendFile;
 
 typedef struct{
-    QueueCommandEntry entry[QUEUE_COMMAND_SIZE];
+    char text[32];
+    char *message_buffer;
+    uint32_t message_len;
+}QueueCommandEntrySendMessage;
+
+typedef struct{
+    union{
+        QueueCommandEntrySendFile send_file;
+        QueueCommandEntrySendMessage send_message;
+        uint8_t max_bytes[MAX_ENTRY_SIZE];
+    } command;
+}QueueCommandEntry;
+#pragma pack(pop)
+
+typedef struct{
+    uint32_t size;
+    QueueCommandEntry *entry;
     uint32_t head;
     uint32_t tail;
     uint32_t pending;
@@ -78,7 +95,7 @@ typedef struct{
     HANDLE cleared;
 }QueueCommand;
 
-void init_queue_command(QueueCommand *queue);
+void init_queue_command(QueueCommand *queue, const uint32_t size);
 void clean_queue_command(QueueCommand *queue);
 int push_command(QueueCommand *queue, QueueCommandEntry *entry);
 int pop_command(QueueCommand *queue, QueueCommandEntry *entry);

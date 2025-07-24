@@ -4,9 +4,9 @@
 #include <stdio.h>
 #include "include/fileio.h"
 
-long long get_file_size(const char *filepath){
+long long get_file_size(const char *_FileName){
 
-    FILE *fp = fopen(filepath, "rb"); // Open in binary mode
+    FILE *fp = fopen(_FileName, "rb"); // Open in binary mode
     if (fp == NULL) {
         fprintf(stderr, "Error: Could not open file!\n");
         return RET_VAL_ERROR;
