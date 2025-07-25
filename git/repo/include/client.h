@@ -49,11 +49,11 @@
 #define CLIENT_SIZE_QUEUE_COMMAND_FSTREAM       (256)       // Nr of send file commands that can be queued
 #define CLIENT_SIZE_QUEUE_COMMAND_MSTREAM       (256)       // Nr of send file commands that can be queued
 
-#define CLIENT_SIZE_QUEUE_FRAME                 (8192 + (512 * MAX_CLIENT_ACTIVE_FSTREAMS))
+#define CLIENT_SIZE_QUEUE_FRAME                 (4096 + (512 * MAX_CLIENT_ACTIVE_FSTREAMS))
 #define CLIENT_SIZE_QUEUE_PRIORITY_FRAME        (CLIENT_SIZE_QUEUE_FRAME / 4)
 #define HASH_SIZE_FRAME                         (CLIENT_SIZE_QUEUE_FRAME + CLIENT_SIZE_QUEUE_PRIORITY_FRAME)
-#define HASH_FRAME_HIGH_WATERMARK               (HASH_SIZE_FRAME * 0.75)
-#define HASH_FRAME_LOW_WATERMARK                (HASH_SIZE_FRAME * 0.25)
+#define HASH_FRAME_HIGH_WATERMARK               (HASH_SIZE_FRAME * 0.2)
+#define HASH_FRAME_LOW_WATERMARK                (HASH_SIZE_FRAME * 0.15)
 #define BLOCK_SIZE_FRAME                        ((uint64_t)(sizeof(FramePendingAck)))
 #define BLOCK_COUNT_FRAME                       ((uint64_t)(HASH_SIZE_FRAME))
 
@@ -96,6 +96,7 @@ typedef struct{
 typedef struct{
     
     char fpath[MAX_PATH];
+    char rpath[MAX_PATH];
     char fname[MAX_PATH];
 
     long long fsize;
@@ -167,6 +168,11 @@ typedef struct {
     ClientMessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
     QueueCommand queue_mstream;
 }ClientBuffers;
+
+
+extern ClientData client;
+extern ClientThreads threads;
+extern ClientBuffers buffers;
 
 static void clean_message_stream(ClientMessageStream *mstream);
 

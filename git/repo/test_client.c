@@ -24,6 +24,7 @@
 #include "include/queue.h"              // For queue management
 #include "include/bitmap.h"             // For bitmap management
 #include "include/hash.h"               // For hash table management
+#include "include/client_api.h"
 
 ClientData client;
 ClientThreads threads;
@@ -49,10 +50,9 @@ DWORD WINAPI thread_mstream_function(LPVOID lpParam);
 DWORD WINAPI thread_proc_client_command(LPVOID lpParam);
 
 static void clean_file_stream(ClientFileStream *fstream);
-
-void SendFile(const char *fpath, const size_t fpath_len, const char *fname, const size_t fname_len);
-void SendAllFilesInFolder(const char *fd_path);
 void SendTextMessage(const char *message_buffer, const size_t message_len);
+
+
 
 void sent_text_file();
 
@@ -380,7 +380,7 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
 
         } // end of while(1)
     } // end of while(client.client_status == STATUS_READY)
-    
+
     fprintf(stdout,"receive frame thread closed...\n");
     _endthreadex(0);    
     return 0;
@@ -610,7 +610,7 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
     uint32_t frame_fragment_size;
     uint64_t frame_fragment_offset;
    
-    DWORD wait_metadata_response;
+    // DWORD wait_metadata_response;
 
     QueueCommandEntry entry;
 
@@ -627,6 +627,7 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
                 EnterCriticalSection(&fstream->lock);
                 fstream->fstream_busy = TRUE;
                 memcpy(fstream->fpath, &entry.command.send_file.fpath, MAX_PATH);
+                memcpy(fstream->rpath, &entry.command.send_file.rpath, MAX_PATH);
                 memcpy(fstream->fname, &entry.command.send_file.fname, MAX_PATH);
                 // fprintf(stdout, "Free file stream %d opened...\n", index);
                 break;
@@ -645,7 +646,7 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
         char _FileName[MAX_PATH] = {0};
         snprintf(_FileName, MAX_PATH, "%s%s", fstream->fpath, fstream->fname);
 
-        fstream->fsize = get_file_size(_FileName);       
+        fstream->fsize = get_file_size(_FileName);
         if(fstream->fsize == RET_VAL_ERROR){
             goto clean;
         }
@@ -663,7 +664,8 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
         int metadata_bytes_sent = send_file_metadata(fstream->pending_metadata_seq_num, 
                                                         client.sid, 
                                                         fstream->fid, 
-                                                        fstream->fsize, 
+                                                        fstream->fsize,
+                                                        fstream->rpath, 
                                                         fstream->fname, 
                                                         FILE_FRAGMENT_SIZE, 
                                                         client.socket, 
@@ -878,6 +880,7 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
     char cmd;
     int index;
     int retry_count;
+    char _path[MAX_PATH] = {0};
      
     while(client.client_status == STATUS_READY){
 
@@ -902,12 +905,34 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                 goto exit_thread;
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
+            case 'h':
+            case 'H':
+                if(client.session_status != CONNECTION_ESTABLISHED){
+                    break;
+                }
+                memset(_path, 0, MAX_PATH);
+                snprintf(_path, MAX_PATH, "%s%s", SRC_FPATH, "test_file.txt");
+                SendSingleFile(_path);
+                break;
+            //--------------------------------------------------------------------------------------------------------------------------
             case 'f':
             case 'F':
                 if(client.session_status != CONNECTION_ESTABLISHED){
                     break;
                 }
-                SendAllFilesInFolder(SRC_FPATH);
+                memset(_path, 0, MAX_PATH);
+                snprintf(_path, MAX_PATH, "%s", SRC_FPATH);
+                SendAllFilesInFolder(_path);
+                break;
+            //--------------------------------------------------------------------------------------------------------------------------
+            case 'g':
+            case 'G':
+                if(client.session_status != CONNECTION_ESTABLISHED){
+                    break;
+                }
+                memset(_path, 0, MAX_PATH);
+                snprintf(_path, MAX_PATH, "%s", SRC_FPATH);
+                SendAllFilesInFolderAndSubfolders(_path);
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
             case 't':
@@ -1053,6 +1078,9 @@ static void clean_file_stream(ClientFileStream *fstream){
     fstream->pending_bytes = 0;
     fstream->throttle = FALSE;
     fstream->fstream_busy = FALSE;
+    memset(&fstream->fpath, 0, MAX_PATH);
+    memset(&fstream->rpath, 0, MAX_PATH);
+    memset(&fstream->fname, 0, MAX_PATH);
     LeaveCriticalSection(&fstream->lock);
     return;
 }
@@ -1111,9 +1139,6 @@ void sent_text_file(){
     return;
 }
 
-
-
-
 void SendTextMessage(const char *message_buffer, const size_t message_len) {
 
     QueueCommandEntry entry;
@@ -1141,85 +1166,6 @@ void SendTextMessage(const char *message_buffer, const size_t message_len) {
     return;
 }
 
-void SendFile(const char *fpath, const size_t fpath_len, const char *fname, const size_t fname_len) {
 
-    QueueCommandEntry entry;
 
-    if(!fpath){
-        fprintf(stderr, "ERROR: File path string invalid pointer.\n");
-        return;
-    }
-    if(fpath_len <= 0){
-        fprintf(stderr, "ERROR: File path string zero lenght.\n");
-        return;
-    }
-    if(fpath_len > MAX_PATH){
-        fprintf(stderr, "ERROR: File path string too long (max 260 chars).\n");
-        return;
-    }
-    if (strnlen(fpath, fpath_len) == fpath_len) {
-        fprintf(stderr, "ERROR: File path not null-terminated within %zu bytes.\n", fpath_len);
-        return;
-    }
-
-    if(!fname){
-        fprintf(stderr, "ERROR: File name string invalid pointer.\n");
-        return;
-    }
-    if(fname_len <= 0){
-        fprintf(stderr, "ERROR: File name string zero lenght.\n");
-        return;
-    }
-    if(fname_len > MAX_PATH){
-        fprintf(stderr, "ERROR: File name string too long (max 260 chars).\n");
-        return;
-    }
-    if (strnlen(fname, fname_len) == fname_len) {
-        fprintf(stderr, "ERROR: File name not null-terminated within %zu bytes.\n", fname_len);
-        return;
-    }
-    if(fpath_len + fname_len > MAX_PATH){
-        fprintf(stderr, "ERROR: File path + name string too long (max 260 chars).\n");
-        return;
-    }
-
-    snprintf(entry.command.send_file.text, sizeof("sendfile"), "%s", "sendfile");
-    snprintf(entry.command.send_file.fpath, fpath_len, "%s", fpath);
-    snprintf(entry.command.send_file.fname, fname_len, "%s", fname);
-
-    push_command(&buffers.queue_fstream, &entry);
-    return;
-}
-void SendAllFilesInFolder(const char *fd_path){
-
-    WIN32_FIND_DATA findFileData;
-    HANDLE hFind;
-
-    char folderPath[MAX_PATH];
-    snprintf(folderPath, MAX_PATH, "%s*", fd_path);
-
-    hFind = FindFirstFile(folderPath, &findFileData);
-
-    if (hFind == INVALID_HANDLE_VALUE) {
-        printf("Could not open folder.\n");
-        return;
-    } 
-
-    do {
-        // Skip directories
-        if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            // Combine folder path and file name
-            char fpath[MAX_PATH];
-            char fname[MAX_PATH];
-            snprintf(fpath, MAX_PATH, SRC_FPATH);
-            snprintf(fname, MAX_PATH, "%s", findFileData.cFileName);
-            SendFile(fpath, strlen(fpath) + 1, fname, strlen(fname) + 1);
-            printf("Send File: %s%s;\n", fpath, fname);
-        }
-    } while (FindNextFile(hFind, &findFileData) != 0);
-
-    FindClose(hFind);
-    return;
-
-}
 

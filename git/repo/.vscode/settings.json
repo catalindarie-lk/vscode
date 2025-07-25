@@ -31,6 +31,7 @@
         "file_handler.h": "c",
         "ws2tcpip.h": "c",
         "client_frames.h": "c",
-        "client.h": "c"
+        "client.h": "c",
+        "process.h": "c"
     }
 }

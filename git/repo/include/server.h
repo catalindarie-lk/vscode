@@ -166,7 +166,11 @@ typedef struct{
     uint8_t received_sha256[32];        // Buffer for sha256 received from the client
     uint8_t calculated_sha256[32];      // Buffer for sha256 calculated by the server
 
-    char fname[MAX_PATH];          // Array to store the file name+path.
+    char rpath[MAX_PATH];
+    uint32_t rpath_len;
+    char fname[MAX_PATH];               // Array to store the file name+path.
+    uint32_t fname_len;
+
     char fpath[MAX_PATH];
     FILE *fp;                           // File pointer for the file being written to disk.
 

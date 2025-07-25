@@ -5,6 +5,7 @@
 #include <ws2tcpip.h>
 #include "include/client.h"
 
+size_t s_strnlen(const char *s, size_t maxlen);
 
 int send_connect_request(const uint64_t seq_num, 
                     const uint32_t session_id, 
@@ -25,7 +26,8 @@ int send_file_metadata(const uint64_t seq_num,
                             const uint32_t session_id, 
                             const uint32_t file_id, 
                             const uint64_t file_size,
-                            const char *file_name,
+                            const char *rpath,
+                            const char *fname,
                             const uint32_t file_fragment_size, 
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr,

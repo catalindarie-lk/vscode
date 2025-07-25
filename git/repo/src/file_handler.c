@@ -97,6 +97,254 @@ static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragm
     return;
 
 }
+
+
+
+
+// Original recursive directory creation logic (slightly refined for this context)
+// This function takes a FULL, ABSOLUTE path and ensures all its parent directories exist.
+static bool CreateAbsoluteFolderRecursive(const char *absolutePathToCreate) {
+    char tempPath[MAX_PATH];
+    char *p;
+    DWORD dwError;
+
+    // Make a copy of the path as strtok_s modifies the string.
+    // Ensure it's safe and null-terminated.
+    if (strncpy_s(tempPath, sizeof(tempPath), absolutePathToCreate, sizeof(tempPath) - 1) != 0) {
+        fprintf(stderr, "Error: Failed to copy path '%s' for recursive creation.\n", absolutePathToCreate);
+        return FALSE;
+    }
+    tempPath[sizeof(tempPath) - 1] = '\0'; // Ensure null termination
+
+    // Handle potential trailing backslash for consistent tokenizing, but only if not root (e.g., "C:\")
+    size_t path_len = strlen(tempPath);
+    if (path_len > 0 && (tempPath[path_len - 1] == '\\' || tempPath[path_len - 1] == '/')) {
+        // If it's just "C:\" or "C:/", don't remove the backslash.
+        // Otherwise, remove it.
+        if (path_len > 3 || (path_len == 3 && tempPath[1] != ':')) { // Heuristic for non-root paths like "C:\"
+             tempPath[path_len - 1] = '\0';
+        }
+    }
+
+    // Iterate through the path components
+    char currentPath[MAX_PATH] = {0};
+    char *next_token;
+    char *token = strtok_s(tempPath, "\\/", &next_token); // Use both \ and / as delimiters
+
+    // Special handling for drive letters (e.g., "C:", "D:")
+    if (token != NULL && strlen(token) == 2 && token[1] == ':') {
+        // This is a drive letter, copy it as the first part of currentPath
+        if (strcpy_s(currentPath, sizeof(currentPath), token) != 0) {
+            fprintf(stderr, "Error: Failed to copy drive letter '%s'.\n", token);
+            return FALSE;
+        }
+        token = strtok_s(NULL, "\\/", &next_token); // Move to the next token
+    } else if (token != NULL && (token[0] == '\\' || token[0] == '/') && strlen(token) == 1) {
+        // This handles UNC paths like "\\server\share" by ignoring initial empty token
+        // if path started with \\ or //, but only if it's not a single backslash
+        // for relative path from current directory.
+        // For simplicity with drive letters, we assume absolute paths here for this logic.
+    }
+
+
+    while (token != NULL) {
+        // Append current token to currentPath with a backslash
+        if (strlen(currentPath) > 0) { // Add backslash if not the very first component
+            if (strcat_s(currentPath, sizeof(currentPath), "\\") != 0) {
+                fprintf(stderr, "Error: Failed to append backslash to '%s'.\n", currentPath);
+                return FALSE;
+            }
+        }
+        if (strcat_s(currentPath, sizeof(currentPath), token) != 0) {
+            fprintf(stderr, "Error: Failed to append token '%s' to '%s'.\n", token, currentPath);
+            return FALSE;
+        }
+
+        // Try to create the directory
+        if (!CreateDirectoryA(currentPath, NULL)) {
+            dwError = GetLastError();
+            if (dwError != ERROR_ALREADY_EXISTS) {
+                fprintf(stderr, "Failed to create directory '%s'. Error code: %lu\n", currentPath, dwError);
+                return FALSE;
+            }
+        }
+        token = strtok_s(NULL, "\\/", &next_token);
+    }
+    // printf("Folder structure '%s' created or already exists.\n", absolutePathToCreate);
+    return TRUE;
+}
+
+
+// New wrapper function to create a relative path within a given root
+// rootDirectory: The full absolute path of the starting root directory (e.g., "C:\MyLogs")
+// relativePath: The path to create relative to the root (e.g., "AppErrors\2025\July")
+bool CreateRelativeFolderRecursive(const char *rootDirectory, const char *relativePath) {
+    char fullPathToCreate[MAX_PATH];
+    int result;
+
+    if (rootDirectory == NULL || relativePath == NULL) {
+        fprintf(stderr, "Error: rootDirectory or relativePath is NULL.\n");
+        return FALSE;
+    }
+
+    // Determine if rootDirectory already has a trailing backslash
+    size_t root_len = strlen(rootDirectory);
+    if (root_len == 0) {
+        fprintf(stderr, "Error: rootDirectory is empty.\n");
+        return FALSE;
+    }
+
+    // Construct the full absolute path
+    if (root_len + strlen(relativePath) + 2 > MAX_PATH) { // +1 for potential backslash, +1 for null terminator
+        fprintf(stderr, "Error: Combined path '%s\\%s' exceeds MAX_PATH (%d).\n", rootDirectory, relativePath, MAX_PATH);
+        return FALSE;
+    }
+
+    // Copy root directory
+    result = strcpy_s(fullPathToCreate, sizeof(fullPathToCreate), rootDirectory);
+    if (result != 0) {
+        fprintf(stderr, "Error: Failed to copy rootDirectory '%s'. errno: %d\n", rootDirectory, errno);
+        return FALSE;
+    }
+
+    // Append a backslash if rootDirectory doesn't already have one and it's not a bare drive letter (e.g., "C:")
+    if (fullPathToCreate[root_len - 1] != '\\' && fullPathToCreate[root_len - 1] != '/') {
+         // Special handling for drive roots like "C:" - ensure it becomes "C:\"
+        if (!(root_len == 2 && fullPathToCreate[1] == ':')) {
+            result = strcat_s(fullPathToCreate, sizeof(fullPathToCreate), "\\");
+            if (result != 0) {
+                fprintf(stderr, "Error: Failed to append backslash to rootDirectory. errno: %d\n", errno);
+                return FALSE;
+            }
+        }
+    }
+
+    // Append relative path
+    result = strcat_s(fullPathToCreate, sizeof(fullPathToCreate), relativePath);
+    if (result != 0) {
+        fprintf(stderr, "Error: Failed to append relativePath '%s'. errno: %d\n", relativePath, errno);
+        return FALSE;
+    }
+
+    // Now call the core recursive creation function with the combined path
+    //printf("Attempting to create full path: '%s'\n", fullPathToCreate);
+    return CreateAbsoluteFolderRecursive(fullPathToCreate);
+}
+
+
+
+/**
+ * @brief Normalizes a Windows-style file path by:
+ * 1. Replacing consecutive backslashes with a single one.
+ * 2. Handling trailing backslashes for consistency (adds one for drive roots,
+ * removes for others unless specified).
+ * 3. Handles UNC paths (\\server\share) correctly by preserving leading \\.
+ *
+ * @param path The input path string (will be modified in place).
+ * @param add_trailing_backslash If true, ensures a single trailing backslash for directories
+ * (unless it's a file path). If false, removes trailing backslash
+ * unless it's a drive root (e.g., "C:\").
+ * @return True on success, False if the path is too long after normalization or input is invalid.
+ */
+bool normalize_paths(char *path, bool add_trailing_backslash) {
+    if (path == NULL || strlen(path) == 0) {
+        // Empty or NULL path is considered an invalid input for normalization
+        fprintf(stderr, "Error: Input path is NULL or empty.\n");
+        return false;
+    }
+
+    char normalized_path[MAX_PATH];
+    int write_idx = 0;
+    int read_idx = 0;
+    bool is_unc_path = false;
+
+    // Handle leading double backslashes for UNC paths (e.g., \\server\share)
+    if (path[0] == '\\' && path[1] == '\\') {
+        normalized_path[write_idx++] = '\\';
+        normalized_path[write_idx++] = '\\';
+        read_idx = 2;
+        is_unc_path = true;
+    } else if (path[0] == '/' && path[1] == '/') { // Also support forward slashes for UNC-like paths
+        normalized_path[write_idx++] = '\\'; // Normalize to backslash for Windows
+        normalized_path[write_idx++] = '\\';
+        read_idx = 2;
+        is_unc_path = true;
+    }
+
+    // Handle drive letter root (e.g., "C:")
+    // This is distinct from UNC paths or relative paths
+    if (!is_unc_path && strlen(path) >= 2 && path[1] == ':' &&
+        ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'))) {
+        normalized_path[write_idx++] = path[0];
+        normalized_path[write_idx++] = ':';
+        // If there's no backslash after the drive letter, add one to read_idx if needed
+        if (strlen(path) > 2 && (path[2] == '\\' || path[2] == '/')) {
+            read_idx = 3; // Skip C:\ or C:/
+        } else {
+            // Path is just "C:", we'll add the '\' later if needed
+            read_idx = 2;
+        }
+    }
+
+
+    // Process the rest of the path
+    bool last_char_was_separator = false;
+    for (; read_idx < strlen(path); ++read_idx) {
+        if (path[read_idx] == '\\' || path[read_idx] == '/') {
+            if (!last_char_was_separator) { // Only add one separator if multiple found
+                if (write_idx >= MAX_PATH - 1) { fprintf(stderr, "Error: Path buffer overflow during normalization.\n"); return false; }
+                normalized_path[write_idx++] = '\\'; // Normalize all to backslashes
+            }
+            last_char_was_separator = true;
+        } else {
+            if (write_idx >= MAX_PATH - 1) { fprintf(stderr, "Error: Path buffer overflow during normalization.\n"); return false; }
+            normalized_path[write_idx++] = path[read_idx];
+            last_char_was_separator = false;
+        }
+    }
+
+    // Handle trailing backslashes
+    if (write_idx > 0) {
+        // If the path ends with a separator and it's not a bare drive root (e.g., "C:\")
+        // and it's not a bare UNC root (e.g., "\\server\share")
+        bool is_drive_root = (write_idx == 3 && normalized_path[1] == ':' && normalized_path[2] == '\\');
+        bool is_unc_root = (is_unc_path && write_idx == 2); // after \\
+
+        // Remove trailing backslash if not desired and not a drive root or UNC root
+        if (!add_trailing_backslash && normalized_path[write_idx - 1] == '\\' && !is_drive_root && !is_unc_root) {
+            write_idx--;
+        }
+        // Add trailing backslash if desired and not already present, and not ending with a drive letter (e.g., "C:")
+        else if (add_trailing_backslash && normalized_path[write_idx - 1] != '\\') {
+            // If the path ends with a drive letter (like "C:"), add a backslash to make it "C:\"
+            if (!(write_idx == 2 && normalized_path[1] == ':')) {
+                if (write_idx >= MAX_PATH - 1) { fprintf(stderr, "Error: Path buffer overflow when adding trailing backslash.\n"); return false; }
+                normalized_path[write_idx++] = '\\';
+            }
+        }
+    }
+
+    // Null-terminate the normalized path
+    if (write_idx >= MAX_PATH) { // Final check after possible trailing backslash addition
+        fprintf(stderr, "Error: Path buffer overflow after normalization and termination.\n");
+        return false;
+    }
+    normalized_path[write_idx] = '\0';
+
+    // Copy the normalized path back to the original buffer
+    if (strcpy_s(path, MAX_PATH, normalized_path) != 0) {
+        fprintf(stderr, "Error: Failed to copy normalized path back to original buffer.\n");
+        return false;
+    }
+
+    return true;
+}
+
+
+
+
+
+
 static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBuffers* buffers) {
 
     EnterCriticalSection(&fstream->lock);
@@ -105,7 +353,10 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBu
     fstream->sid = _ntohl(frame->header.session_id);
     fstream->fid = _ntohl(frame->payload.file_metadata.file_id);
     fstream->fsize = _ntohll(frame->payload.file_metadata.file_size);
-    memcpy(fstream->fname, frame->payload.file_metadata.filename, MAX_PATH);
+    fstream->rpath_len = _ntohl(frame->payload.file_metadata.rpath_len);
+    memcpy(fstream->rpath, frame->payload.file_metadata.rpath, fstream->rpath_len);
+    fstream->fname_len = _ntohl(frame->payload.file_metadata.fname_len);
+    memcpy(fstream->fname, frame->payload.file_metadata.fname, fstream->fname_len);
 
     fstream->fstream_err = STREAM_ERR_NONE;
 
@@ -159,23 +410,32 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBu
         goto exit_error;
     }
 
-    char folderName[MAX_PATH];
-    snprintf(folderName, MAX_PATH, DEST_FPATH"SesionID_%d\\", fstream->sid);
+    // creating root folder (based on session ID of the client)
+    char rootFolder[MAX_PATH];
+    snprintf(rootFolder, MAX_PATH, "%s""Client_SID_%d", DEST_FPATH, fstream->sid);
 
-    if (CreateDirectory(folderName, NULL)) {
-        printf("Folder created successfully.\n");
+    if (CreateDirectory(rootFolder, NULL)) {
+        // printf("Root folder created successfully.\n");
     } else {
         DWORD error = GetLastError();
         if (error == ERROR_ALREADY_EXISTS) {
-            //printf("Folder already exists.\n");
+            // printf("Folder already exists.\n");
         } else {
-            printf("Failed to create folder. Error code: %lu\n", error);
+            printf("Failed to create root folder \"%s\". Error code: %lu\n", rootFolder, error);
             goto exit_error;
         }
     }
-    snprintf(fstream->fpath, MAX_PATH, "%s%s", folderName, fstream->fname);
 
-    // creating output file
+    if (CreateRelativeFolderRecursive(rootFolder, fstream->rpath) == false) {
+        fprintf(stderr, "Failed to create recursive path for root folder: \"%s\", relative path \"%s\". Error code: %lu\n", rootFolder, fstream->rpath, GetLastError());
+        goto exit_error;
+    }
+
+    snprintf(fstream->fpath, MAX_PATH, "%s%s%s", rootFolder, fstream->rpath, fstream->fname);
+    normalize_paths(fstream->fpath, false);
+    
+    fprintf(stdout, "Received file: %s\n", fstream->fpath);
+
     fstream->fp = fopen(fstream->fpath, "wb+"); // "wb+" allows writing and reading, creates or truncates
     if(fstream->fp == NULL){
         fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fname, errno);

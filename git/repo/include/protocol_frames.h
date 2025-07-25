@@ -15,6 +15,9 @@
 #ifndef RET_VAL_ERROR
 #define RET_VAL_ERROR                       (-1)
 #endif
+#ifndef MAX_PATH
+#define MAX_PATH                            (260)
+#endif
 
 #define SERVER_PORT                         (32768)               // Port the server listens on
 #define MAX_PAYLOAD_SIZE                    (1024)                // Max size of data within a frame payload (adjust as needed)
@@ -116,7 +119,10 @@ typedef struct {
 typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t file_size;                                     // Total size of the file being transferred
-    char     filename[MAX_PATH];                           // Max filename length
+    char rpath[MAX_PATH];
+    uint32_t rpath_len;
+    char fname[MAX_PATH];                                   // Max filename length
+    uint32_t fname_len;
 }FileMetadataPayload;
 
 typedef struct {

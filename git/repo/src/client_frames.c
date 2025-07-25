@@ -7,6 +7,15 @@
 #include "include/netendians.h"         // For network byte order conversions
 #include "include/client.h"
 
+// Custom strnlen (for platforms that might not have it or if you use a custom one)
+size_t s_strnlen(const char *s, size_t maxlen) {
+    size_t len = 0;
+    while (len < maxlen && s[len] != '\0') {
+        len++;
+    }
+    return len;
+}
+
 int send_connect_request(const uint64_t seq_num, 
                     const uint32_t session_id, 
                     const uint32_t client_id, 
@@ -68,7 +77,8 @@ int send_file_metadata(const uint64_t seq_num,
                             const uint32_t session_id, 
                             const uint32_t file_id, 
                             const uint64_t file_size,
-                            const char *file_name,
+                            const char *rpath,
+                            const char *fname,
                             const uint32_t file_fragment_size, 
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr,
@@ -79,21 +89,37 @@ int send_file_metadata(const uint64_t seq_num,
     // Initialize the text message frame
     memset(&frame, 0, sizeof(UdpFrame));
 
-    if(file_name == NULL){
-        fprintf(stderr, "ERROR: Invalid file name pointer (NULL).\n");
+    // --- Validate rpath (relative path + filename) ---
+    if(rpath == NULL){
+        fprintf(stderr, "ERROR: send_file_metadata - Invalid relative file path pointer (NULL).\n");
         return RET_VAL_ERROR;
     }
-    uint32_t file_name_len = (uint32_t)strnlen(file_name, MAX_PATH - 1);
- 
-    if(file_name_len == 0){
-        fprintf(stderr, "ERROR: File name is 0 length.\n");
+    size_t rpath_len = s_strnlen(rpath, MAX_PATH); // Actual string length without null
+    if(rpath_len <= 0){ // Relative path + filename should never be 0 length
+        fprintf(stderr, "ERROR: send_file_metadata - Relative file path is 0 length (missing filename?).\n");
         return RET_VAL_ERROR;
     }
-    if(file_name_len >= MAX_PATH - 1){
-        fprintf(stderr, "ERROR: File name is too long. Max length is %d characters.\n", MAX_PATH - 1);
+    // Check against the size of the field in UdpFrame payload.
+    if(rpath_len >= sizeof(frame.payload.file_metadata.rpath)){
+        fprintf(stderr, "ERROR: send_file_metadata - Relative file path is too long. Max length for payload is %zu characters (excluding null). Length: %llu\n", sizeof(frame.payload.file_metadata.rpath) - 1, rpath_len);
         return RET_VAL_ERROR;
     }
-    file_name_len += 1; // Add 1 for null terminator
+
+    // --- Validate fname (just the filename) ---
+    if(fname == NULL){
+        fprintf(stderr, "ERROR: send_file_metadata - Invalid filename pointer (NULL).\n");
+        return RET_VAL_ERROR;
+    }
+    size_t fname_len = s_strnlen(fname, MAX_PATH); // Actual string length without null
+    if(fname_len == 0){ // Filename should never be 0 length
+        fprintf(stderr, "ERROR: send_file_metadata - Filename is 0 length.\n");
+        return RET_VAL_ERROR;
+    }
+    // Check against the size of the field in UdpFrame payload.
+    if(fname_len >= sizeof(frame.payload.file_metadata.fname)){
+        fprintf(stderr, "ERROR: send_file_metadata - Filename is too long. Max length for payload is %zu characters (excluding null). Length: %llu\n", sizeof(frame.payload.file_metadata.fname) - 1, fname_len);
+        return RET_VAL_ERROR;
+    }
 
     // Set the header fields
     frame.header.start_delimiter = _htons(FRAME_DELIMITER);
@@ -103,9 +129,11 @@ int send_file_metadata(const uint64_t seq_num,
     // Set the payload fields
     frame.payload.file_metadata.file_id = _htonl(file_id);
     frame.payload.file_metadata.file_size = _htonll(file_size);
-    snprintf(frame.payload.file_metadata.filename, file_name_len, "%s", file_name);
-    // sha256_final(&sha256_ctx, frame.payload.file_metadata.file_hash);
-           
+    // _snprintf_s handles truncation and null-termination automatically
+    _snprintf_s(frame.payload.file_metadata.rpath, sizeof(frame.payload.file_metadata.rpath), _TRUNCATE, "%s", rpath);
+    frame.payload.file_metadata.rpath_len = _htonl((uint32_t)rpath_len);
+    _snprintf_s(frame.payload.file_metadata.fname, sizeof(frame.payload.file_metadata.fname), _TRUNCATE, "%s", fname); 
+    frame.payload.file_metadata.fname_len = _htonl((uint32_t)fname_len);
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));
     

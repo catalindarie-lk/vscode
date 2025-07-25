@@ -1000,7 +1000,7 @@ void close_file_stream(ServerFileStream *fstream, ServerBuffers* buffers){
 
     if(fstream->fp && fstream->fstream_busy && !fstream->file_complete){
         fclose(fstream->fp);
-        remove(fstream->fname);
+        remove(fstream->fpath);
         fstream->fp = NULL;
     }
     if(fstream->fp != NULL){
@@ -1010,7 +1010,7 @@ void close_file_stream(ServerFileStream *fstream, ServerBuffers* buffers){
             int fclosed = fclose(fstream->fp);
             Sleep(50); // Sleep for 50 milliseconds to ensure the file is properly closed before proceeding.
             if(fclosed != 0){
-                fprintf(stderr, "Error closing the file stream: %s (errno: %d)\n", fstream->fname, errno);
+                fprintf(stderr, "Error closing the file stream: %s (errno: %d)\n", fstream->fpath, errno);
             }
             fstream->fp = NULL; // Set the file pointer to NULL after closing.
         }
@@ -1053,7 +1053,11 @@ void close_file_stream(ServerFileStream *fstream, ServerBuffers* buffers){
 
     memset(&fstream->received_sha256, 0, 32);
     memset(&fstream->calculated_sha256, 0, 32);
-    memset(fstream->fname, 0, MAX_NAME_SIZE);
+    fstream->rpath_len = 0;
+    memset(&fstream->rpath, 0, MAX_PATH);
+    fstream->fname_len = 0;
+    memset(&fstream->fname, 0, MAX_PATH);
+    memset(&fstream->fpath, 0, MAX_PATH);
     
     fstream->fstream_busy = FALSE;                  // Indicates if this stream channel is currently in use for a transfer.
 
@@ -1142,16 +1146,16 @@ void cleanup_client(Client *client, ServerBuffers* buffers){
 // Compare received hash with calculated hash
 BOOL validate_file_hash(ServerFileStream *fstream){
 
-    fprintf(stdout, "File hash received: ");
-    for(int i = 0; i < 32; i++){
-        fprintf(stdout, "%02x", (uint8_t)fstream->received_sha256[i]);
-    }
-    fprintf(stdout, "\n");
-    fprintf(stdout, "File hash calculated: ");
-    for(int i = 0; i < 32; i++){
-        fprintf(stdout, "%02x", (uint8_t)fstream->calculated_sha256[i]);
-    }
-    fprintf(stdout, "\n");
+    // fprintf(stdout, "File hash received: ");
+    // for(int i = 0; i < 32; i++){
+    //     fprintf(stdout, "%02x", (uint8_t)fstream->received_sha256[i]);
+    // }
+    // fprintf(stdout, "\n");
+    // fprintf(stdout, "File hash calculated: ");
+    // for(int i = 0; i < 32; i++){
+    //     fprintf(stdout, "%02x", (uint8_t)fstream->calculated_sha256[i]);
+    // }
+    // fprintf(stdout, "\n");
 
     for(int i = 0; i < 32; i++){
         if((uint8_t)fstream->calculated_sha256[i] != (uint8_t)fstream->received_sha256[i]){
@@ -1184,8 +1188,8 @@ int main() {
 
         Sleep(250); // Prevent busy-waiting
    
-        printf("\r\033[2K--  Free Blocks: %llu; Total: %llu", buffers.pool_file_chunk.free_blocks, buffers.pool_file_chunk.block_count);
-        fflush(stdout);
+        // printf("\r\033[2K--  Free Blocks: %llu; Total: %llu", buffers.pool_file_chunk.free_blocks, buffers.pool_file_chunk.block_count);
+        // fflush(stdout);
 
     }
     // --- Server Shutdown Sequence ---

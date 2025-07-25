@@ -23,7 +23,8 @@ if "%target%"=="test_server" (
 %workspace%\src\message_handler.c ^
 %workspace%\src\server_frames.c
 ) else if "%target%"=="test_client" (
-    set private=%workspace%\src\client_frames.c
+    set private=%workspace%\src\client_frames.c ^
+%workspace%\src\client_api.c
 ) else (
     echo [ERROR] Unknown target: %target%
     exit /b 1

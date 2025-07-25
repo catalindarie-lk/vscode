@@ -21,7 +21,7 @@ __declspec(align(64)) typedef struct{
 }QueueFrameEntry;
 
 typedef struct {
-    uint32_t size; 
+    size_t size; 
     QueueFrameEntry *entry;
     volatile uint32_t head;          
     volatile uint32_t tail;
@@ -31,7 +31,7 @@ typedef struct {
     HANDLE pop_semaphore;       // not used
 }QueueFrame;
 
-void init_queue_frame(QueueFrame *queue, const uint32_t size);
+void init_queue_frame(QueueFrame *queue, const size_t size);
 int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
 int pop_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
 
@@ -45,7 +45,7 @@ __declspec(align(64)) typedef struct{
 }QueueAckEntry;
 
 typedef struct {
-    uint32_t size;
+    size_t size;
     QueueAckEntry *entry;
     volatile uint32_t head;          
     volatile uint32_t tail;
@@ -57,7 +57,7 @@ typedef struct {
 
 void new_ack_entry(QueueAckEntry *entry, const uint64_t seq, const uint32_t sid, 
                         const uint8_t op_code, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
-void init_queue_ack(QueueAck *queue, const uint32_t size);
+void init_queue_ack(QueueAck *queue, const size_t size);
 int push_ack(QueueAck *queue, QueueAckEntry *entry);
 int pop_ack(QueueAck *queue, QueueAckEntry *entry);
 
@@ -67,6 +67,7 @@ int pop_ack(QueueAck *queue, QueueAckEntry *entry);
 __declspec(align(64)) typedef struct{
     char text[32];
     char fpath[MAX_PATH];
+    char rpath[MAX_PATH];
     char fname[MAX_PATH];
 }QueueCommandEntrySendFile;
 
@@ -86,7 +87,7 @@ typedef struct{
 #pragma pack(pop)
 
 typedef struct{
-    uint32_t size;
+    size_t size;
     QueueCommandEntry *entry;
     volatile uint32_t head;
     volatile uint32_t tail;
@@ -97,14 +98,14 @@ typedef struct{
 //    HANDLE cleared;
 }QueueCommand;
 
-void init_queue_command(QueueCommand *queue, const uint32_t size);
+void init_queue_command(QueueCommand *queue, const size_t size);
 int push_command(QueueCommand *queue, QueueCommandEntry *entry);
 int pop_command(QueueCommand *queue, QueueCommandEntry *entry);
  
 //----------------------------------------------------------------------------------------------------------------
 
 __declspec(align(64)) typedef struct{
-    uint32_t size;
+    size_t size;
     uintptr_t *pfstream;
     volatile uint32_t head;
     volatile uint32_t tail;
@@ -114,7 +115,7 @@ __declspec(align(64)) typedef struct{
     HANDLE pop_semaphore;           // not used
 }QueueFstream;
 
-void init_queue_fstream(QueueFstream *queue, const uint32_t size);
+void init_queue_fstream(QueueFstream *queue, const size_t size);
 int push_fstream(QueueFstream *queue, const uintptr_t pfstream);
 uintptr_t pop_fstream(QueueFstream *queue);
 

@@ -8,7 +8,7 @@
 #include "include/protocol_frames.h"             // For UdpFrame structure
 #include "include/queue.h"
 
-void init_queue_frame(QueueFrame *queue, const uint32_t size){
+void init_queue_frame(QueueFrame *queue, const size_t size){
     if (!queue){
         fprintf(stderr, "Invalid queue pointer\n");
         return;
@@ -107,7 +107,7 @@ void new_ack_entry(QueueAckEntry *entry, const uint64_t seq, const uint32_t sid,
     memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
     return;
 }
-void init_queue_ack(QueueAck *queue, const uint32_t size){
+void init_queue_ack(QueueAck *queue, const size_t size){
     if (!queue){
         fprintf(stderr, "Invalid queue pointer\n");
         return;
@@ -187,7 +187,7 @@ int pop_ack(QueueAck *queue, QueueAckEntry *entry){
     return RET_VAL_SUCCESS;
 }
 
-void init_queue_fstream(QueueFstream *queue, const uint32_t size){
+void init_queue_fstream(QueueFstream *queue, const size_t size){
     if (!queue){
         fprintf(stderr, "Invalid pointer for queue fstream init\n");
         return;
@@ -261,7 +261,7 @@ uintptr_t pop_fstream(QueueFstream *queue){
     return pfstream;
 }
 
-void init_queue_command(QueueCommand *queue, const uint32_t size){
+void init_queue_command(QueueCommand *queue, const size_t size){
     if (!queue){
         fprintf(stderr, "Invalid command queue pointer\n");
         return;
