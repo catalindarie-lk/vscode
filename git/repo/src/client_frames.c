@@ -240,9 +240,7 @@ int send_long_text_fragment(const uint64_t seq_num,
     frame.payload.text_fragment.fragment_offset = _htonl(fragment_offset);
     
     memcpy(frame.payload.text_fragment.chars, fragment_buffer, fragment_len);
-
-    fprintf(stdout, "PAYLOAD: %s\n", frame.payload.text_fragment.chars);
-    
+   
     // Calculate the checksum for the frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(LongTextPayload)));  
 

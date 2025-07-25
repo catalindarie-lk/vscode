@@ -37,7 +37,7 @@ void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num);
 void ht_clean(HashTableFramePendingAck *ht);
 
 //--------------------------------------------------------------------------------------------------------------------------
-#define HASH_SIZE_ID                  (512)
+#define HASH_SIZE_ID                  (65536)
 
 typedef uint8_t HashTableStatus;
 enum HashTableStatus{

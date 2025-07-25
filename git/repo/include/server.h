@@ -38,7 +38,7 @@
 #define CHUNK_NONE                              (0)       // 0b00000000
 
 #define BLOCK_SIZE_CHUNK                        ((uint64_t)(FILE_FRAGMENT_SIZE * 64))
-#define BLOCK_COUNT_CHUNK                       ((uint64_t)(1024))
+#define BLOCK_COUNT_CHUNK                       ((uint64_t)(8192))
 
 #define SERVER_SIZE_QUEUE_FRAME                 (8192 * MAX_CLIENTS)
 #define SERVER_SIZE_QUEUE_PRIORITY_FRAME        (1024)

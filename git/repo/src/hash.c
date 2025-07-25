@@ -153,7 +153,7 @@ int ht_insert_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t
     node->sid = sid;
     node->id = id;    
     node->status = status;
-    fprintf(stdout, "Added to hash table SID: %d - ID: %d\n", node->sid, node->id);
+    fprintf(stdout, "ADDED to hash table SID: %d - ID: %d\n", node->sid, node->id);
     node->next = (IdentifierNode *)ht->entry[index];  // Insert at the head (linked list)
     ht->entry[index] = node;
     InterlockedIncrement(&ht->count);
@@ -175,6 +175,7 @@ void ht_remove_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_
             } else {
                 ht->entry[index] = curr->next;
             }
+            fprintf(stdout, "REMOVED from hash table SID: %d - ID: %d\n", curr->sid, curr->id);
             free(curr);
             LeaveCriticalSection(&ht->mutex);
             return;
@@ -202,7 +203,7 @@ void ht_remove_all_sid(HashTableIdentifierNode *ht, const uint32_t sid) {
                     ht->entry[i] = curr->next;
                 }
                 curr = curr->next;
-                fprintf(stdout, "Removed from hash table SID: %d - ID: %d\n", to_remove->sid, to_remove->id);
+                fprintf(stdout, "REMOVED from hash table SID: %d - ID: %d\n", to_remove->sid, to_remove->id);
                 free(to_remove);
                 ht->count--;
             } else {

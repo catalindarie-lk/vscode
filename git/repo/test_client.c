@@ -307,16 +307,6 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
    
     while(client->client_status == STATUS_READY){
         WaitForSingleObject(client->hevent_connection_listening, INFINITE);       
-        // if (wait_events == WAIT_OBJECT_0) {
-        //     fprintf(stdout, "Started listening...\n");
-        //     client->session_status = CONNECTION_LISTENING;
-        // } else if (wait_events == WAIT_OBJECT_0 + 1){
-        //     goto exit_thread;
-
-        // } else {
-        //     fprintf(stderr, "Unexpected error for listening event: %lu\n", wait_events);
-        //     break;
-        // }
 
         client->session_status = CONNECTION_LISTENING;
         while(1){
@@ -358,11 +348,6 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
                 memcpy(&frame_entry.frame, iocp_overlapped->buffer, NrOfBytesTransferred);
                 memcpy(&frame_entry.src_addr, &iocp_overlapped->src_addr, sizeof(struct sockaddr_in));
                 frame_entry.frame_size = NrOfBytesTransferred;
-
-                if(frame_entry.frame_size > sizeof(UdpFrame)){
-                    fprintf(stdout, "Frame received with bytes > max frame size!\n");
-                    continue;
-                }
     
                 uint8_t frame_type = frame_entry.frame.header.frame_type;
                 uint8_t op_code = frame_entry.frame.payload.ack.op_code;
@@ -395,7 +380,7 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
 
         } // end of while(1)
     } // end of while(client.client_status == STATUS_READY)
-exit_thread:
+    
     fprintf(stdout,"receive frame thread closed...\n");
     _endthreadex(0);    
     return 0;
@@ -418,31 +403,25 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
     uint32_t recv_session_timeout;
     uint8_t recv_server_status;
 
-    HANDLE queue_semaphores[2] = {buffers.queue_priority_frame.semaphore, 
-                                    buffers.queue_frame.semaphore,
-                                };
+    HANDLE events[2] = {buffers.queue_priority_frame.push_semaphore,
+                        buffers.queue_frame.push_semaphore,
+                        };
 
     while(client.client_status == STATUS_READY){
-        // Pop a frame from the queue (prioritize control queue)
 
-        DWORD wait_result = WaitForMultipleObjects(2, queue_semaphores, FALSE, INFINITE);
-        if (wait_result == WAIT_OBJECT_0) {
-            if (pop_frame(&buffers.queue_priority_frame, &frame_entry) == RET_VAL_SUCCESS) {
-                // Frame successfully retrieved from the priority queue.
-            } else {
+        DWORD result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+        if (result == WAIT_OBJECT_0) {
+            if (pop_frame(&buffers.queue_priority_frame, &frame_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from frame priority queue RET_VAL_ERROR\n");
                 continue;
             }
-        } else if (wait_result == WAIT_OBJECT_0 + 1) {
-            if (pop_frame(&buffers.queue_frame, &frame_entry) == RET_VAL_SUCCESS) {
-                // Frame successfully retrieved from the general data queue.
-            } else {
+        } else if (result == WAIT_OBJECT_0 + 1) {
+            if (pop_frame(&buffers.queue_frame, &frame_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from frame queue RET_VAL_ERROR\n");
                 continue;
             }
-        } else if (wait_result == WAIT_OBJECT_0 + 2){
-            goto exit_thread;
-
         } else {
-            fprintf(stderr, "Unexpected wait result: %lu\n", wait_result);
+            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore frame queues: %lu\n", result);
             continue;
         }
 
@@ -545,7 +524,6 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 break;
         }
     }
-exit_thread:
     fprintf(stdout,"process frame thread exiting...\n");
     _endthreadex(0);    
     return 0;
@@ -563,7 +541,7 @@ DWORD WINAPI thread_proc_keep_alive(LPVOID lpParam){
             now_keep_alive = time(NULL);
             if(now_keep_alive - last_keep_alive > keep_alive_clock_sec){
                 send_keep_alive(get_new_seq_num(), client.sid, client.socket, &client.server_addr);
-                fprintf(stdout, "Sending keep alive frame session id: %u\n", client.sid);
+                // fprintf(stdout, "Sending keep alive frame session id: %u\n", client.sid);
                 last_keep_alive = time(NULL);
             }
             if(time(NULL) > (time_t)(client.last_active_time + client.session_timeout * 2)){
@@ -635,16 +613,12 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
     DWORD wait_metadata_response;
 
     QueueCommandEntry entry;
-    HANDLE events[2] = {threads.fstream_semaphore, buffers.queue_fstream.semaphore};
 
     while(client.client_status == STATUS_READY){
 
-        WaitForMultipleObjects(2, events, TRUE, INFINITE);
+        WaitForSingleObject(threads.fstream_semaphore, INFINITE);
         
-        if (pop_command(&buffers.queue_fstream, &entry) == RET_VAL_ERROR) {
-            fprintf(stdout, "ERROR: Popping fstream command from queue\n");
-            continue;
-        }
+        pop_command(&buffers.queue_fstream, &entry);
          
         ClientFileStream *fstream = NULL;
         for(int index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
@@ -654,7 +628,7 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
                 fstream->fstream_busy = TRUE;
                 memcpy(fstream->fpath, &entry.command.send_file.fpath, MAX_PATH);
                 memcpy(fstream->fname, &entry.command.send_file.fname, MAX_PATH);
-                fprintf(stdout, "Free file stream %d opened...\n", index);
+                // fprintf(stdout, "Free file stream %d opened...\n", index);
                 break;
             }
         }
@@ -683,6 +657,7 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
         }
  
         fstream->fid = InterlockedIncrement(&client.fid_count);
+        fprintf(stdout, "Metadata ID: %d\n", fstream->fid);
 
         fstream->pending_metadata_seq_num = get_new_seq_num();
         int metadata_bytes_sent = send_file_metadata(fstream->pending_metadata_seq_num, 
@@ -791,19 +766,17 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
 // --- Send message thread function ---
 DWORD WINAPI thread_mstream_function(LPVOID lpParam){
 
-    
     uint32_t frame_fragment_offset;
     uint32_t frame_fragment_len;
 
- 
     QueueCommandEntry entry;
-    HANDLE events_mstream[2] = {threads.mstream_semaphore, buffers.queue_mstream.semaphore};
 
     while(client.client_status == STATUS_READY){
 
-        WaitForMultipleObjects(2, events_mstream, TRUE, INFINITE);
-        
+         WaitForSingleObject(threads.mstream_semaphore, INFINITE);
+
         if (pop_command(&buffers.queue_mstream, &entry) == RET_VAL_ERROR) {
+            free(entry.command.send_message.message_buffer);
             fprintf(stdout, "ERROR: Popping mstream command from queue\n");
             continue;
         }
@@ -827,6 +800,7 @@ DWORD WINAPI thread_mstream_function(LPVOID lpParam){
                 mstream->message_len = entry.command.send_message.message_len;
                 memcpy(mstream->message_buffer, entry.command.send_message.message_buffer, mstream->message_len);
                 mstream->message_buffer[mstream->message_len] = '\0';
+                free(entry.command.send_message.message_buffer);
                 fprintf(stdout, "Free message stream %d opened...\n", index);
                 break;
             }
@@ -842,8 +816,6 @@ DWORD WINAPI thread_mstream_function(LPVOID lpParam){
         frame_fragment_offset = 0;
 
         mstream->remaining_bytes_to_send = mstream->message_len;
-
-        fprintf(stdout, "MESSAGE3: %s:%d\n", mstream->message_buffer, strlen(mstream->message_buffer));
 
         while(mstream->remaining_bytes_to_send > 0){
 
@@ -892,7 +864,7 @@ DWORD WINAPI thread_mstream_function(LPVOID lpParam){
         }
 
         clean_message_stream(mstream);
-        ReleaseSemaphore(threads.fstream_semaphore, 1, NULL);
+        ReleaseSemaphore(threads.mstream_semaphore, 1, NULL);
         LeaveCriticalSection(&mstream->lock);
 
     }
@@ -1133,8 +1105,8 @@ void sent_text_file(){
             fprintf(stdout, "Error reading message file!\n");
             return;
         }
-        fprintf(stdout, "MESSAGE: %s:%d\n", message_buffer, strlen(message_buffer));
         SendTextMessage(message_buffer, message_len);
+        free(message_buffer);
  
     return;
 }
@@ -1158,18 +1130,12 @@ void SendTextMessage(const char *message_buffer, const size_t message_len) {
         fprintf(stderr, "ERROR: Message size too long.\n");
         return;
     }
-    // if (strnlen(message_buffer, message_len) == message_len) {
-    //     fprintf(stderr, "ERROR: Message not null-terminated.\n");
-    //     return;
-    // }
 
     snprintf(entry.command.send_message.text, sizeof("SendTextMessage"), "%s", "SendTextMessage");
     entry.command.send_message.message_len = message_len;
     entry.command.send_message.message_buffer = malloc(message_len + 1);
     memcpy(entry.command.send_message.message_buffer, message_buffer, message_len);
     entry.command.send_message.message_buffer[message_len] = '\0';
-
-    fprintf(stdout, "MESSAGE: %s:%d\n", entry.command.send_message.message_buffer, strlen(entry.command.send_message.message_buffer));
 
     push_command(&buffers.queue_mstream, &entry);
     return;
@@ -1248,7 +1214,7 @@ void SendAllFilesInFolder(const char *fd_path){
             snprintf(fpath, MAX_PATH, SRC_FPATH);
             snprintf(fname, MAX_PATH, "%s", findFileData.cFileName);
             SendFile(fpath, strlen(fpath) + 1, fname, strlen(fname) + 1);
-            printf("File: %s%s;\n", fpath, fname);
+            printf("Send File: %s%s;\n", fpath, fname);
         }
     } while (FindNextFile(hFind, &findFileData) != 0);
 

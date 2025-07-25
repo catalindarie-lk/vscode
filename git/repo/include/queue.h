@@ -14,7 +14,7 @@
 #endif
 
 //----------------------------------------------------------------------------------------------------------------
-typedef struct{
+__declspec(align(64)) typedef struct{
     UdpFrame frame; // The UDP frame to be sent
     struct sockaddr_in src_addr; // Destination address for the frame
     uint32_t frame_size; // Number of bytes received for this frame
@@ -23,11 +23,12 @@ typedef struct{
 typedef struct {
     uint32_t size; 
     QueueFrameEntry *entry;
-    uint32_t head;          
-    uint32_t tail;
-    uint32_t pending;
-    CRITICAL_SECTION lock; // Mutex for thread-safe access to frame_buffer
-    HANDLE semaphore;
+    volatile uint32_t head;          
+    volatile uint32_t tail;
+    volatile uint32_t pending;
+    CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
+    HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
+    HANDLE pop_semaphore;       // not used
 }QueueFrame;
 
 void init_queue_frame(QueueFrame *queue, const uint32_t size);
@@ -35,7 +36,7 @@ int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
 int pop_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
 
 //----------------------------------------------------------------------------------------------------------------
-typedef struct{
+__declspec(align(64)) typedef struct{
     uint64_t seq;       // The sequence number of the frame that require ack/nak
     uint8_t op_code;
     uint32_t sid;    // Session ID of the frame (used to identify the connected client)
@@ -46,11 +47,11 @@ typedef struct{
 typedef struct {
     uint32_t size;
     QueueAckEntry *entry;
-    uint32_t head;          
-    uint32_t tail;
-    uint32_t pending;
+    volatile uint32_t head;          
+    volatile uint32_t tail;
+    volatile uint32_t pending;
     CRITICAL_SECTION lock; // Mutex for thread-safe access to frame_buffer
-    HANDLE semaphore;
+    HANDLE push_semaphore;
 }QueueAck;
 
 
@@ -63,13 +64,13 @@ int pop_ack(QueueAck *queue, QueueAckEntry *entry);
 //----------------------------------------------------------------------------------------------------------------
 #define MAX_ENTRY_SIZE (MAX_PATH + MAX_PATH + 32)
 #pragma pack(push, 1)
-typedef struct{
+__declspec(align(64)) typedef struct{
     char text[32];
     char fpath[MAX_PATH];
     char fname[MAX_PATH];
 }QueueCommandEntrySendFile;
 
-typedef struct{
+__declspec(align(64)) typedef struct{
     char text[32];
     char *message_buffer;
     uint32_t message_len;
@@ -87,35 +88,35 @@ typedef struct{
 typedef struct{
     uint32_t size;
     QueueCommandEntry *entry;
-    uint32_t head;
-    uint32_t tail;
-    uint32_t pending;
+    volatile uint32_t head;
+    volatile uint32_t tail;
+    volatile uint32_t pending;
     CRITICAL_SECTION lock;
-    HANDLE semaphore;
-    HANDLE cleared;
+    HANDLE push_semaphore;
+    HANDLE pop_semaphore;
+//    HANDLE cleared;
 }QueueCommand;
 
 void init_queue_command(QueueCommand *queue, const uint32_t size);
-void clean_queue_command(QueueCommand *queue);
 int push_command(QueueCommand *queue, QueueCommandEntry *entry);
 int pop_command(QueueCommand *queue, QueueCommandEntry *entry);
  
 //----------------------------------------------------------------------------------------------------------------
 
-typedef struct{
+__declspec(align(64)) typedef struct{
     uint32_t size;
-    intptr_t *pfstream;
-    uint32_t head;
-    uint32_t tail;
-    uint32_t pending;
+    uintptr_t *pfstream;
+    volatile uint32_t head;
+    volatile uint32_t tail;
+    volatile uint32_t pending;
     CRITICAL_SECTION lock;
-    HANDLE semaphore;
+    HANDLE push_semaphore;
+    HANDLE pop_semaphore;           // not used
 }QueueFstream;
 
 void init_queue_fstream(QueueFstream *queue, const uint32_t size);
-void clean_queue_fstream(QueueFstream *queue);
-int push_fstream(QueueFstream *queue, const intptr_t pfstream);
-intptr_t pop_fstream(QueueFstream *queue);
+int push_fstream(QueueFstream *queue, const uintptr_t pfstream);
+uintptr_t pop_fstream(QueueFstream *queue);
 
 
-#endif
+#endif 

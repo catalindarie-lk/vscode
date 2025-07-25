@@ -483,11 +483,6 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
             memcpy(&frame_entry.src_addr, &iocp_overlapped->src_addr, sizeof(struct sockaddr_in));
             frame_entry.frame_size = NrOfBytesTransferred;
 
-            if(frame_entry.frame_size > sizeof(UdpFrame)){
-                fprintf(stdout, "Frame received with bytes > max frame size!\n");
-                continue;
-            }
-
             uint8_t frame_type = frame_entry.frame.header.frame_type;
             BOOL is_high_priority_frame = (frame_type == FRAME_TYPE_KEEP_ALIVE ||
                                             frame_type == FRAME_TYPE_CONNECT_REQUEST ||
@@ -510,7 +505,6 @@ retry:
             goto retry;
         }
     }
-exit_thread:
     fprintf(stdout, "recv thread exiting\n");
     _endthreadex(0);
     return 0;
@@ -535,25 +529,24 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
 
     Client *client;                 // A pointer to the Client structure associated with the current frame's session.
 
-    HANDLE queue_semaphores[2] = {buffers.queue_priority_frame.semaphore, buffers.queue_frame.semaphore};
+    HANDLE events[2] = {buffers.queue_priority_frame.push_semaphore,
+                        buffers.queue_frame.push_semaphore,
+                        };
 
     while(server.server_status == STATUS_READY) {
-        //memset(&frame_entry, 0, sizeof(QueueFrameEntry));
-        DWORD wait_result = WaitForMultipleObjects(2, queue_semaphores, FALSE, INFINITE);
-        if (wait_result == WAIT_OBJECT_0) {
-            if (pop_frame(&buffers.queue_priority_frame, &frame_entry) == RET_VAL_SUCCESS) {
-                // Frame successfully retrieved from the priority queue.
-            } else {
+        DWORD result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+        if (result == WAIT_OBJECT_0) {
+            if (pop_frame(&buffers.queue_priority_frame, &frame_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from frame priority queue RET_VAL_ERROR\n");
                 continue;
             }
-        } else if (wait_result == WAIT_OBJECT_0 + 1) {
-            if (pop_frame(&buffers.queue_frame, &frame_entry) == RET_VAL_SUCCESS) {
-                // Frame successfully retrieved from the general data queue.
-            } else {
+        } else if (result == WAIT_OBJECT_0 + 1) {
+            if (pop_frame(&buffers.queue_frame, &frame_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from frame queue RET_VAL_ERROR\n");
                 continue;
             }
         } else {
-            fprintf(stderr, "Unexpected wait result: %lu\n", wait_result);
+            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore frame queues: %lu\n", result);
             continue;
         }
 
@@ -709,31 +702,30 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
 DWORD WINAPI thread_proc_send_ack(LPVOID lpParam){
 
     QueueAckEntry ack_entry;
-    HANDLE queue_semaphores[3] = {buffers.queue_priority_ack.semaphore, buffers.mqueue_ack.semaphore, buffers.fqueue_ack.semaphore};
+    HANDLE events[3] = {buffers.queue_priority_ack.push_semaphore, 
+                                    buffers.mqueue_ack.push_semaphore, 
+                                    buffers.fqueue_ack.push_semaphore
+                                    };
 
     while (server.server_status == STATUS_READY) {
-        DWORD wait_result = WaitForMultipleObjects(3, queue_semaphores, FALSE, INFINITE);
-        //memset(&ack_entry, 0, sizeof(QueueAckEntry));
-        if (wait_result == WAIT_OBJECT_0) {
-            if (pop_ack(&buffers.queue_priority_ack, &ack_entry) == RET_VAL_SUCCESS) {
-                // Frame successfully retrieved from the priority queue.
-            } else {
+        DWORD result = WaitForMultipleObjects(3, events, FALSE, INFINITE);
+        if (result == WAIT_OBJECT_0) {
+            if (pop_ack(&buffers.queue_priority_ack, &ack_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack priority queue RET_VAL_ERROR\n");
                 continue;
             }
-        } else if (wait_result == WAIT_OBJECT_0 + 1) {
-            if (pop_ack(&buffers.mqueue_ack, &ack_entry) == RET_VAL_SUCCESS) {
-                // Frame successfully retrieved from the priority queue.
-            } else {
+        } else if (result == WAIT_OBJECT_0 + 1) {
+            if (pop_ack(&buffers.mqueue_ack, &ack_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack mqueue RET_VAL_ERROR\n");
                 continue;
             }
-        } else if (wait_result == WAIT_OBJECT_0 + 2) {
-            if (pop_ack(&buffers.fqueue_ack, &ack_entry) == RET_VAL_SUCCESS) {
-                // Frame successfully retrieved from the general data queue.
-            } else {
+        } else if (result == WAIT_OBJECT_0 + 2) {
+            if (pop_ack(&buffers.fqueue_ack, &ack_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack fqueue RET_VAL_ERROR\n");
                 continue;
             }
         } else {
-            fprintf(stderr, "Unexpected wait result: %lu\n", wait_result);
+            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore ack queues: %lu\n", result);
             continue;
         }
         send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr);
@@ -774,13 +766,17 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
     SHA256_CTX sha256_ctx;
 
     while (server.server_status == STATUS_READY) { 
-        // Wait for file transfer event or client disconnect
-        DWORD wait_semaphore = WaitForSingleObject(buffers.queue_fstream.semaphore, INFINITE);
- 
-        ServerFileStream *fstream = (ServerFileStream*)pop_fstream(&buffers.queue_fstream);
+        ServerFileStream *fstream = NULL;
+        DWORD result = WaitForSingleObject(buffers.queue_fstream.push_semaphore, INFINITE);
+        if (result == WAIT_OBJECT_0) {
+            fstream = (ServerFileStream*)pop_fstream(&buffers.queue_fstream);
+        } else {
+            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore fstream queue: %lu\n", result);
+            continue;
+        }        
 
         if(!fstream){
-            fprintf(stderr, "Received null fstream pointer from fstream queue!\n");
+            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Received null pointer from fstream queue!\n");
             continue;
         }
 
@@ -942,7 +938,7 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
             if(fstream->file_complete){           
                 
                 ht_update_id_status(&buffers.ht_fid, fstream->sid, fstream->fid, ID_RECV_COMPLETE);
-                fprintf(stdout, "File '%s' received written to disk and validated", fstream->fname);
+                // fprintf(stdout, "Receved file: '%s'\n", fstream->fname);
 
                 QueueAckEntry ack_entry;
                 new_ack_entry(&ack_entry, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, server.socket, &fstream->client_addr);
@@ -1150,11 +1146,12 @@ BOOL validate_file_hash(ServerFileStream *fstream){
     for(int i = 0; i < 32; i++){
         fprintf(stdout, "%02x", (uint8_t)fstream->received_sha256[i]);
     }
-
+    fprintf(stdout, "\n");
     fprintf(stdout, "File hash calculated: ");
     for(int i = 0; i < 32; i++){
         fprintf(stdout, "%02x", (uint8_t)fstream->calculated_sha256[i]);
     }
+    fprintf(stdout, "\n");
 
     for(int i = 0; i < 32; i++){
         if((uint8_t)fstream->calculated_sha256[i] != (uint8_t)fstream->received_sha256[i]){
@@ -1162,6 +1159,7 @@ BOOL validate_file_hash(ServerFileStream *fstream){
             return FALSE;
         }
     }
+
     return TRUE;
 }
 // Check for any open file streams across all clients.

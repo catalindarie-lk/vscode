@@ -25,9 +25,6 @@
 #define DEFAULT_SESSION_TIMEOUT_SEC             (120)
 #endif
 
-#define MAX_CLIENT_ACTIVE_FSTREAMS              (3)
-#define MAX_CLIENT_ACTIVE_MSTREAMS              (3)
-
 // --- Constants ---
 
 #define CLIENT_ID                               (0xFF)        // Example client ID, can be set dynamically
@@ -41,17 +38,19 @@
 
 #define RESEND_TIMEOUT_SEC                      (10)           //seconds
 
-#define MAX_MESSAGE_SIZE_BYTES                  (16 * 1024 * 1024)         // Max size of a long text message
+#define MAX_MESSAGE_SIZE_BYTES                  (256 * 1024 * 1024)         // Max size of a long text message
 
 #define TIMEOUT_METADATA_RESPONSE_MS            (5000)      //wait for 5 sec after sending a metadata fragment for response
 #define MAX_RETRIES_STOP_TRANSFER               (5)         //max retries to stop file/message transfer
-
-#define CLIENT_SIZE_QUEUE_PRIORITY_FRAME        (256)
-
-#define CLIENT_SIZE_QUEUE_COMMAND_FSTREAM       (1024)
-#define CLIENT_SIZE_QUEUE_COMMAND_MSTREAM       (1024)
 //----------------------------------------------------------------------------------------------------------
+#define MAX_CLIENT_ACTIVE_FSTREAMS              (3)
+#define MAX_CLIENT_ACTIVE_MSTREAMS              (3)
+
+#define CLIENT_SIZE_QUEUE_COMMAND_FSTREAM       (256)       // Nr of send file commands that can be queued
+#define CLIENT_SIZE_QUEUE_COMMAND_MSTREAM       (256)       // Nr of send file commands that can be queued
+
 #define CLIENT_SIZE_QUEUE_FRAME                 (8192 + (512 * MAX_CLIENT_ACTIVE_FSTREAMS))
+#define CLIENT_SIZE_QUEUE_PRIORITY_FRAME        (CLIENT_SIZE_QUEUE_FRAME / 4)
 #define HASH_SIZE_FRAME                         (CLIENT_SIZE_QUEUE_FRAME + CLIENT_SIZE_QUEUE_PRIORITY_FRAME)
 #define HASH_FRAME_HIGH_WATERMARK               (HASH_SIZE_FRAME * 0.75)
 #define HASH_FRAME_LOW_WATERMARK                (HASH_SIZE_FRAME * 0.25)

@@ -85,7 +85,7 @@ static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragm
         // Check if all expected bytes for the entire file have been received.
         if(fstream->recv_bytes_count == fstream->fsize){
             fstream->trailing_chunk_complete = TRUE;
-            fprintf(stdout, "Received complete file: %s, Size: %llu, Last chunk size: %llu\n", fstream->fname, fstream->recv_bytes_count, fstream->trailing_chunk_size);
+            // fprintf(stdout, "Received complete file: %s, Size: %llu, Last chunk size: %llu\n", fstream->fname, fstream->recv_bytes_count, fstream->trailing_chunk_size);
         }
     }
 
@@ -167,14 +167,13 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBu
     } else {
         DWORD error = GetLastError();
         if (error == ERROR_ALREADY_EXISTS) {
-            printf("Folder already exists.\n");
+            //printf("Folder already exists.\n");
         } else {
             printf("Failed to create folder. Error code: %lu\n", error);
             goto exit_error;
         }
     }
     snprintf(fstream->fpath, MAX_PATH, "%s%s", folderName, fstream->fname);
-    fprintf(stdout, "FILE COMPLETE PATH: %s", fstream->fpath);
 
     // creating output file
     fstream->fp = fopen(fstream->fpath, "wb+"); // "wb+" allows writing and reading, creates or truncates
@@ -184,7 +183,9 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBu
         goto exit_error;
     }
 
-    push_fstream(&buffers->queue_fstream, (intptr_t)fstream);
+    if(push_fstream(&buffers->queue_fstream, (uintptr_t)fstream) == RET_VAL_ERROR){
+        goto exit_error;
+    }
 
     LeaveCriticalSection(&fstream->lock);
     return RET_VAL_SUCCESS;
@@ -232,7 +233,7 @@ int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers
 
     ServerFileStream *fstream = get_free_file_stream(buffers);
     if(fstream == NULL){
-        fprintf(stderr, "All new file transfers streams are in use!\n");
+        // fprintf(stderr, "All new file transfers streams are in use!\n");
         op_code = ERR_RESOURCE_LIMIT;
         goto exit_err; 
     }
