@@ -20,24 +20,28 @@
 
 
 ServerFileStream *get_free_file_stream(ServerBuffers *buffers){
+    EnterCriticalSection(&buffers->fstreams_lock);
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &buffers->fstream[i];
         if(!fstream->fstream_busy){
-            EnterCriticalSection(&fstream->lock);
             fstream->fstream_busy = TRUE;
-            LeaveCriticalSection(&fstream->lock);
+            LeaveCriticalSection(&buffers->fstreams_lock);
             return fstream;
         }
     }
+    LeaveCriticalSection(&buffers->fstreams_lock);
     return NULL;
 }
 
 ServerFileStream *search_file_stream(ServerBuffers *buffers, const uint32_t session_id, const uint32_t file_id){
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &buffers->fstream[i];
+        // EnterCriticalSection(&fstream->lock);
         if(fstream->fstream_busy == TRUE && fstream->sid == session_id && fstream->fid == file_id){
+            // LeaveCriticalSection(&fstream->lock);
             return fstream;
         }
+        // LeaveCriticalSection(&fstream->lock);
     }
     return NULL;
 }
@@ -339,9 +343,6 @@ bool normalize_paths(char *path, bool add_trailing_backslash) {
 
     return true;
 }
-
-
-
 
 
 

@@ -230,6 +230,7 @@ typedef struct {
 
     QueueFstream queue_fstream;
     ServerFileStream fstream[MAX_SERVER_ACTIVE_FSTREAMS];
+    CRITICAL_SECTION fstreams_lock;
     // CRITICAL_SECTION fstream_list_lock;
     // uint32_t available_fstreams;
 

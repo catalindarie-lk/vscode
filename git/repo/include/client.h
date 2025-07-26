@@ -163,6 +163,7 @@ typedef struct {
     HashTableFramePendingAck ht_frame;
 
     ClientFileStream fstream[MAX_CLIENT_ACTIVE_FSTREAMS];
+    CRITICAL_SECTION fstreams_lock;
     QueueCommand queue_fstream;
 
     ClientMessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];

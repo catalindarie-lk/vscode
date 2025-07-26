@@ -172,7 +172,7 @@ static int init_server_buffers(){
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         InitializeCriticalSection(&buffers.fstream[i].lock);
     }
-
+    InitializeCriticalSection(&buffers.fstreams_lock);
     buffers.test_semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
 
     server.server_status = STATUS_READY;
@@ -781,7 +781,6 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
         }
 
         sha256_init(&sha256_ctx);                              
-        
         while(fstream->fstream_busy){
         // while(1){
         // WaitForSingleObject(buffers.test_semaphore, INFINITE);

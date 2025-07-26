@@ -207,6 +207,7 @@ static int init_client_handles(){
         }
         InitializeCriticalSection(&buffers.fstream[index].lock);
     }
+    InitializeCriticalSection(&buffers.fstreams_lock);
     // Initialize mstreams
     for(int index = 0; index < MAX_CLIENT_ACTIVE_MSTREAMS; index++){
         InitializeCriticalSection(&buffers.mstream[index].lock);
@@ -621,26 +622,28 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
         pop_command(&buffers.queue_fstream, &entry);
          
         ClientFileStream *fstream = NULL;
+        EnterCriticalSection(&buffers.fstreams_lock);
         for(int index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
             fstream = &buffers.fstream[index];
             if(!fstream->fstream_busy){
-                EnterCriticalSection(&fstream->lock);
                 fstream->fstream_busy = TRUE;
-                memcpy(fstream->fpath, &entry.command.send_file.fpath, MAX_PATH);
-                memcpy(fstream->rpath, &entry.command.send_file.rpath, MAX_PATH);
-                memcpy(fstream->fname, &entry.command.send_file.fname, MAX_PATH);
-                // fprintf(stdout, "Free file stream %d opened...\n", index);
                 break;
             }
         }
+        LeaveCriticalSection(&buffers.fstreams_lock);
 
         if(!fstream){
-            LeaveCriticalSection(&fstream->lock);
             fprintf(stderr, "ERROR: All fstreams are busy!\n");
             continue;
         }
+        
+        EnterCriticalSection(&fstream->lock);
+        
+        snprintf(fstream->fpath, MAX_PATH, "%s", entry.command.send_file.fpath);
+        snprintf(fstream->rpath, MAX_PATH, "%s", entry.command.send_file.rpath);
+        snprintf(fstream->fname, MAX_PATH, "%s", entry.command.send_file.fname);
 
-        sha256_init(&sha256_ctx);
+        sha256_init(&sha256_ctx);       
         fstream->fp = NULL;
         
         char _FileName[MAX_PATH] = {0};
