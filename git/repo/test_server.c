@@ -33,7 +33,9 @@ ClientList client_list;
 HANDLE hthread_receive_frame;
 HANDLE hthread_process_frame;
 HANDLE hthread_ack_frame;
-HANDLE hthread_send_ack;
+HANDLE hthread_send_priority_ack;
+HANDLE hthread_send_message_ack[SERVER_ACK_MESSAGE_FRAMES_THREADS];
+HANDLE hthread_send_file_ack[SERVER_ACK_FILE_FRAMES_THREADS];
 HANDLE hthread_client_timeout;
 HANDLE hthread_file_stream[MAX_SERVER_ACTIVE_FSTREAMS];
 HANDLE hthread_server_command;
@@ -58,7 +60,9 @@ static void update_statistics(Client *client);
 // Thread functions
 DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_process_frame(LPVOID lpParam);
-DWORD WINAPI thread_proc_send_ack(LPVOID lpParam);
+DWORD WINAPI thread_proc_send_priority_ack(LPVOID lpParam);
+DWORD WINAPI thread_proc_send_message_ack(LPVOID lpParam);
+DWORD WINAPI thread_proc_send_file_ack(LPVOID lpParam);
 DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam);
 DWORD WINAPI thread_proc_file_stream(LPVOID lpParam);
 DWORD WINAPI thread_proc_server_command(LPVOID lpParam);
@@ -193,11 +197,26 @@ static int start_threads() {
         return RET_VAL_ERROR;
     }
 
-    hthread_send_ack = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_ack, NULL, 0, NULL);
-    if (hthread_send_ack == NULL) {
+    hthread_send_priority_ack = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_priority_ack, NULL, 0, NULL);
+    if (hthread_send_priority_ack == NULL) {
         fprintf(stderr, "Failed to create send ack thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
+    for(int i = 0; i < SERVER_ACK_MESSAGE_FRAMES_THREADS; i++){
+        hthread_send_message_ack[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_message_ack, NULL, 0, NULL);
+        if (hthread_send_message_ack[i] == NULL) {
+            fprintf(stderr, "Failed to create send ack thread. Error: %d\n", GetLastError());
+            return RET_VAL_ERROR;
+        }
+    }
+    for(int i = 0; i < SERVER_ACK_FILE_FRAMES_THREADS; i++){
+        hthread_send_file_ack[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_file_ack, NULL, 0, NULL);
+        if (hthread_send_file_ack[i] == NULL) {
+            fprintf(stderr, "Failed to create send ack thread. Error: %d\n", GetLastError());
+            return RET_VAL_ERROR;
+        }
+    }
+
 
     hthread_client_timeout = (HANDLE)_beginthreadex(NULL, 0, thread_proc_client_timeout, &client_list, 0, NULL);
     if (hthread_client_timeout == NULL) {
@@ -237,20 +256,6 @@ static void shutdown_server() {
         CloseHandle(hthread_process_frame);
     }
     fprintf(stdout,"process thread closed...\n");
-
-    // if (hthread_ack_frame) {
-    //     // Signal the receive thread to stop and wait for it to finish
-    //     WaitForSingleObject(hthread_ack_frame, INFINITE);
-    //     CloseHandle(hthread_ack_frame);
-    // }
-    // fprintf(stdout,"ack thread closed...\n");
-
-    if (hthread_send_ack) {
-        // Signal the receive thread to stop and wait for it to finish
-        WaitForSingleObject(hthread_send_ack, INFINITE);
-        CloseHandle(hthread_send_ack);
-    }
-    fprintf(stdout,"send ack thread closed...\n");
 
     if (hthread_client_timeout) {
         // Signal the receive thread to stop and wait for it to finish
@@ -436,10 +441,12 @@ void update_statistics(Client * client){
 DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
 
     ServerData *server = (ServerData*)lpParam;
+    QueueFrameEntry frame_entry;
 
-    if(issue_WSARecvFrom(server->socket, &server->iocp_context) == RET_VAL_ERROR){
+    if(udp_recv_from(server->socket, &server->iocp_context) == RET_VAL_ERROR){
         fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
         //TODO initiate some kind of global error and stop client?
+        Sleep(100);
         goto retry;
     }
 
@@ -465,6 +472,7 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
                     continue;
                 } else {
                     fprintf(stderr, "GetQueuedCompletionStatus failed with error: %d\n", wsa_error);
+                    Sleep(100);
                     goto retry;
                 }
             }
@@ -478,7 +486,7 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
         
         // Validate and dispatch frame
         if (NrOfBytesTransferred > 0 && NrOfBytesTransferred <= sizeof(UdpFrame)) {
-            QueueFrameEntry frame_entry = {0};
+            memset(&frame_entry, 0, sizeof(QueueFrameEntry));
             memcpy(&frame_entry.frame, iocp_overlapped->buffer, NrOfBytesTransferred);
             memcpy(&frame_entry.src_addr, &iocp_overlapped->src_addr, sizeof(struct sockaddr_in));
             frame_entry.frame_size = NrOfBytesTransferred;
@@ -496,12 +504,14 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
                 target_queue = &buffers.queue_frame;
             }
             if (push_frame(target_queue, &frame_entry) == RET_VAL_ERROR) {
-                fprintf(stderr, "Failed to push frame to queue. Queue full?\n");
+                Sleep(100);
+                continue;
             }
         }
 retry:
-        if(issue_WSARecvFrom(server->socket, iocp_overlapped) == RET_VAL_ERROR){
+        if(udp_recv_from(server->socket, iocp_overlapped) == RET_VAL_ERROR){
             fprintf(stderr, "WSARecvFrom re-issue failed: %d\n", WSAGetLastError());
+            Sleep(100);
             goto retry;
         }
     }
@@ -534,6 +544,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                         };
 
     while(server.server_status == STATUS_READY) {
+        memset(&frame_entry, 0, sizeof(QueueFrameEntry));
         DWORD result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
         if (result == WAIT_OBJECT_0) {
             if (pop_frame(&buffers.queue_priority_frame, &frame_entry) == RET_VAL_ERROR) {
@@ -575,7 +586,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
         client = NULL;
         time_t now = time(NULL);
 
-        if(header_frame_type == FRAME_TYPE_CONNECT_REQUEST && header_session_id == FRAME_TYPE_CONNECT_REQUEST_SID){
+        if(header_frame_type == FRAME_TYPE_CONNECT_REQUEST && header_session_id == DEFAULT_CONNECT_REQUEST_SID){
             client = add_client(&client_list, frame, server.socket, src_addr);
             if (client == NULL) {
                 fprintf(stderr, "Failed to add new client from %s:%d. Max clients reached or server error.\n", src_ip, src_port);
@@ -595,7 +606,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
             fprintf(stdout, "Client %s:%d Requested connection. Responding to connect request with Session ID: %u\n", client->ip, src_port, client->sid);
             continue;
 
-        } else if (header_frame_type == FRAME_TYPE_CONNECT_REQUEST && header_session_id != FRAME_TYPE_CONNECT_REQUEST_SID) {
+        } else if (header_frame_type == FRAME_TYPE_CONNECT_REQUEST && header_session_id != DEFAULT_CONNECT_REQUEST_SID) {
             client = find_client(&client_list, header_session_id);
             if(client == NULL){
                 fprintf(stderr, "Unknown client tried to re-connect\n");
@@ -698,34 +709,25 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
     _endthreadex(0);
     return 0;
 }
-// --- Ack Thread function ---
-DWORD WINAPI thread_proc_send_ack(LPVOID lpParam){
+// --- Ack Thread functions ---
+DWORD WINAPI thread_proc_send_priority_ack(LPVOID lpParam){
 
     QueueAckEntry ack_entry;
-    HANDLE events[3] = {buffers.queue_priority_ack.push_semaphore, 
-                                    buffers.mqueue_ack.push_semaphore, 
-                                    buffers.fqueue_ack.push_semaphore
-                                    };
+    // HANDLE events[3] = {buffers.queue_priority_ack.push_semaphore, 
+    //                                 buffers.mqueue_ack.push_semaphore, 
+    //                                 buffers.fqueue_ack.push_semaphore
+    //                                 };
 
     while (server.server_status == STATUS_READY) {
-        DWORD result = WaitForMultipleObjects(3, events, FALSE, INFINITE);
+        // DWORD result = WaitForMultipleObjects(3, events, FALSE, INFINITE);
+        DWORD result = WaitForSingleObject(buffers.queue_priority_ack.push_semaphore, INFINITE);
         if (result == WAIT_OBJECT_0) {
             if (pop_ack(&buffers.queue_priority_ack, &ack_entry) == RET_VAL_ERROR) {
                 fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack priority queue RET_VAL_ERROR\n");
                 continue;
             }
-        } else if (result == WAIT_OBJECT_0 + 1) {
-            if (pop_ack(&buffers.mqueue_ack, &ack_entry) == RET_VAL_ERROR) {
-                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack mqueue RET_VAL_ERROR\n");
-                continue;
-            }
-        } else if (result == WAIT_OBJECT_0 + 2) {
-            if (pop_ack(&buffers.fqueue_ack, &ack_entry) == RET_VAL_ERROR) {
-                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack fqueue RET_VAL_ERROR\n");
-                continue;
-            }
         } else {
-            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore ack queues: %lu\n", result);
+            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore priority ack queues: %lu\n", result);
             continue;
         }
         send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr);
@@ -733,6 +735,47 @@ DWORD WINAPI thread_proc_send_ack(LPVOID lpParam){
     _endthreadex(0);
     return 0;
 }
+DWORD WINAPI thread_proc_send_message_ack(LPVOID lpParam){
+
+    QueueAckEntry ack_entry;
+
+    while (server.server_status == STATUS_READY) {
+        DWORD result = WaitForSingleObject(buffers.mqueue_ack.push_semaphore, INFINITE);
+        if (result == WAIT_OBJECT_0) {
+            if (pop_ack(&buffers.mqueue_ack, &ack_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from message ack queue RET_VAL_ERROR\n");
+                continue;
+            }
+        } else {
+            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore message ack queues: %lu\n", result);
+            continue;
+        }
+        send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr);
+    }
+    _endthreadex(0);
+    return 0;
+}
+DWORD WINAPI thread_proc_send_file_ack(LPVOID lpParam){
+
+    QueueAckEntry ack_entry;
+
+    while (server.server_status == STATUS_READY) {
+        DWORD result = WaitForSingleObject(buffers.fqueue_ack.push_semaphore, INFINITE);
+        if (result == WAIT_OBJECT_0) {
+            if (pop_ack(&buffers.fqueue_ack, &ack_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from file ack queue RET_VAL_ERROR\n");
+                continue;
+            }
+        } else {
+            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore file ack queues: %lu\n", result);
+            continue;
+        }
+        send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr);
+    }
+    _endthreadex(0);
+    return 0;
+}
+
 // --- Client timeout thread function ---
 DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
 
@@ -1195,4 +1238,56 @@ int main() {
     shutdown_server();
     return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// DWORD WINAPI thread_proc_send_ack(LPVOID lpParam){
+
+//     QueueAckEntry ack_entry;
+//     HANDLE events[3] = {buffers.queue_priority_ack.push_semaphore, 
+//                                     buffers.mqueue_ack.push_semaphore, 
+//                                     buffers.fqueue_ack.push_semaphore
+//                                     };
+
+//     while (server.server_status == STATUS_READY) {
+//         DWORD result = WaitForMultipleObjects(3, events, FALSE, INFINITE);
+//         if (result == WAIT_OBJECT_0) {
+//             if (pop_ack(&buffers.queue_priority_ack, &ack_entry) == RET_VAL_ERROR) {
+//                 fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack priority queue RET_VAL_ERROR\n");
+//                 continue;
+//             }
+//         } else if (result == WAIT_OBJECT_0 + 1) {
+//             if (pop_ack(&buffers.mqueue_ack, &ack_entry) == RET_VAL_ERROR) {
+//                 fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack mqueue RET_VAL_ERROR\n");
+//                 continue;
+//             }
+//         } else if (result == WAIT_OBJECT_0 + 2) {
+//             if (pop_ack(&buffers.fqueue_ack, &ack_entry) == RET_VAL_ERROR) {
+//                 fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack fqueue RET_VAL_ERROR\n");
+//                 continue;
+//             }
+//         } else {
+//             fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore ack queues: %lu\n", result);
+//             continue;
+//         }
+//         send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr);
+//     }
+//     _endthreadex(0);
+//     return 0;
+// }
 

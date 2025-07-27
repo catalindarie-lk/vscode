@@ -78,7 +78,9 @@ int send_file_metadata(const uint64_t seq_num,
                             const uint32_t file_id, 
                             const uint64_t file_size,
                             const char *rpath,
+                            const uint32_t rpath_len,
                             const char *fname,
+                            const uint32_t fname_len,
                             const uint32_t file_fragment_size, 
                             const SOCKET src_socket, 
                             const struct sockaddr_in *dest_addr,
@@ -89,37 +91,63 @@ int send_file_metadata(const uint64_t seq_num,
     // Initialize the text message frame
     memset(&frame, 0, sizeof(UdpFrame));
 
-    // --- Validate rpath (relative path + filename) ---
+ 
+  // --- Validate rpath ---
     if(rpath == NULL){
         fprintf(stderr, "ERROR: send_file_metadata - Invalid relative file path pointer (NULL).\n");
         return RET_VAL_ERROR;
     }
-    size_t rpath_len = s_strnlen(rpath, MAX_PATH); // Actual string length without null
-    if(rpath_len <= 0){ // Relative path + filename should never be 0 length
-        fprintf(stderr, "ERROR: send_file_metadata - Relative file path is 0 length (missing filename?).\n");
+
+    // NEW: rpath must be at least 1 character (for '\')
+    if(rpath_len == 0){ // If declared length is 0
+        fprintf(stderr, "ERROR: send_file_metadata - Relative file path has a declared length of 0. Minimum is 1 (for '\\').\n");
         return RET_VAL_ERROR;
     }
-    // Check against the size of the field in UdpFrame payload.
-    if(rpath_len >= sizeof(frame.payload.file_metadata.rpath)){
-        fprintf(stderr, "ERROR: send_file_metadata - Relative file path is too long. Max length for payload is %zu characters (excluding null). Length: %llu\n", sizeof(frame.payload.file_metadata.rpath) - 1, rpath_len);
+    if (strlen(rpath) == 0) { // If actual string content is empty
+        fprintf(stderr, "ERROR: send_file_metadata - Relative file path content is empty. Minimum is 1 character (for '\\').\n");
         return RET_VAL_ERROR;
     }
 
-    // --- Validate fname (just the filename) ---
+    // Check against the size of the field in UdpFrame payload.
+    // rpath_len is *content* length, and receiver expects `content_len < MAX_PATH`.
+    // So, `rpath_len >= sizeof(frame.payload.file_metadata.rpath)` means it won't fit WITH a null terminator.
+    if(rpath_len >= sizeof(frame.payload.file_metadata.rpath)){
+        fprintf(stderr, "ERROR: send_file_metadata - Relative file path content (length %u) is too long for payload buffer (max %zu chars).\n",
+                rpath_len, sizeof(frame.payload.file_metadata.rpath) - 1);
+        return RET_VAL_ERROR;
+    }
+    // Consistency check: declared length vs. actual string length
+    if (rpath_len != strlen(rpath)) {
+        fprintf(stderr, "ERROR: send_file_metadata - Declared rpath_len (%u) does not match actual strlen(rpath) (%zu).\n",
+                rpath_len, strlen(rpath));
+        return RET_VAL_ERROR;
+    }
+
+
+    // --- Validate fname ---
     if(fname == NULL){
         fprintf(stderr, "ERROR: send_file_metadata - Invalid filename pointer (NULL).\n");
         return RET_VAL_ERROR;
     }
-    size_t fname_len = s_strnlen(fname, MAX_PATH); // Actual string length without null
-    if(fname_len == 0){ // Filename should never be 0 length
-        fprintf(stderr, "ERROR: send_file_metadata - Filename is 0 length.\n");
+    // Filename should typically never be 0 length
+    if(fname_len == 0){
+        fprintf(stderr, "ERROR: send_file_metadata - Filename has a declared length of 0.\n");
         return RET_VAL_ERROR;
     }
-    // Check against the size of the field in UdpFrame payload.
+
     if(fname_len >= sizeof(frame.payload.file_metadata.fname)){
-        fprintf(stderr, "ERROR: send_file_metadata - Filename is too long. Max length for payload is %zu characters (excluding null). Length: %llu\n", sizeof(frame.payload.file_metadata.fname) - 1, fname_len);
+        fprintf(stderr, "ERROR: send_file_metadata - Filename content (length %u) is too long for payload buffer (max %zu chars).\n",
+                fname_len, sizeof(frame.payload.file_metadata.fname) - 1);
         return RET_VAL_ERROR;
     }
+    // Consistency check: declared length vs. actual string length
+    if (fname_len != strlen(fname)) {
+        fprintf(stderr, "ERROR: send_file_metadata - Declared fname_len (%u) does not match actual strlen(fname) (%zu).\n",
+                fname_len, strlen(fname));
+        return RET_VAL_ERROR;
+    }
+
+
 
     // Set the header fields
     frame.header.start_delimiter = _htons(FRAME_DELIMITER);
@@ -129,12 +157,28 @@ int send_file_metadata(const uint64_t seq_num,
     // Set the payload fields
     frame.payload.file_metadata.file_id = _htonl(file_id);
     frame.payload.file_metadata.file_size = _htonll(file_size);
-    // _snprintf_s handles truncation and null-termination automatically
-    _snprintf_s(frame.payload.file_metadata.rpath, sizeof(frame.payload.file_metadata.rpath), _TRUNCATE, "%s", rpath);
-    frame.payload.file_metadata.rpath_len = _htonl((uint32_t)rpath_len);
-    _snprintf_s(frame.payload.file_metadata.fname, sizeof(frame.payload.file_metadata.fname), _TRUNCATE, "%s", fname); 
-    frame.payload.file_metadata.fname_len = _htonl((uint32_t)fname_len);
-    // Calculate the checksum for the frame
+
+
+   // --- Copy rpath to payload buffer ---
+    // At this point, we've validated:
+    // 1. rpath is not NULL.
+    // 2. rpath_len matches strlen(rpath).
+    // 3. rpath_len is strictly less than sizeof(buffer), so it will fit and be null-terminated.
+    // So, a direct copy with _snprintf_s is now safe and guaranteed not to truncate.
+    _snprintf_s(frame.payload.file_metadata.rpath, sizeof(frame.payload.file_metadata.rpath),
+                rpath_len, // Use rpath_len as the max count for _snprintf_s. This ensures we copy exactly rpath_len characters.
+                "%s", rpath);
+    frame.payload.file_metadata.rpath_len = _htonl(rpath_len); // Send the exact content length
+
+
+    // --- Copy fname to payload buffer ---
+    // Similar validations apply.
+    _snprintf_s(frame.payload.file_metadata.fname, sizeof(frame.payload.file_metadata.fname),
+                fname_len, // Use fname_len as the max count for _snprintf_s.
+                "%s", fname);
+    frame.payload.file_metadata.fname_len = _htonl(fname_len); // Send the exact content length
+
+
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));
     
     if(ht_insert_frame(&buffers->ht_frame, &frame) == RET_VAL_ERROR){

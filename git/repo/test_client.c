@@ -73,11 +73,11 @@ static int init_client_session(){
     snprintf(client.client_name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, CLIENT_NAME);
     client.last_active_time = time(NULL);
 
-    client.frame_count = (uint64_t)UINT32_MAX;
+    client.frame_count = 1;//(uint64_t)UINT32_MAX;
     client.fid_count = 0;
     client.mid_count = 0;
 
-    client.sid = FRAME_TYPE_CONNECT_REQUEST_SID;
+    client.sid = DEFAULT_CONNECT_REQUEST_SID;
     client.server_status = STATUS_CLOSED;
     client.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
     // Initialize client data
@@ -89,11 +89,11 @@ static int reset_client_session(){
     
     client.session_status = CONNECTION_CLOSED;
     
-    client.frame_count = (uint64_t)UINT32_MAX;
+    client.frame_count = 1;//(uint64_t)UINT32_MAX;
     client.fid_count = 0;
     client.mid_count = 0;
 
-    client.sid = FRAME_TYPE_CONNECT_REQUEST_SID;
+    client.sid = DEFAULT_CONNECT_REQUEST_SID;
     client.server_status = STATUS_CLOSED;
     client.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
     // Initialize client data
@@ -179,8 +179,8 @@ static int init_client_buffers(){
 }
 static int init_client_handles(){
     // Initialize connection request event
-    client.hevent_connection_listening = CreateEvent(NULL, FALSE, FALSE, NULL);
-    if (client.hevent_connection_listening == NULL) {
+    client.hevent_connection_pending = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (client.hevent_connection_pending == NULL) {
         fprintf(stdout, "CreateEvent listen failed (%lu)\n", GetLastError());
         return RET_VAL_ERROR;
     }
@@ -290,8 +290,9 @@ static void client_shutdown(){
 DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
 
     ClientData *client = (ClientData*)lpParam;
+    QueueFrameEntry frame_entry;
   
-    if(issue_WSARecvFrom(client->socket, &client->iocp_context) == RET_VAL_ERROR){
+    if(udp_recv_from(client->socket, &client->iocp_context) == RET_VAL_ERROR){
         fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
         client->client_status = STATUS_ERROR;
         //TODO initiate some kind of global error and stop client?
@@ -307,9 +308,9 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
     DWORD check_shutdown;
    
     while(client->client_status == STATUS_READY){
-        WaitForSingleObject(client->hevent_connection_listening, INFINITE);       
+        WaitForSingleObject(client->hevent_connection_pending, INFINITE);       
 
-        client->session_status = CONNECTION_LISTENING;
+        client->session_status = CONNECTION_PENDING;
         while(1){
 
             if(client->session_status == CONNECTION_CLOSED){
@@ -345,16 +346,19 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
             // Validate and dispatch frame
             if (NrOfBytesTransferred > 0 && NrOfBytesTransferred <= sizeof(UdpFrame)) {
                 
-                QueueFrameEntry frame_entry = {0};
+                memset(&frame_entry, 0, sizeof(QueueFrameEntry));
                 memcpy(&frame_entry.frame, iocp_overlapped->buffer, NrOfBytesTransferred);
                 memcpy(&frame_entry.src_addr, &iocp_overlapped->src_addr, sizeof(struct sockaddr_in));
                 frame_entry.frame_size = NrOfBytesTransferred;
     
                 uint8_t frame_type = frame_entry.frame.header.frame_type;
-                uint8_t op_code = frame_entry.frame.payload.ack.op_code;
+                uint8_t op_code = 0;
+                if(frame_type == FRAME_TYPE_ACK){
+                    op_code = frame_entry.frame.payload.ack.op_code;
+                }                
                 
                 BOOL is_high_priority_frame = (frame_type == FRAME_TYPE_CONNECT_RESPONSE ||
-                                                 frame_type == FRAME_TYPE_DISCONNECT ||
+                                                frame_type == FRAME_TYPE_DISCONNECT ||
                                                 (frame_type == FRAME_TYPE_ACK && op_code == STS_KEEP_ALIVE) ||
                                                 (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_DISCONNECT) ||
                                                 (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_FILE_METADATA) ||
@@ -374,7 +378,7 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
                 }          
             }
 
-            if(issue_WSARecvFrom(client->socket, iocp_overlapped) == RET_VAL_ERROR){
+            if(udp_recv_from(client->socket, iocp_overlapped) == RET_VAL_ERROR){
                 fprintf(stderr, "WSARecvFrom re-issue failed: %d\n", WSAGetLastError());
                 continue;
             }
@@ -410,6 +414,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
 
     while(client.client_status == STATUS_READY){
 
+        memset(&frame_entry, 0, sizeof(QueueFrameEntry));
         DWORD result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
         if (result == WAIT_OBJECT_0) {
             if (pop_frame(&buffers.queue_priority_frame, &frame_entry) == RET_VAL_ERROR) {
@@ -491,7 +496,7 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                     }
                 }
 
-                if(recv_seq_num == FRAME_TYPE_DISCONNECT_SEQ && recv_op_code == STS_CONFIRM_DISCONNECT){
+                if(recv_seq_num == DEFAULT_DISCONNECT_SEQ && recv_op_code == STS_CONFIRM_DISCONNECT){
                     SetEvent(client.hevent_connection_closed);
                     fprintf(stdout, "Received disconnect ACK code: %lu; for seq num: %llx\n", frame->payload.ack.op_code, recv_seq_num);
                 }
@@ -568,24 +573,28 @@ DWORD WINAPI thread_proc_resend_frame(LPVOID lpParam){
     while(client.client_status == STATUS_READY){ 
         if(client.session_status == CONNECTION_CLOSED){
             ht_clean(&buffers.ht_frame);
-            Sleep(100);
+            Sleep(250);
             continue;
         }
         time_t current_time = time(NULL);
         if(buffers.ht_frame.count == 0){
-            Sleep(100);
+            Sleep(250);
             continue;
         }
         for(int i = 0; i < MAX_CLIENT_ACTIVE_FSTREAMS; i++){
             BOOL frames_to_resend = buffers.fstream[i].pending_bytes == 0 || buffers.fstream[i].throttle;
             if(!frames_to_resend){
-                Sleep(100);
+                Sleep(250);
                 continue;
             }
             EnterCriticalSection(&buffers.ht_frame.mutex);
             for (int i = 0; i < HASH_SIZE_FRAME; i++) {
                 FramePendingAck *ptr = buffers.ht_frame.entry[i];
                 while (ptr) {
+                    if(ptr->frame.header.frame_type == FRAME_TYPE_FILE_METADATA){
+                        send_frame(&ptr->frame, client.socket, &client.server_addr);
+                        ptr->time = current_time;
+                    }
                     if(current_time - ptr->time > (time_t)RESEND_TIMEOUT_SEC){
                         send_frame(&ptr->frame, client.socket, &client.server_addr);
                         ptr->time = current_time;
@@ -595,7 +604,7 @@ DWORD WINAPI thread_proc_resend_frame(LPVOID lpParam){
             }
             LeaveCriticalSection(&buffers.ht_frame.mutex);
         }
-        Sleep(100);
+        Sleep(250);
     }
 exit_thread:
     fprintf(stdout,"resend frame thread exiting...\n");
@@ -616,7 +625,7 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
     QueueCommandEntry entry;
 
     while(client.client_status == STATUS_READY){
-
+        memset(&entry, 0, sizeof(QueueCommandEntry));
         WaitForSingleObject(threads.fstream_semaphore, INFINITE);
         
         pop_command(&buffers.queue_fstream, &entry);
@@ -638,10 +647,42 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
         }
         
         EnterCriticalSection(&fstream->lock);
-        
-        snprintf(fstream->fpath, MAX_PATH, "%s", entry.command.send_file.fpath);
-        snprintf(fstream->rpath, MAX_PATH, "%s", entry.command.send_file.rpath);
-        snprintf(fstream->fname, MAX_PATH, "%s", entry.command.send_file.fname);
+       
+        // Safely copy paths using the lengths from the queue entry
+        // fpath
+        int result = snprintf(fstream->fpath, MAX_PATH, "%.*s",
+                                   (int)entry.command.send_file.fpath_len,
+                                   entry.command.send_file.fpath);
+        if (result < 0 || (size_t)result != entry.command.send_file.fpath_len) {
+            fprintf(stderr, "ERROR: thread_fstream_function - Failed to copy fpath '%.*s' (truncation or error). Result: %d, Expected: %u\n",
+                    (int)entry.command.send_file.fpath_len, entry.command.send_file.fpath,
+                    result, entry.command.send_file.fpath_len);
+            goto clean; // Essential to clean up if path copy fails
+        }
+        fstream->fpath_len = entry.command.send_file.fpath_len;
+        // rpath
+        result = snprintf(fstream->rpath, MAX_PATH, "%.*s",
+                                   (int)entry.command.send_file.rpath_len,
+                                   entry.command.send_file.rpath);
+        if (result < 0 || (size_t)result != entry.command.send_file.rpath_len) {
+            fprintf(stderr, "ERROR: thread_fstream_function - Failed to copy rpath '%.*s' (truncation or error). Result: %d, Expected: %u\n",
+                    (int)entry.command.send_file.rpath_len, entry.command.send_file.rpath,
+                    result, entry.command.send_file.rpath_len);
+            goto clean; // Essential to clean up if path copy fails
+        }
+        fstream->rpath_len = entry.command.send_file.rpath_len;
+
+        // fname
+        result = snprintf(fstream->fname, MAX_PATH, "%.*s",
+                                   (int)entry.command.send_file.fname_len,
+                                   entry.command.send_file.fname);
+        if (result < 0 || (size_t)result != entry.command.send_file.fname_len) {
+            fprintf(stderr, "ERROR: thread_fstream_function - Failed to copy fname '%.*s' (truncation or error). Result: %d, Expected: %u\n",
+                    (int)entry.command.send_file.fname_len, entry.command.send_file.fname,
+                    result, entry.command.send_file.fname_len);
+            goto clean; // Essential to clean up if path copy fails
+        }
+        fstream->fname_len = entry.command.send_file.fname_len;
 
         sha256_init(&sha256_ctx);       
         fstream->fp = NULL;
@@ -668,8 +709,10 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
                                                         client.sid, 
                                                         fstream->fid, 
                                                         fstream->fsize,
-                                                        fstream->rpath, 
+                                                        fstream->rpath,
+                                                        fstream->rpath_len, 
                                                         fstream->fname, 
+                                                        fstream->fname_len,
                                                         FILE_FRAGMENT_SIZE, 
                                                         client.socket, 
                                                         &client.server_addr,
@@ -736,7 +779,7 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
                                                                 &buffers
                                                             );
                 if(fragment_bytes_sent == RET_VAL_ERROR){
-                    Sleep(10);
+                    Sleep(1);
                     continue;
                 }
 
@@ -744,7 +787,6 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
                 frame_fragment_offset += frame_fragment_size;                       
                 chunk_bytes_to_send -= frame_fragment_size;
                 fstream->pending_bytes -= frame_fragment_size;
-                
             }     
         }                  
 
@@ -915,7 +957,7 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                 }
                 memset(_path, 0, MAX_PATH);
                 snprintf(_path, MAX_PATH, "%s%s", SRC_FPATH, "test_file.txt");
-                SendSingleFile(_path);
+                SendSingleFile(_path, strlen(_path));
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
             case 'f':
@@ -925,7 +967,7 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                 }
                 memset(_path, 0, MAX_PATH);
                 snprintf(_path, MAX_PATH, "%s", SRC_FPATH);
-                SendAllFilesInFolder(_path);
+                SendAllFilesInFolder(_path, strlen(_path));
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
             case 'g':
@@ -935,7 +977,7 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                 }
                 memset(_path, 0, MAX_PATH);
                 snprintf(_path, MAX_PATH, "%s", SRC_FPATH);
-                SendAllFilesInFolderAndSubfolders(_path);
+                SendAllFilesInFolderAndSubfolders(_path, strlen(_path));
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
             case 't':
@@ -995,7 +1037,7 @@ void request_connect(){
 
     ResetEvent(client.hevent_connection_closed);
     ResetEvent(client.hevent_connection_established);
-    SetEvent(client.hevent_connection_listening);
+    SetEvent(client.hevent_connection_pending);
     // send connect request frame
     send_connect_request(get_new_seq_num(), 
                             client.sid, 
@@ -1078,12 +1120,15 @@ static void clean_file_stream(ClientFileStream *fstream){
     }
     fstream->fid = 0;
     fstream->fsize = 0;
-    fstream->pending_bytes = 0;
-    fstream->throttle = FALSE;
-    fstream->fstream_busy = FALSE;
     memset(&fstream->fpath, 0, MAX_PATH);
     memset(&fstream->rpath, 0, MAX_PATH);
     memset(&fstream->fname, 0, MAX_PATH);
+    memset(&fstream->fhash, 0, sizeof(FileHash));
+    fstream->pending_bytes = 0;
+    fstream->pending_metadata_seq_num = 0;
+    memset(fstream->chunk_buffer, 0, FILE_CHUNK_SIZE);
+    fstream->throttle = FALSE;
+    fstream->fstream_busy = FALSE;
     LeaveCriticalSection(&fstream->lock);
     return;
 }

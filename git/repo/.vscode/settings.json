@@ -32,6 +32,8 @@
         "ws2tcpip.h": "c",
         "client_frames.h": "c",
         "client.h": "c",
-        "process.h": "c"
+        "process.h": "c",
+        "folders.h": "c",
+        "server_frames.h": "c"
     }
 }

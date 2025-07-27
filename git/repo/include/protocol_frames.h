@@ -19,8 +19,8 @@
 #define MAX_PATH                            (260)
 #endif
 
-#define SERVER_PORT                         (32768)               // Port the server listens on
-#define MAX_PAYLOAD_SIZE                    (1024)                // Max size of data within a frame payload (adjust as needed)
+#define SERVER_PORT                         (53567)               // Port the server listens on
+#define MAX_PAYLOAD_SIZE                    (1400)                // Max size of data within a frame payload (adjust as needed)
 #define FRAME_DELIMITER                     (0xAABB)              // A magic number to identify valid frames
 
 #define TEXT_FRAGMENT_SIZE                  (MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4)
@@ -28,12 +28,12 @@
 
 #define MAX_NAME_SIZE                       (255)                 // Maximum size for client/server names
 
-#define FRAME_TYPE_DISCONNECT_SEQ           (UINT64_MAX - 1)
-#define FRAME_TYPE_KEEP_ALIVE_SEQ           (UINT64_MAX - 2)
-#define FRAME_TYPE_CONNECT_REQUEST_SEQ      (UINT64_MAX - 3)
-#define FRAME_TYPE_CONNECT_RESPONSE_SEQ     (UINT64_MAX - 4)
+#define DEFAULT_DISCONNECT_SEQ           (UINT64_MAX - 1)
+#define DEFAULT_KEEP_ALIVE_SEQ           (UINT64_MAX - 2)
+#define DEFAULT_CONNECT_REQUEST_SEQ      (UINT64_MAX - 3)
+#define DEFAULT_CONNECT_RESPONSE_SEQ     (UINT64_MAX - 4)
 
-#define FRAME_TYPE_CONNECT_REQUEST_SID      (UINT32_MAX - 1)
+#define DEFAULT_CONNECT_REQUEST_SID      (UINT32_MAX - 1)
 
 #define WSARECV_TIMEOUT_MS                  (100)         // Timeout in milliseconds in the receive frame thread
 #define GETQCOMPL_TIMEOUT                   (258L)

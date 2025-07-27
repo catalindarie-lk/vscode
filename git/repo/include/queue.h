@@ -67,8 +67,11 @@ int pop_ack(QueueAck *queue, QueueAckEntry *entry);
 __declspec(align(64)) typedef struct{
     char text[32];
     char fpath[MAX_PATH];
+    uint32_t fpath_len;
     char rpath[MAX_PATH];
+    uint32_t rpath_len;
     char fname[MAX_PATH];
+    uint32_t fname_len;
 }QueueCommandEntrySendFile;
 
 __declspec(align(64)) typedef struct{

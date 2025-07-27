@@ -9,26 +9,28 @@
 #include "include/sha256.h"
 
 #ifndef RET_VAL_SUCCESS
-#define RET_VAL_SUCCESS                         (0)
+#define RET_VAL_SUCCESS                         0
 #endif
 #ifndef RET_VAL_ERROR
-#define RET_VAL_ERROR                           (-1)
+#define RET_VAL_ERROR                           -1
 #endif
 #ifndef MAX_CLIENT_MESSAGE_STREAMS
-#define MAX_CLIENT_MESSAGE_STREAMS              (10)
+#define MAX_CLIENT_MESSAGE_STREAMS              10
 #endif
 
 
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
-#define DEFAULT_SESSION_TIMEOUT_SEC             (120)
+#define DEFAULT_SESSION_TIMEOUT_SEC             120
 #endif
 
-#define MAX_SERVER_ACTIVE_FSTREAMS              (10)
+#define MAX_SERVER_ACTIVE_FSTREAMS              10
+#define SERVER_ACK_FILE_FRAMES_THREADS          3
+#define SERVER_ACK_MESSAGE_FRAMES_THREADS       1
 
 
 // --- Constants 
 #define SERVER_NAME                             "lkdc UDP Text/File Transfer Server"
-#define MAX_CLIENTS                             (10)
+#define MAX_CLIENTS                             10
 
 #define FRAGMENTS_PER_CHUNK                     (64ULL)
 #define CHUNK_TRAILING                          (1u << 7) // 0b10000000
@@ -41,11 +43,11 @@
 #define BLOCK_COUNT_CHUNK                       ((uint64_t)(8192))
 
 #define SERVER_SIZE_QUEUE_FRAME                 (8192 * MAX_CLIENTS)
-#define SERVER_SIZE_QUEUE_PRIORITY_FRAME        (1024)
+#define SERVER_SIZE_QUEUE_PRIORITY_FRAME        1024
 
-#define SERVER_SIZE_FQUEUE_ACK                  (65536)
-#define SERVER_SIZE_MQUEUE_ACK                  (65536)
-#define SERVER_SIZE_QUEUE_PRIORITY_ACK          (1024)
+#define SERVER_SIZE_FQUEUE_ACK                  65536
+#define SERVER_SIZE_MQUEUE_ACK                  65536
+#define SERVER_SIZE_QUEUE_PRIORITY_ACK          1024
 
 enum Status{
     STATUS_NONE = 0,
@@ -74,6 +76,9 @@ enum StreamChannelError{
     STREAM_ERR_FLAG_MALLOC = 11,
     STREAM_ERR_CHUNK_PTR_MALLOC = 12,
 
+    STREAM_ERR_MALFORMED_DATA = 13,
+    STREAM_ERR_INTERNAL_COPY  =14,
+
     STREAM_ERR_FILENAME = 20
 };
 
@@ -93,7 +98,6 @@ typedef struct{
     
     IOCP_CONTEXT iocp_context;
     HANDLE iocp_handle;
-   
 }ServerData;
 
 typedef struct{
@@ -127,11 +131,6 @@ typedef struct {
 } MessageStream;
 
 typedef struct{
-
-    // uint32_t client_index;              // client_list[index]
-    // uint32_t fstream_index;             // client.fstream[index]
-
-    // SOCKET srv_socket;
     struct sockaddr_in client_addr;
 
     uint32_t sid;                       // Session ID associated with this file stream.
@@ -179,7 +178,6 @@ typedef struct{
     // HANDLE hevent_recv_file;
     // HANDLE htread_recv_file;
     // HANDLE hevent_close_stream;
-
 }ServerFileStream;
 
 typedef struct {
@@ -205,7 +203,6 @@ typedef struct {
     Statistics statistics;
 
     CRITICAL_SECTION lock;
-
 } Client;
  
 typedef struct{
@@ -231,15 +228,12 @@ typedef struct {
     QueueFstream queue_fstream;
     ServerFileStream fstream[MAX_SERVER_ACTIVE_FSTREAMS];
     CRITICAL_SECTION fstreams_lock;
-    // CRITICAL_SECTION fstream_list_lock;
-    // uint32_t available_fstreams;
 
     HANDLE test_semaphore;
 
     HashTableFramePendingAck ht_frame;
     HashTableIdentifierNode ht_fid;
     HashTableIdentifierNode ht_mid;
-
 }ServerBuffers;
 
 #endif

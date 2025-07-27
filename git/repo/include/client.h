@@ -24,7 +24,7 @@
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
 #define DEFAULT_SESSION_TIMEOUT_SEC             (120)
 #endif
-
+ 
 // --- Constants ---
 
 #define CLIENT_ID                               (0xFF)        // Example client ID, can be set dynamically
@@ -36,7 +36,7 @@
 #define TEXT_CHUNK_SIZE                         (TEXT_FRAGMENT_SIZE * 128)
 #define FILE_CHUNK_SIZE                         (FILE_FRAGMENT_SIZE * 8192)
 
-#define RESEND_TIMEOUT_SEC                      (10)           //seconds
+#define RESEND_TIMEOUT_SEC                      (3)           //seconds
 
 #define MAX_MESSAGE_SIZE_BYTES                  (256 * 1024 * 1024)         // Max size of a long text message
 
@@ -67,7 +67,7 @@ enum Status{
 typedef uint8_t SessionStatus;
 enum SessionStatus{
     CONNECTION_CLOSED = 0,
-    CONNECTION_LISTENING = 1,
+    CONNECTION_PENDING = 1,
     CONNECTION_ESTABLISHED = 2,
 };
 
@@ -76,7 +76,6 @@ typedef struct{
 }FileHash;
 
 typedef struct{
-
     BOOL mstream_busy;
     
     char *message_buffer;
@@ -87,33 +86,29 @@ typedef struct{
     BOOL throttle;
 
     CRITICAL_SECTION lock;
-
-    // HANDLE hevent_start_message_send;
-    // HANDLE hevent_close_message_stream_thread;
-    // HANDLE hthread_message_send;
 }ClientMessageStream;
 
 typedef struct{
-    
-    char fpath[MAX_PATH];
-    char rpath[MAX_PATH];
-    char fname[MAX_PATH];
-
-    long long fsize;
+    BOOL fstream_busy;
     FILE *fp;
+    
+    uint32_t fid;
+    long long fsize;
+    char fpath[MAX_PATH];
+    uint32_t fpath_len;
+    char rpath[MAX_PATH];
+    uint32_t rpath_len;
+    char fname[MAX_PATH];
+    uint32_t fname_len;
     FileHash fhash;
 
-    uint32_t fid;
-
-    BOOL fstream_busy;
-    BOOL throttle;
     uint64_t pending_bytes;
     uint64_t pending_metadata_seq_num;
     uint8_t *chunk_buffer;//[FILE_CHUNK_SIZE];
-        
+    BOOL throttle;    
+
     HANDLE hevent_metadata_response;
     CRITICAL_SECTION lock;
-
 }ClientFileStream;
 
 typedef struct{
@@ -137,15 +132,12 @@ typedef struct{
     uint32_t session_timeout;   // timeout received from the server; to be used to send KEEP_ALIVE frames
     char server_name[MAX_NAME_SIZE];       // Human readable server name
     
-    HANDLE hevent_connection_listening;
+    HANDLE hevent_connection_pending;
     HANDLE hevent_connection_established;
     HANDLE hevent_connection_closed;
 
-    //ClientMessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
-
     IOCP_CONTEXT iocp_context;
     HANDLE iocp_handle;
- 
 } ClientData;
 
 typedef struct {
@@ -154,7 +146,6 @@ typedef struct {
 
     HANDLE mstream[MAX_CLIENT_ACTIVE_MSTREAMS];
     HANDLE mstream_semaphore;
-
 }ClientThreads;
 
 typedef struct {

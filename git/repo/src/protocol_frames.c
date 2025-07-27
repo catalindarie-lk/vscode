@@ -12,22 +12,28 @@
 #include "include/netendians.h"
 
 
-int issue_WSARecvFrom(const SOCKET socket, 
+int udp_recv_from(const SOCKET socket, 
                         IOCP_CONTEXT *iocp_context
                 ){
 
-    ZeroMemory(iocp_context, sizeof(IOCP_CONTEXT));
+    if (!iocp_context) {
+        return RET_VAL_ERROR;
+    }
+
     iocp_context->src_addr_len = sizeof(struct sockaddr_in);
     iocp_context->wsaBuf.buf = iocp_context->buffer;
     iocp_context->wsaBuf.len = sizeof(UdpFrame);
+    memset(&iocp_context->overlapped, 0, sizeof(OVERLAPPED));
 
-    DWORD recvfrom_flags = 0;
+    DWORD bytes_recv = 0;
+    DWORD flags = 0;
+
     int recvfrom_result = WSARecvFrom(
         socket,
         &iocp_context->wsaBuf,
         1,
-        NULL,
-        &recvfrom_flags,
+        &bytes_recv,
+        &flags,
         (SOCKADDR*)&iocp_context->src_addr,
         &iocp_context->src_addr_len,
         &iocp_context->overlapped,
@@ -35,77 +41,12 @@ int issue_WSARecvFrom(const SOCKET socket,
     );
 
     if (recvfrom_result == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        //fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
+        int error_code = WSAGetLastError();
+        // fprintf(stderr, "WSARecvFrom failed with error: %d\n", error_code);
         return RET_VAL_ERROR;
     }
     return RET_VAL_SUCCESS;
 }
-
-
-
-// int issue_WSARecvFrom(SOCKET socket, IOCP_CONTEXT* context) {
-//     if (!context) {
-//         fprintf(stderr, "[WSARecvFrom] ERROR: IOCP_CONTEXT is NULL\n");
-//         return RET_VAL_ERROR;
-//     }
-
-//     // Validate OVERLAPPED structure
-//     if (!context->overlapped.hEvent && !context->buffer) {
-//         fprintf(stderr, "[WSARecvFrom] ERROR: OVERLAPPED structure is not properly initialized\n");
-//         return RET_VAL_ERROR;
-//     }
-
-//     // Log socket state
-//     int optval = 0;
-//     int optlen = sizeof(optval);
-//     if (getsockopt(socket, SOL_SOCKET, SO_TYPE, (char*)&optval, &optlen) == SOCKET_ERROR) {
-//         fprintf(stderr, "[WSARecvFrom] WARNING: getsockopt failed: %d\n", WSAGetLastError());
-//     } else {
-//         fprintf(stdout, "[WSARecvFrom] INFO: Socket type = %s\n", (optval == SOCK_DGRAM ? "UDP" : "UNKNOWN"));
-//     }
-
-//     ZeroMemory(context, sizeof(IOCP_CONTEXT));
-//     context->src_addr_len = sizeof(struct sockaddr_in);
-//     context->wsaBuf.buf = context->buffer;
-//     context->wsaBuf.len = sizeof(UdpFrame);
-
-//     DWORD flags = 0;
-//     DWORD bytesReceived = 0;
-//     //int fromLen = sizeof(context->src_addr);
-
-//     int result = WSARecvFrom(
-//         socket,
-//         &context->wsaBuf,
-//         1,
-//         &bytesReceived,
-//         &flags,
-//         (SOCKADDR*)&context->src_addr,
-//         &context->src_addr_len,
-//         &context->overlapped,
-//         NULL
-//     );
-
-//     if (result == SOCKET_ERROR) {
-//         int err = WSAGetLastError();
-//         if (err != WSA_IO_PENDING) {
-//             fprintf(stderr, "[WSARecvFrom] ERROR: WSARecvFrom failed: %d\n", err);
-//             return RET_VAL_ERROR;
-//         } else {
-//             fprintf(stdout, "[WSARecvFrom] INFO: Operation pending (WSA_IO_PENDING)\n");
-//         }
-//     } else {
-//         //fprintf(stdout, "[WSARecvFrom] INFO: Operation completed immediately, bytes received: %lu\n", bytesReceived);
-//     }
-
-//     return RET_VAL_SUCCESS;
-// }
-
-
-
-
-
-
-
 
 
 int send_frame(const UdpFrame *frame, 
@@ -172,7 +113,7 @@ int send_disconnect(const uint32_t session_id,
     // Set the header fields
     frame.header.start_delimiter = _htons(FRAME_DELIMITER);
     frame.header.frame_type = FRAME_TYPE_DISCONNECT;
-    frame.header.seq_num = _htonll(FRAME_TYPE_DISCONNECT_SEQ);
+    frame.header.seq_num = _htonll(DEFAULT_DISCONNECT_SEQ);
     frame.header.session_id = _htonl(session_id); // Use the session ID provided
     // Calculate CRC32 for the ACK/NACK frame
     frame.header.checksum = _htonl(calculate_crc32(&frame, sizeof(FrameHeader)));

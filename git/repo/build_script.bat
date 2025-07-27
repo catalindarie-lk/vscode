@@ -15,7 +15,8 @@ set common=%workspace%\src\protocol_frames.c ^
 %workspace%\src\queue.c ^
 %workspace%\src\hash.c ^
 %workspace%\src\checksum.c ^
-%workspace%\src\fileio.c
+%workspace%\src\fileio.c ^
+%workspace%\src\folders.c
 
 REM Conditional dependency only for udp_server
 if "%target%"=="test_server" (
