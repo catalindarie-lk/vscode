@@ -10,6 +10,6 @@ bool CreateRelativeFolderRecursive(const char *rootDirectory, const char *relati
 
 bool NormalizePaths(char *path, bool add_trailing_backslash);
 
-FILE* FopenRename(const char* in_fpath, char* out_fpath, size_t fpath_max_size, const char* mode);
+FILE* _fopen_rename(const char* in_fpath, char* out_fpath, size_t fpath_max_size, const char* mode);
 
 #endif

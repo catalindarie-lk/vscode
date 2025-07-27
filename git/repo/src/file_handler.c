@@ -231,18 +231,19 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBu
         }
     }
 
+    fprintf(stdout,"RECEIVED RPATH: %s", fstream->rpath);
+
     if (CreateRelativeFolderRecursive(rootFolder, fstream->rpath) == FALSE) {
         fprintf(stderr, "Failed to create recursive path for root folder: \"%s\", relative path \"%s\". Error code: %lu\n", rootFolder, fstream->rpath, GetLastError());
         goto exit_error;
     }
 
     snprintf(fstream->fpath, MAX_PATH, "%s%s%s", rootFolder, fstream->rpath, fstream->fname);
-    NormalizePaths(fstream->fpath, false);
-    
+        
     char fpath[MAX_PATH] = {0};
 
     // fstream->fp = fopen(fstream->fpath, "wb+"); // "wb+" allows writing and reading, creates or truncates
-    fstream->fp = FopenRename(fstream->fpath, fpath, MAX_PATH, "wb+");
+    fstream->fp = _fopen_rename(fstream->fpath, fpath, MAX_PATH, "wb+");
     if(fstream->fp == NULL){
         fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fname, errno);
         fstream->fstream_err = STREAM_ERR_FP;

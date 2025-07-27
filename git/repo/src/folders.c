@@ -133,116 +133,6 @@ bool CreateRelativeFolderRecursive(const char *rootDirectory, const char *relati
     return CreateAbsoluteFolderRecursive(fullPathToCreate);
 }
 
-
-/**
- * @brief Normalizes a Windows-style file path by:
- * 1. Replacing consecutive backslashes with a single one.
- * 2. Handling trailing backslashes for consistency (adds one for drive roots,
- * removes for others unless specified).
- * 3. Handles UNC paths (\\server\share) correctly by preserving leading \\.
- *
- * @param path The input path string (will be modified in place).
- * @param add_trailing_backslash If true, ensures a single trailing backslash for directories
- * (unless it's a file path). If false, removes trailing backslash
- * unless it's a drive root (e.g., "C:\").
- * @return True on success, False if the path is too long after normalization or input is invalid.
- */
-bool NormalizePaths(char *path, bool add_trailing_backslash) {
-    if (path == NULL || strlen(path) == 0) {
-        // Empty or NULL path is considered an invalid input for normalization
-        fprintf(stderr, "Error: Input path is NULL or empty.\n");
-        return false;
-    }
-
-    char normalized_path[MAX_PATH];
-    int write_idx = 0;
-    int read_idx = 0;
-    bool is_unc_path = false;
-
-    // Handle leading double backslashes for UNC paths (e.g., \\server\share)
-    if (path[0] == '\\' && path[1] == '\\') {
-        normalized_path[write_idx++] = '\\';
-        normalized_path[write_idx++] = '\\';
-        read_idx = 2;
-        is_unc_path = true;
-    } else if (path[0] == '/' && path[1] == '/') { // Also support forward slashes for UNC-like paths
-        normalized_path[write_idx++] = '\\'; // Normalize to backslash for Windows
-        normalized_path[write_idx++] = '\\';
-        read_idx = 2;
-        is_unc_path = true;
-    }
-
-    // Handle drive letter root (e.g., "C:")
-    // This is distinct from UNC paths or relative paths
-    if (!is_unc_path && strlen(path) >= 2 && path[1] == ':' &&
-        ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'))) {
-        normalized_path[write_idx++] = path[0];
-        normalized_path[write_idx++] = ':';
-        // If there's no backslash after the drive letter, add one to read_idx if needed
-        if (strlen(path) > 2 && (path[2] == '\\' || path[2] == '/')) {
-            read_idx = 3; // Skip C:\ or C:/
-        } else {
-            // Path is just "C:", we'll add the '\' later if needed
-            read_idx = 2;
-        }
-    }
-
-    // Process the rest of the path
-    bool last_char_was_separator = false;
-    for (; read_idx < strlen(path); ++read_idx) {
-        if (path[read_idx] == '\\' || path[read_idx] == '/') {
-            if (!last_char_was_separator) { // Only add one separator if multiple found
-                if (write_idx >= MAX_PATH - 1) { fprintf(stderr, "Error: Path buffer overflow during normalization.\n"); return false; }
-                normalized_path[write_idx++] = '\\'; // Normalize all to backslashes
-            }
-            last_char_was_separator = true;
-        } else {
-            if (write_idx >= MAX_PATH - 1) { fprintf(stderr, "Error: Path buffer overflow during normalization.\n"); return false; }
-            normalized_path[write_idx++] = path[read_idx];
-            last_char_was_separator = false;
-        }
-    }
-
-    // Handle trailing backslashes
-    if (write_idx > 0) {
-        // If the path ends with a separator and it's not a bare drive root (e.g., "C:\")
-        // and it's not a bare UNC root (e.g., "\\server\share")
-        bool is_drive_root = (write_idx == 3 && normalized_path[1] == ':' && normalized_path[2] == '\\');
-        bool is_unc_root = (is_unc_path && write_idx == 2); // after \\
-
-        // Remove trailing backslash if not desired and not a drive root or UNC root
-        if (!add_trailing_backslash && normalized_path[write_idx - 1] == '\\' && !is_drive_root && !is_unc_root) {
-            write_idx--;
-        }
-        // Add trailing backslash if desired and not already present, and not ending with a drive letter (e.g., "C:")
-        else if (add_trailing_backslash && normalized_path[write_idx - 1] != '\\') {
-            // If the path ends with a drive letter (like "C:"), add a backslash to make it "C:\"
-            if (!(write_idx == 2 && normalized_path[1] == ':')) {
-                if (write_idx >= MAX_PATH - 1) { fprintf(stderr, "Error: Path buffer overflow when adding trailing backslash.\n"); return false; }
-                normalized_path[write_idx++] = '\\';
-            }
-        }
-    }
-
-    // Null-terminate the normalized path
-    if (write_idx >= MAX_PATH) { // Final check after possible trailing backslash addition
-        fprintf(stderr, "Error: Path buffer overflow after normalization and termination.\n");
-        return false;
-    }
-    normalized_path[write_idx] = '\0';
-
-    // Copy the normalized path back to the original buffer
-    if (strcpy_s(path, MAX_PATH, normalized_path) != 0) {
-        fprintf(stderr, "Error: Failed to copy normalized path back to original buffer.\n");
-        return false;
-    }
-
-    return true;
-}
-
-
-
-
 //======================================================================================================================================================================================================
 // Function to check if a file exists and is not a directory.
 // Uses Windows API for direct and robust checks without actually opening the file.
@@ -306,7 +196,7 @@ static bool generate_timestamp_filename_fixed_buffer(const char* original_full_p
 // - mode: The file opening mode string (e.g., "wb+", "r", "a").
 //
 // Returns a FILE* pointer on success, or NULL on failure.
-FILE* FopenRename(const char* in_fpath, char* out_fpath, size_t fpath_max_size, const char* mode) {
+FILE* _fopen_rename(const char* in_fpath, char* out_fpath, size_t fpath_max_size, const char* mode) {
     // Basic validation of input paths and buffer.
     if (!in_fpath || !in_fpath[0] || !out_fpath || fpath_max_size == 0) {
         fprintf(stderr, "Error in _fopen_rename: Invalid input path, output buffer, or buffer size.\n");
