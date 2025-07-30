@@ -23,7 +23,7 @@ static int msg_match_fragment(Client *client, UdpFrame *frame){
     uint32_t session_id = _ntohl(frame->header.session_id);    
     uint32_t message_id = _ntohl(frame->payload.text_fragment.message_id);
 
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
+    for(int i = 0; i < MAX_SERVER_ACTIVE_MSTREAMS; i++){
         EnterCriticalSection(&client->mstream[i].lock);
         if(client->mstream[i].sid == session_id && client->mstream[i].mid == message_id){
             LeaveCriticalSection(&client->mstream[i].lock);
@@ -82,7 +82,7 @@ exit_err:
     return RET_VAL_ERROR;
 }
 static int msg_get_available_stream_channel(Client *client){
-    for(int i = 0; i < MAX_CLIENT_MESSAGE_STREAMS; i++){
+    for(int i = 0; i < MAX_SERVER_ACTIVE_MSTREAMS; i++){
         EnterCriticalSection(&client->mstream[i].lock);
         if(client->mstream[i].busy == FALSE){
             LeaveCriticalSection(&client->mstream[i].lock);
@@ -127,8 +127,18 @@ static int msg_init_stream(MessageStream *mstream, const uint32_t session_id, co
     }
     memset(mstream->buffer, 0, message_len);
 
+
+    char messageFolder[MAX_PATH];
+    snprintf(messageFolder, MAX_PATH, "%s", SERVER_MESSAGE_TEXT_FILES_FOLDER);
+
+    if (CreateAbsoluteFolderRecursive(messageFolder) == FALSE) {
+        fprintf(stderr, "Failed to create recursive path for message folder: \"%s\". Error code: %lu\n", messageFolder, GetLastError());
+        LeaveCriticalSection(&mstream->lock);
+        return RET_VAL_ERROR;
+    }
+
     // Constructs a filename for storing the received message, incorporating session and message IDs for uniqueness.
-    snprintf(mstream->fnm, MAX_PATH, DEST_FPATH"xmessage_SID_%d_ID%d.txt", session_id, message_id);
+    snprintf(mstream->fnm, MAX_PATH, SERVER_MESSAGE_TEXT_FILES_FOLDER"xmessage_SID_%d_ID%d.txt", session_id, message_id);
 
     LeaveCriticalSection(&mstream->lock);
     return RET_VAL_SUCCESS;

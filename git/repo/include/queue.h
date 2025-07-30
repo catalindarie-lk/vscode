@@ -123,4 +123,45 @@ int push_fstream(QueueFstream *queue, const uintptr_t pfstream);
 uintptr_t pop_fstream(QueueFstream *queue);
 
 
+
+
+//----------------------------------------------------------------------------------------------------------------
+__declspec(align(64)) typedef struct{
+    AckUdpFrame frame; // The UDP frame to be sent
+    struct sockaddr_in addr; // Destination address for the frame
+}QueueEntryAckUdpFrame;
+
+__declspec(align(64))typedef struct {
+    size_t size; 
+    uintptr_t *entry;
+    volatile uint32_t head;          
+    volatile uint32_t tail;
+    volatile uint32_t pending;
+    CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
+    HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
+    HANDLE pop_semaphore;       // not used
+}QueueAckUpdFrame;
+
+int init_queue_ack_frame(QueueAckUpdFrame *queue, const size_t size);
+int push_ack_frame(QueueAckUpdFrame *queue,  const uintptr_t entry);
+uintptr_t pop_ack_frame(QueueAckUpdFrame *queue);
+
+
+//----------------------------------------------------------------------------------------------------------------
+__declspec(align(64))typedef struct {
+    size_t queue_size; 
+    uintptr_t *pool_entry;      // pointer to an array of uintptr_t
+    volatile size_t head;          
+    volatile size_t tail;
+    volatile size_t pending;
+    CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
+    HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
+    HANDLE pop_semaphore;       // not used
+}QueueTXFrame;
+
+int init_queue_tx_frame(QueueTXFrame *queue, const size_t queue_size);
+int push_tx_frame(QueueTXFrame *queue,  const uintptr_t pool_entry);
+uintptr_t pop_tx_frame(QueueTXFrame *queue);
+
+
 #endif 

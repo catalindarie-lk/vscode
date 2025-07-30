@@ -14,23 +14,28 @@
 #ifndef RET_VAL_ERROR
 #define RET_VAL_ERROR                           -1
 #endif
-#ifndef MAX_CLIENT_MESSAGE_STREAMS
-#define MAX_CLIENT_MESSAGE_STREAMS              10
-#endif
 
 
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
 #define DEFAULT_SESSION_TIMEOUT_SEC             120
 #endif
 
-#define MAX_SERVER_ACTIVE_FSTREAMS              10
-#define SERVER_ACK_FILE_FRAMES_THREADS          3
+#define MAX_SERVER_ACTIVE_FSTREAMS              100
+#define SERVER_ACK_FILE_FRAMES_THREADS          20
+
+#define MAX_SERVER_ACTIVE_MSTREAMS              1
 #define SERVER_ACK_MESSAGE_FRAMES_THREADS       1
 
+#define SERVER_RECV_SEND_FRAME_WRK_THREADS      20
+#define SERVER_PROCESS_FRAME_WRK_THREAS         20
 
 // --- Constants 
 #define SERVER_NAME                             "lkdc UDP Text/File Transfer Server"
 #define MAX_CLIENTS                             10
+
+#define SERVER_PARTITION_DRIVE                  "D:\\"
+#define SERVER_ROOT_FOLDER                      "D:\\_test\\server_root\\"
+#define SERVER_MESSAGE_TEXT_FILES_FOLDER        "D:\\_test\\messages_root\\"
 
 #define FRAGMENTS_PER_CHUNK                     (64ULL)
 #define CHUNK_TRAILING                          (1u << 7) // 0b10000000
@@ -40,14 +45,18 @@
 #define CHUNK_NONE                              (0)       // 0b00000000
 
 #define BLOCK_SIZE_CHUNK                        ((uint64_t)(FILE_FRAGMENT_SIZE * 64))
-#define BLOCK_COUNT_CHUNK                       ((uint64_t)(8192))
+#define BLOCK_COUNT_CHUNK                       ((uint64_t)(1024))
 
 #define SERVER_SIZE_QUEUE_FRAME                 (8192 * MAX_CLIENTS)
 #define SERVER_SIZE_QUEUE_PRIORITY_FRAME        1024
 
-#define SERVER_SIZE_FQUEUE_ACK                  65536
-#define SERVER_SIZE_MQUEUE_ACK                  65536
+#define SERVER_SIZE_FQUEUE_ACK                  8192
+#define SERVER_SIZE_MQUEUE_ACK                  1024
 #define SERVER_SIZE_QUEUE_PRIORITY_ACK          1024
+
+#define IOCP_RECV_MEM_POOL_BLOCKS               4096
+#define IOCP_SEND_MEM_POOL_BLOCKS               4096
+
 
 enum Status{
     STATUS_NONE = 0,
@@ -79,7 +88,11 @@ enum StreamChannelError{
     STREAM_ERR_MALFORMED_DATA = 13,
     STREAM_ERR_INTERNAL_COPY  =14,
 
-    STREAM_ERR_FILENAME = 20
+    // STREAM_ERR_FILENAME = 20,
+    STREAM_ERR_DRIVE_PARTITION = 20,
+    STREAM_ERR_ROOT_FOLDER_CREATE = 22,
+    STREAM_ERR_FILENAME_EXIST = 21
+    
 };
 
 typedef uint8_t ClientSlotStatus;
@@ -197,7 +210,7 @@ typedef struct {
     uint32_t slot;                  // Index of the slot the client is connected to [0..MAX_CLIENTS-1]
     uint8_t slot_status;                // 0->FREE; 1->BUSY
 
-    MessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
+    MessageStream mstream[MAX_SERVER_ACTIVE_MSTREAMS];
 //    ServerFileStream fstream[MAX_CLIENT_FILE_STREAMS];
      
     Statistics statistics;
@@ -217,6 +230,8 @@ typedef struct{
 
 typedef struct {
     MemPool pool_file_chunk;
+    MemPool pool_iocp_send_context;
+    MemPool pool_iocp_recv_context;
 
     QueueFrame queue_frame;
     QueueFrame queue_priority_frame;
@@ -229,9 +244,14 @@ typedef struct {
     ServerFileStream fstream[MAX_SERVER_ACTIVE_FSTREAMS];
     CRITICAL_SECTION fstreams_lock;
 
+
+    MemPool pool_queue_ack_udp_frame;
+    QueueAckUpdFrame queue_ack_udp_frame;
+
+
     HANDLE test_semaphore;
 
-    HashTableFramePendingAck ht_frame;
+    // HashTableFramePendingAck ht_frame;
     HashTableIdentifierNode ht_fid;
     HashTableIdentifierNode ht_mid;
 }ServerBuffers;

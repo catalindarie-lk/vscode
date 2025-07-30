@@ -24,28 +24,19 @@ if "%target%"=="test_server" (
 %workspace%\src\message_handler.c ^
 %workspace%\src\server_frames.c
 ) else if "%target%"=="test_client" (
-    set private=%workspace%\src\client_frames.c ^
-%workspace%\src\client_api.c
+    set private=%workspace%\src\client_api.c ^
+%workspace%\src\client_frames.c
 ) else (
     echo [ERROR] Unknown target: %target%
     exit /b 1
 )
 
-
-echo cl.exe /EHsc /favor:AMD64 ^
-%common% ^
-%private% ^
-%workspace%\%target%.c ^
-/I"%workspace%" ^
-/O2 ^
-/Fe"%workspace%\bin\%target%.exe" ^
-/Fo"%workspace%\bin\obj\\" ^
-/Fd"%workspace%\bin\pdb\\" ^
-/link /MACHINE:X64
-
+REM Initialize MSVC environment (recommended)
+REM call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 
 REM Build with cl.exe
-cl.exe /EHsc /favor:AMD64 ^
+REM "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe" /EHsc /favor:AMD64 ^
+"cl.exe" /EHsc /favor:AMD64 ^
 %common% ^
 %private% ^
 %workspace%\%target%.c ^

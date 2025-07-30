@@ -30,32 +30,38 @@
 #define CLIENT_ID                               (0xFF)        // Example client ID, can be set dynamically
 #define CLIENT_NAME                             "lkdc UDP Text/File Transfer Client"
 
-#define CONNECT_REQUEST_TIMEOUT_MS              (2500)
-#define DISCONNECT_REQUEST_TIMEOUT_MS           (2500)
+#define CLIENT_ROOT_FOLDER                     "D:\\_test\\client_root\\"
+
+#define CONNECT_REQUEST_TIMEOUT_MS              2500
+#define DISCONNECT_REQUEST_TIMEOUT_MS           2500
 
 #define TEXT_CHUNK_SIZE                         (TEXT_FRAGMENT_SIZE * 128)
-#define FILE_CHUNK_SIZE                         (FILE_FRAGMENT_SIZE * 8192)
+#define FILE_CHUNK_SIZE                         (FILE_FRAGMENT_SIZE * 128)
 
-#define RESEND_TIMEOUT_SEC                      (3)           //seconds
+#define RESEND_TIMEOUT_SEC                      3           //seconds
 
-#define MAX_MESSAGE_SIZE_BYTES                  (256 * 1024 * 1024)         // Max size of a long text message
+#define MAX_MESSAGE_SIZE_BYTES                  (4 * 1024 * 1024)         // Max size of a long text message
 
-#define TIMEOUT_METADATA_RESPONSE_MS            (5000)      //wait for 5 sec after sending a metadata fragment for response
-#define MAX_RETRIES_STOP_TRANSFER               (5)         //max retries to stop file/message transfer
+// #define TIMEOUT_METADATA_RESPONSE_MS            5000      //wait for 5 sec after sending a metadata fragment for response
+// #define MAX_RETRIES_STOP_TRANSFER               5         //max retries to stop file/message transfer
 //----------------------------------------------------------------------------------------------------------
-#define MAX_CLIENT_ACTIVE_FSTREAMS              (3)
-#define MAX_CLIENT_ACTIVE_MSTREAMS              (3)
+#define MAX_CLIENT_ACTIVE_FSTREAMS              5
+#define MAX_CLIENT_ACTIVE_MSTREAMS              1
 
-#define CLIENT_SIZE_QUEUE_COMMAND_FSTREAM       (256)       // Nr of send file commands that can be queued
-#define CLIENT_SIZE_QUEUE_COMMAND_MSTREAM       (256)       // Nr of send file commands that can be queued
+#define CLIENT_SIZE_QUEUE_COMMAND_FSTREAM       256      // Nr of send file commands that can be queued
+#define CLIENT_SIZE_QUEUE_COMMAND_MSTREAM       256       // Nr of send file commands that can be queued
 
 #define CLIENT_SIZE_QUEUE_FRAME                 (4096 + (512 * MAX_CLIENT_ACTIVE_FSTREAMS))
 #define CLIENT_SIZE_QUEUE_PRIORITY_FRAME        (CLIENT_SIZE_QUEUE_FRAME / 4)
 #define HASH_SIZE_FRAME                         (CLIENT_SIZE_QUEUE_FRAME + CLIENT_SIZE_QUEUE_PRIORITY_FRAME)
-#define HASH_FRAME_HIGH_WATERMARK               (HASH_SIZE_FRAME * 0.2)
-#define HASH_FRAME_LOW_WATERMARK                (HASH_SIZE_FRAME * 0.15)
+#define HASH_FRAME_HIGH_WATERMARK               (HASH_SIZE_FRAME * 0.5)
+#define HASH_FRAME_LOW_WATERMARK                (HASH_SIZE_FRAME * 0.3)
 #define BLOCK_SIZE_FRAME                        ((uint64_t)(sizeof(FramePendingAck)))
 #define BLOCK_COUNT_FRAME                       ((uint64_t)(HASH_SIZE_FRAME))
+
+#define IOCP_RECV_MEM_POOL_BLOCKS               1024
+#define IOCP_SEND_MEM_POOL_BLOCKS               4096
+#define CLIENT_RECV_SEND_FRAME_WRK_THREADS      1
 
 enum Status{
     STATUS_CLOSED = 0,
@@ -107,7 +113,8 @@ typedef struct{
     uint8_t *chunk_buffer;//[FILE_CHUNK_SIZE];
     BOOL throttle;    
 
-    HANDLE hevent_metadata_response;
+    HANDLE hevent_metadata_response_ok;
+    HANDLE hevent_metadata_response_nok;
     CRITICAL_SECTION lock;
 }ClientFileStream;
 
@@ -149,9 +156,12 @@ typedef struct {
 }ClientThreads;
 
 typedef struct {
+    MemPool pool_iocp_send_context;
+    MemPool pool_iocp_recv_context;
+
     QueueFrame queue_frame;
     QueueFrame queue_priority_frame;
-    HashTableFramePendingAck ht_frame;
+    // HashTableFramePendingAck ht_frame;
 
     ClientFileStream fstream[MAX_CLIENT_ACTIVE_FSTREAMS];
     CRITICAL_SECTION fstreams_lock;
@@ -159,13 +169,21 @@ typedef struct {
 
     ClientMessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
     QueueCommand queue_mstream;
+
+
+    s_MemPool pool_tx_frames;
+
+    QueueTXFrame queue_tx_frame;
+    QueueTXFrame queue_prio_tx_frame;
+    hTbl_txFrame htable_tx_frame;
+
 }ClientBuffers;
 
 
 extern ClientData client;
 extern ClientThreads threads;
 extern ClientBuffers buffers;
-
+  
 static void clean_message_stream(ClientMessageStream *mstream);
 
 uint64_t get_new_seq_num();
@@ -175,5 +193,5 @@ void timeout_disconnect();
 void request_connect();
 void transfer_file();
 void send_text_message();
-
+ 
 #endif 

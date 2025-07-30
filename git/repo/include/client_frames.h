@@ -7,22 +7,30 @@
 
 size_t s_strnlen(const char *s, size_t maxlen);
 
-int send_connect_request(const uint64_t seq_num, 
-                    const uint32_t session_id, 
-                    const uint32_t client_id, 
-                    const uint32_t flags, 
-                    const char *client_name, 
-                    const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr
-                );
+int construct_connect_request(UdpFrame *frame,
+                            const uint64_t seq_num, 
+                            const uint32_t session_id, 
+                            const uint32_t client_id, 
+                            const uint32_t flags, 
+                            const char *client_name);
 
-int send_keep_alive(const uint64_t seq_num, 
-                    const uint32_t session_id, 
-                    const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr
-                );
+int construct_disconnect(UdpFrame *frame, 
+                            const uint32_t session_id);
 
-int send_file_metadata(const uint64_t seq_num, 
+int construct_keep_alive(UdpFrame *frame,
+                            const uint64_t seq_num, 
+                            const uint32_t session_id);
+
+int construct_file_fragment(UdpFrame *frame,
+                            const uint64_t seq_num, 
+                            const uint32_t session_id, 
+                            const uint32_t file_id, 
+                            const uint64_t fragment_offset, 
+                            const char* fragment_buffer, 
+                            const uint32_t fragment_size);
+
+int construct_file_metadata(UdpFrame *frame,
+                            const uint64_t seq_num, 
                             const uint32_t session_id, 
                             const uint32_t file_id, 
                             const uint64_t file_size,
@@ -30,45 +38,22 @@ int send_file_metadata(const uint64_t seq_num,
                             const uint32_t rpath_len,
                             const char *fname,
                             const uint32_t fname_len,
-                            const uint32_t file_fragment_size, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientBuffers* buffers
-                        );
-
-int send_file_fragment(const uint64_t seq_num, 
-                            const uint32_t session_id, 
-                            const uint32_t file_id, 
-                            const uint64_t fragment_offset, 
-                            const char* fragment_buffer, 
-                            const uint32_t fragment_size, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientBuffers* buffers
-                        );
-
-int send_file_end(const uint64_t seq_num, 
+                            const uint32_t file_fragment_size);
+                        
+int construct_file_end(UdpFrame *frame,
+                            const uint64_t seq_num, 
                             const uint32_t session_id, 
                             const uint32_t file_id, 
                             const uint64_t file_size, 
-                            const char *file_hash,
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr,
-                            ClientBuffers* buffers
-                        );
+                            const char *file_hash);
 
-int send_long_text_fragment(const uint64_t seq_num, 
+int construct_text_fragment(UdpFrame *frame,
+                            const uint64_t seq_num, 
                             const uint32_t session_id, 
                             const uint32_t message_id, 
                             const uint32_t message_len, 
                             const uint32_t fragment_offset, 
                             const char* fragment_buffer, 
-                            const uint32_t fragment_len, 
-                            const SOCKET src_socket, 
-                            const struct sockaddr_in *dest_addr, 
-                            ClientBuffers* buffers
-                        );
-
-
+                            const uint32_t fragment_len);
 
 #endif

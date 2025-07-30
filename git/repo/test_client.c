@@ -30,24 +30,28 @@ ClientData client;
 ClientThreads threads;
 ClientBuffers buffers;
 
-HANDLE hthread_recieve_frame;
+HANDLE hthread_recv_send_frame[CLIENT_RECV_SEND_FRAME_WRK_THREADS];
 HANDLE hthread_process_frame;
-HANDLE hthread_resend_frame;
+HANDLE hthread_resend_tx_frame;
 HANDLE hthread_keep_alive;
 HANDLE hthread_client_command;
-//HANDLE hthread_file_transfer[MAX_CLIENT_ACTIVE_FSTREAMS];
 HANDLE hthread_queue_command[MAX_CLIENT_ACTIVE_FSTREAMS];
+HANDLE hthread_pop_tx_frame[1];
+HANDLE hthread_pop_prio_tx_frame[1];
 
 const char *server_ip = "10.10.10.1"; // loopback address
 const char *client_ip = "10.10.10.3";
 
-DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam);
+DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_process_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_keep_alive(LPVOID lpParam);
-DWORD WINAPI thread_proc_resend_frame(LPVOID lpParam);
+DWORD WINAPI thread_proc_resend_tx_frame(LPVOID lpParam);
 DWORD WINAPI thread_fstream_function(LPVOID lpParam);
 DWORD WINAPI thread_mstream_function(LPVOID lpParam);
 DWORD WINAPI thread_proc_client_command(LPVOID lpParam);
+
+DWORD WINAPI thread_func_pop_tx_frame(LPVOID lpParam);
+DWORD WINAPI thread_func_pop_prio_tx_frame(LPVOID lpParam);
 
 static void clean_file_stream(ClientFileStream *fstream);
 void SendTextMessage(const char *message_buffer, const size_t message_len);
@@ -103,8 +107,7 @@ static int reset_client_session(){
 static int init_client_config(){
     
     WSADATA wsaData;
-    // int rcvBufSize = 5 * 1024 * 1024;  // 2MB
-    // int sndBufSize = 5 * 1024 * 1024;  // 2MB
+
     int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (iResult != 0) {
         fprintf(stderr, "WSAStartup failed: %d\n", iResult);
@@ -124,9 +127,6 @@ static int init_client_config(){
     client.client_addr.sin_port = _htons(0); // Let OS choose port
     client.client_addr.sin_addr.s_addr = inet_addr(client_ip);
 
-    // setsockopt(client.socket, SOL_SOCKET, SO_RCVBUF, (char*)&rcvBufSize, sizeof(rcvBufSize));
-    // setsockopt(client.socket, SOL_SOCKET, SO_SNDBUF, (char*)&sndBufSize, sizeof(sndBufSize));
-
     if (bind(client.socket, (struct sockaddr *)&client.client_addr, sizeof(client.client_addr)) == SOCKET_ERROR) {
         printf("Bind failed: %d\n", WSAGetLastError());
         closesocket(client.socket);
@@ -142,7 +142,7 @@ static int init_client_config(){
         return RET_VAL_ERROR;
     }
 
-     // Define server address
+    // Define server address
     memset(&client.server_addr, 0, sizeof(client.server_addr));
     client.server_addr.sin_family = AF_INET;
     client.server_addr.sin_port = _htons(SERVER_PORT);
@@ -160,11 +160,22 @@ static int init_client_buffers(){
     init_queue_frame(&buffers.queue_frame, CLIENT_SIZE_QUEUE_FRAME);
     init_queue_frame(&buffers.queue_priority_frame, CLIENT_SIZE_QUEUE_PRIORITY_FRAME);
     
-    pool_init(&buffers.ht_frame.pool, BLOCK_SIZE_FRAME, BLOCK_COUNT_FRAME);
-    init_ht_frame(&buffers.ht_frame, HASH_SIZE_FRAME);
+    // pool_init(&buffers.ht_frame.pool, BLOCK_SIZE_FRAME, BLOCK_COUNT_FRAME);
+    // init_ht_frame(&buffers.ht_frame, HASH_SIZE_FRAME);
     
     init_queue_command(&buffers.queue_fstream, CLIENT_SIZE_QUEUE_COMMAND_FSTREAM);
     init_queue_command(&buffers.queue_mstream, CLIENT_SIZE_QUEUE_COMMAND_MSTREAM);
+
+    pool_init(&buffers.pool_iocp_send_context, sizeof(IOCP_CONTEXT), IOCP_SEND_MEM_POOL_BLOCKS);
+    pool_init(&buffers.pool_iocp_recv_context, sizeof(IOCP_CONTEXT), IOCP_RECV_MEM_POOL_BLOCKS);
+
+    s_pool_init(&buffers.pool_tx_frames, sizeof(UdpFrame), IOCP_SEND_MEM_POOL_BLOCKS / 2);
+
+    init_queue_tx_frame(&buffers.queue_tx_frame, 128);
+    init_queue_tx_frame(&buffers.queue_prio_tx_frame, 128);
+    
+    htbl_init_txframe(&buffers.htable_tx_frame, 128, IOCP_SEND_MEM_POOL_BLOCKS);
+
 
     for(int index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
         memset(&buffers.fstream[index], 0, sizeof(ClientFileStream));
@@ -174,6 +185,34 @@ static int init_client_buffers(){
         memset(&buffers.mstream[index], 0, sizeof(ClientMessageStream));
         buffers.mstream[index].message_buffer = malloc(MAX_MESSAGE_SIZE_BYTES);
     }
+
+    for (int i = 0; i < IOCP_RECV_MEM_POOL_BLOCKS; ++i) {
+        IOCP_CONTEXT* recv_context = (IOCP_CONTEXT*)pool_alloc(&buffers.pool_iocp_recv_context);
+        if (recv_context == NULL) {
+            fprintf(stderr, "Failed to allocate receive context from pool %d. Exiting.\n", i);
+            // Proper cleanup for partially initialized pools and sockets.
+            pool_destroy(&buffers.pool_iocp_send_context);
+            pool_destroy(&buffers.pool_iocp_recv_context);
+            CloseHandle(client.iocp_handle);
+            closesocket(client.socket);
+            WSACleanup();
+            return EXIT_FAILURE;
+        }
+        init_iocp_context(recv_context, OP_RECV); // Initialize the context
+
+        if (udp_recv_from(client.socket, recv_context) == RET_VAL_ERROR) {
+            fprintf(stderr, "Failed to post initial receive operation %d. Exiting.\n", i);
+            pool_free(&buffers.pool_iocp_recv_context, recv_context); // Free the one that failed
+            // Proper cleanup for partially initialized pools and sockets.
+            pool_destroy(&buffers.pool_iocp_send_context);
+            pool_destroy(&buffers.pool_iocp_recv_context);
+            CloseHandle(client.iocp_handle);
+            closesocket(client.socket);
+            WSACleanup();
+            return EXIT_FAILURE;
+        }
+    }
+    printf("Server: All initial receive operations posted.\n");
     
     return RET_VAL_SUCCESS;
 }
@@ -198,8 +237,10 @@ static int init_client_handles(){
 
     // Initialize fstreams
     for(int index = 0; index < MAX_CLIENT_ACTIVE_FSTREAMS; index++){
-        buffers.fstream[index].hevent_metadata_response = CreateEvent(NULL, FALSE, FALSE, NULL);
-        if (buffers.fstream[index].hevent_metadata_response == NULL) {
+        buffers.fstream[index].hevent_metadata_response_ok = CreateEvent(NULL, FALSE, FALSE, NULL);
+        buffers.fstream[index].hevent_metadata_response_nok = CreateEvent(NULL, FALSE, FALSE, NULL);
+        if (buffers.fstream[index].hevent_metadata_response_ok == NULL || 
+            buffers.fstream[index].hevent_metadata_response_nok == NULL) {
             fprintf(stderr, "Failed to create fstream events. Error: %d\n", GetLastError());
             client.session_status = CONNECTION_CLOSED;
             client.client_status = STATUS_CLOSED;
@@ -218,37 +259,35 @@ static int init_client_handles(){
     return RET_VAL_SUCCESS;
 
 }
-static void start_threads(){
-
+static int start_threads(){
+    for(int i = 0; i < CLIENT_RECV_SEND_FRAME_WRK_THREADS; i++){
+        hthread_recv_send_frame[i] = (HANDLE)_beginthreadex(NULL, 0, func_thread_recv_send_frame, &client, 0, NULL);
+        if (hthread_recv_send_frame[i] == NULL) {
+            fprintf(stderr, "Failed to create receive frame thread. Error: %d\n", GetLastError());
+            return RET_VAL_ERROR;
+        }
+    }
     hthread_process_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_process_frame, NULL, 0, NULL);
     if (hthread_process_frame == NULL) {
         fprintf(stderr, "Failed to create process frame thread. Error: %d\n", GetLastError());
-        client.session_status = CONNECTION_CLOSED;
-        client.client_status = STATUS_CLOSED; // Signal immediate shutdown
+        return RET_VAL_ERROR;
     }
-    hthread_recieve_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_receive_frame, &client, 0, NULL);
-    if (hthread_recieve_frame == NULL) {
-        fprintf(stderr, "Failed to create receive frame thread. Error: %d\n", GetLastError());
-        client.session_status = CONNECTION_CLOSED;
-        client.client_status = STATUS_CLOSED; // Signal immediate shutdown
+
+    hthread_resend_tx_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_resend_tx_frame, NULL, 0, NULL);
+    if (hthread_resend_tx_frame == NULL) {
+        fprintf(stderr, "Failed to create resend tx_frame thread. Error: %d\n", GetLastError());
+        return RET_VAL_ERROR;
     }
-    hthread_resend_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_resend_frame, NULL, 0, NULL);
-    if (hthread_resend_frame == NULL) {
-        fprintf(stderr, "Failed to create resend frame thread. Error: %d\n", GetLastError());
-        client.session_status = CONNECTION_CLOSED;
-        client.client_status = STATUS_CLOSED; // Signal immediate shutdown
-    }
+
     hthread_keep_alive = (HANDLE)_beginthreadex(NULL, 0, thread_proc_keep_alive, NULL, 0, NULL);
     if (hthread_keep_alive == NULL) {
         fprintf(stderr, "Failed to create keep alive thread. Error: %d\n", GetLastError());
-        client.session_status = CONNECTION_CLOSED;
-        client.client_status = STATUS_CLOSED; // Signal immediate shutdown
+        return RET_VAL_ERROR;
     }
     hthread_client_command = (HANDLE)_beginthreadex(NULL, 0, thread_proc_client_command, NULL, 0, NULL);
     if (hthread_client_command == NULL) {
         fprintf(stderr, "Failed to create command thread. Error: %d\n", GetLastError());
-        client.session_status = CONNECTION_CLOSED;
-        client.client_status = STATUS_CLOSED; // Signal immediate shutdown
+        return RET_VAL_ERROR;
     }
 
     // START FSTREAM WORKER THREADS
@@ -257,21 +296,34 @@ static void start_threads(){
         threads.fstream[index] = (HANDLE)_beginthreadex(NULL, 0, thread_fstream_function, NULL, 0, NULL);
         if (threads.fstream[index] == NULL){
             fprintf(stderr, "Failed to create file send thread. Error: %d\n", GetLastError());
-            client.session_status = CONNECTION_CLOSED;
-            client.client_status = STATUS_CLOSED; // Signal immediate shutdown
+            return RET_VAL_ERROR;
         }
     }
 
-   // START MSTREAM WORKER THREADS
+    // START MSTREAM WORKER THREADS
     threads.mstream_semaphore = CreateSemaphore(NULL, MAX_CLIENT_ACTIVE_MSTREAMS, LONG_MAX, NULL);
     for(int index = 0; index < MAX_CLIENT_ACTIVE_MSTREAMS; index++){
         threads.mstream[index] = (HANDLE)_beginthreadex(NULL, 0, thread_mstream_function, NULL, 0, NULL);
         if (threads.mstream[index] == NULL){
             fprintf(stderr, "Failed to create message send thread. Error: %d\n", GetLastError());
-            client.session_status = CONNECTION_CLOSED;
-            client.client_status = STATUS_CLOSED; // Signal immediate shutdown
+            return RET_VAL_ERROR;
         }
     }
+for(int i = 0; i < 1; i++){
+    hthread_pop_tx_frame[i] = (HANDLE)_beginthreadex(NULL, 0, thread_func_pop_tx_frame, NULL, 0, NULL);
+    if (hthread_pop_tx_frame[i] == NULL) {
+        fprintf(stderr, "Failed to create process frame thread. Error: %d\n", GetLastError());
+        return RET_VAL_ERROR;
+    }
+}
+for(int i = 0; i < 1; i++){
+    hthread_pop_prio_tx_frame[i] = (HANDLE)_beginthreadex(NULL, 0, thread_func_pop_prio_tx_frame, NULL, 0, NULL);
+    if (hthread_pop_prio_tx_frame[i] == NULL) {
+        fprintf(stderr, "Failed to create process frame thread. Error: %d\n", GetLastError());
+        return RET_VAL_ERROR;
+    }
+}
+    return RET_VAL_SUCCESS;
 }
 static void client_shutdown(){
 
@@ -287,33 +339,32 @@ static void client_shutdown(){
 }
 
 // --- Receive frame thread function ---
-DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
+DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam) {
 
-    ClientData *client = (ClientData*)lpParam;
-    QueueFrameEntry frame_entry;
+    ClientData *cli = &client;
+    ClientBuffers *buff = &buffers;
+
+    QueueFrame *q_frame = &buffers.queue_frame;
+    QueueFrame *q_prio_frame = &buffers.queue_priority_frame;
+
+    MemPool *recv_pool = &buffers.pool_iocp_recv_context;
+    MemPool *send_pool = &buffers.pool_iocp_send_context;
   
-    if(udp_recv_from(client->socket, &client->iocp_context) == RET_VAL_ERROR){
-        fprintf(stderr, "Initial WSARecvFrom failed: %d\n", WSAGetLastError());
-        client->client_status = STATUS_ERROR;
-        //TODO initiate some kind of global error and stop client?
-        // goto exit_thread;
-    }
-
-    HANDLE CompletitionPort = client->iocp_handle;
+    HANDLE CompletitionPort = cli->iocp_handle;
     DWORD NrOfBytesTransferred;
     ULONG_PTR lpCompletitionKey;
     LPOVERLAPPED lpOverlapped;
+    char ip_string_buffer[INET_ADDRSTRLEN];
 
-    // DWORD wait_events;
-    DWORD check_shutdown;
-   
-    while(client->client_status == STATUS_READY){
-        WaitForSingleObject(client->hevent_connection_pending, INFINITE);       
+    QueueFrameEntry frame_entry;
+    
+    while(cli->client_status == STATUS_READY){
+        WaitForSingleObject(cli->hevent_connection_pending, INFINITE);       
 
-        client->session_status = CONNECTION_PENDING;
-        while(1){
+        cli->session_status = CONNECTION_PENDING;
+        while(true){
 
-            if(client->session_status == CONNECTION_CLOSED){
+            if(cli->session_status == CONNECTION_CLOSED){
                 fprintf(stderr, "Stopped listening...\n");
                 break;
             }
@@ -323,67 +374,118 @@ DWORD WINAPI thread_proc_receive_frame(LPVOID lpParam) {
                 &NrOfBytesTransferred,
                 &lpCompletitionKey,
                 &lpOverlapped,
-                WSARECV_TIMEOUT_MS
+                INFINITE //WSARECV_TIMEOUT_MS
             );
-            if (!getqcompl_result) {
-                int wsa_error = WSAGetLastError();
-                // GETQCOMPL_TIMEOUT is expected if no data for WSARECV_TIMEOUT_MS
-                if (wsa_error == GETQCOMPL_TIMEOUT) {
-                    continue;
-                } else {
-                    fprintf(stderr, "GetQueuedCompletionStatus failed with error: %d\n", wsa_error);
-                    continue;
-                }
-            }
-            
+                        
             if (lpOverlapped == NULL) {
                 fprintf(stderr, "Warning: NULL pOverlapped received. IOCP may be shutting down.\n");
                 continue;
             }
 
-            IOCP_CONTEXT* iocp_overlapped = (IOCP_CONTEXT*)lpOverlapped;
+            IOCP_CONTEXT* context = (IOCP_CONTEXT*)lpOverlapped;
 
-            // Validate and dispatch frame
-            if (NrOfBytesTransferred > 0 && NrOfBytesTransferred <= sizeof(UdpFrame)) {
-                
-                memset(&frame_entry, 0, sizeof(QueueFrameEntry));
-                memcpy(&frame_entry.frame, iocp_overlapped->buffer, NrOfBytesTransferred);
-                memcpy(&frame_entry.src_addr, &iocp_overlapped->src_addr, sizeof(struct sockaddr_in));
-                frame_entry.frame_size = NrOfBytesTransferred;
-    
-                uint8_t frame_type = frame_entry.frame.header.frame_type;
-                uint8_t op_code = 0;
-                if(frame_type == FRAME_TYPE_ACK){
-                    op_code = frame_entry.frame.payload.ack.op_code;
-                }                
-                
-                BOOL is_high_priority_frame = (frame_type == FRAME_TYPE_CONNECT_RESPONSE ||
-                                                frame_type == FRAME_TYPE_DISCONNECT ||
-                                                (frame_type == FRAME_TYPE_ACK && op_code == STS_KEEP_ALIVE) ||
-                                                (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_DISCONNECT) ||
-                                                (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_FILE_METADATA) ||
-                                                (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_FILE_END) ||
-                                                (frame_type == FRAME_TYPE_ACK && op_code == ERR_DUPLICATE_FRAME) ||
-                                                (frame_type == FRAME_TYPE_ACK && op_code == ERR_EXISTING_FILE)
-                                            );
-
-                QueueFrame *target_queue = NULL;
-                if (is_high_priority_frame == TRUE) {
-                    target_queue = &buffers.queue_priority_frame;
+            // --- Handle GetQueuedCompletionStatus failures (non-NULL lpOverlapped) ---
+            if (!getqcompl_result) {
+                int wsa_error = WSAGetLastError();
+                if (wsa_error == GETQCOMPL_TIMEOUT) {
+                    // Timeout, no completion occurred. Continue looping.
+                    continue;
                 } else {
-                    target_queue = &buffers.queue_frame;
+                    fprintf(stderr, "GetQueuedCompletionStatus failed with error: %d\n", wsa_error);
+                    // If it's a real error on a specific operation
+                    if (context->type == OP_SEND) {
+                        pool_free(send_pool, context);
+                    } else if (context->type == OP_RECV) {
+                        // Critical error on a receive context -"retire" this context from the pool.
+                        fprintf(stderr, "Client: Error in RECV operation, attempting re-post context %p...\n", (void*)context);
+                        pool_free(recv_pool, context);
+                    }
+                    continue; // Continue loop to get next completion
                 }
-                if (push_frame(target_queue, &frame_entry) == RET_VAL_ERROR) {
-                    fprintf(stderr, "Failed to push frame to queue. Queue full?\n");
-                }          
             }
 
-            if(udp_recv_from(client->socket, iocp_overlapped) == RET_VAL_ERROR){
-                fprintf(stderr, "WSARecvFrom re-issue failed: %d\n", WSAGetLastError());
-                continue;
-            }
+            switch(context->type){
+                case OP_RECV:
+                    // Validate and dispatch frame
+                    if (NrOfBytesTransferred > 0 && NrOfBytesTransferred <= sizeof(UdpFrame)) {
+                        memset(&frame_entry, 0, sizeof(QueueFrameEntry));
+                        memcpy(&frame_entry.frame, context->buffer, NrOfBytesTransferred);
+                        memcpy(&frame_entry.src_addr, &context->addr, sizeof(struct sockaddr_in));
+                        frame_entry.frame_size = NrOfBytesTransferred;
+            
+                        uint8_t frame_type = frame_entry.frame.header.frame_type;
+                        uint8_t op_code = 0;
+                        if(frame_type == FRAME_TYPE_ACK){
+                            op_code = frame_entry.frame.payload.ack.op_code;
+                        }                
+                        
+                        BOOL is_high_priority_frame = (frame_type == FRAME_TYPE_CONNECT_RESPONSE ||
+                                                        frame_type == FRAME_TYPE_DISCONNECT ||
+                                                        (frame_type == FRAME_TYPE_ACK && op_code == STS_KEEP_ALIVE) ||
+                                                        (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_DISCONNECT) ||
+                                                        (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_FILE_METADATA) ||
+                                                        (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_FILE_END) ||
+                                                        (frame_type == FRAME_TYPE_ACK && op_code == ERR_DUPLICATE_FRAME) ||
+                                                        (frame_type == FRAME_TYPE_ACK && op_code == ERR_EXISTING_FILE) ||
+                                                        (frame_type == FRAME_TYPE_ACK && op_code == ERR_STREAM_INIT)
+                                                    );
 
-        } // end of while(1)
+                        if (is_high_priority_frame == TRUE) {
+                            if (push_frame(q_prio_frame, &frame_entry) == RET_VAL_ERROR) {
+                                Sleep(100);
+                                continue;
+                            }
+                        } else {
+                            if (push_frame(q_frame, &frame_entry) == RET_VAL_ERROR) {
+                                Sleep(100);
+                                continue;
+                            }
+                        }
+
+                        // if (inet_ntop(AF_INET, &(context->addr.sin_addr), ip_string_buffer, INET_ADDRSTRLEN) == NULL) {
+                        //     strcpy(ip_string_buffer, "UNKNOWN_IP");
+                        // }
+                        // printf("Server: Received %lu bytes from %s:%d. Type: %u\n",
+                        //        NrOfBytesTransferred, ip_string_buffer, ntohs(context->addr.sin_port), frame_entry.frame.header.frame_type);
+
+                    } else {
+                        // 0 bytes transferred (e.g., graceful shutdown, empty packet)
+                        fprintf(stdout, "Client: Receive operation completed with 0 bytes for context %p. Re-posting.\n", (void*)context);
+                    }
+
+                    // *** CRITICAL: Re-post the receive operation using the SAME context ***
+                    // This ensures the buffer is continuously available for incoming data.
+                    if (udp_recv_from(cli->socket, context) == RET_VAL_ERROR){
+                        fprintf(stderr, "Critical: WSARecvFrom re-issue failed for context %p: %d. Freeing.\n", (void*)context, WSAGetLastError());
+                        // This is a severe problem. Retire the context from the pool.
+                        pool_free(recv_pool, context); // Return to pool if it fails
+                    }
+                    if(recv_pool->free_blocks > (recv_pool->block_count / 2)){
+                        refill_recv_iocp_pool(cli->socket, recv_pool);
+                    }
+                    break; // End of OP_RECV case
+
+                case OP_SEND:
+                    // For send completions, simply free the context
+                    if (NrOfBytesTransferred > 0) {
+                        // if (inet_ntop(AF_INET, &(context->addr.sin_addr), ip_string_buffer, INET_ADDRSTRLEN) == NULL) {
+                        //     strcpy(ip_string_buffer, "UNKNOWN_IP");
+                        // }
+                        // printf("Client: Sent %lu bytes to %s:%d (Message: '%s')\n",
+                        //     NrOfBytesTransferred, ip_string_buffer, ntohs(iocp_context->addr.sin_port), iocp_context->buffer);
+                    } else {
+                        fprintf(stderr, "Client: Send operation completed with 0 bytes or error.\n");
+                    }
+                    pool_free(send_pool, context);
+                    break;
+
+                default:
+                    fprintf(stderr, "Client: Unknown operation type in completion.\n");
+                    pool_free(send_pool, context);
+                    break;
+
+            } // end of switch(context->type)
+        } // end of while(true)
     } // end of while(client.client_status == STATUS_READY)
 
     fprintf(stdout,"receive frame thread closed...\n");
@@ -473,6 +575,14 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                 client.sid = recv_session_id;
                 snprintf(client.server_name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, frame->payload.connection_response.server_name);
                 client.last_active_time = time(NULL);
+                
+                uintptr_t entry = htbl_remove_txframe(&buffers.htable_tx_frame, recv_seq_num);
+                if(!entry){
+                    fprintf(stderr, "CRITICAL ERROR: fail to remove from tx_frame hash table? - null pointer returned!\n");
+                    break;
+                }
+                s_pool_free(&buffers.pool_tx_frames, (void*)entry);
+                
                 SetEvent(client.hevent_connection_established);
                 break;
 
@@ -487,13 +597,19 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
 
                 for(int i = 0; i < MAX_CLIENT_FILE_STREAMS; i++){
                     if(recv_seq_num == buffers.fstream[i].pending_metadata_seq_num && 
-                                    (recv_op_code == STS_CONFIRM_FILE_METADATA || 
-                                     recv_op_code == ERR_DUPLICATE_FRAME || 
-                                     recv_op_code == ERR_EXISTING_FILE)
-                        ) {
-                        buffers.fstream[i].pending_metadata_seq_num = 0; // Reset pending metadata sequence number  
-                        SetEvent(buffers.fstream[i].hevent_metadata_response);
+                                        (recv_op_code == STS_CONFIRM_FILE_METADATA)) 
+                    {
+                        buffers.fstream[i].pending_metadata_seq_num = 0; 
+                        SetEvent(buffers.fstream[i].hevent_metadata_response_ok);
+                    } else if(recv_seq_num == buffers.fstream[i].pending_metadata_seq_num && 
+                                        (recv_op_code == ERR_DUPLICATE_FRAME ||
+                                        recv_op_code == ERR_EXISTING_FILE ||
+                                        recv_op_code == ERR_STREAM_INIT))
+                    {
+                        buffers.fstream[i].pending_metadata_seq_num = 0;
+                        SetEvent(buffers.fstream[i].hevent_metadata_response_nok);                 
                     }
+                    
                 }
 
                 if(recv_seq_num == DEFAULT_DISCONNECT_SEQ && recv_op_code == STS_CONFIRM_DISCONNECT){
@@ -507,10 +623,19 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
                         recv_op_code == STS_CONFIRM_FILE_METADATA ||
                         recv_op_code == STS_CONFIRM_FILE_END ||
                         recv_op_code == ERR_DUPLICATE_FRAME || 
-                        recv_op_code == ERR_EXISTING_FILE 
-                    ) {
-                    ht_remove_frame(&buffers.ht_frame, recv_seq_num);
+                        recv_op_code == ERR_EXISTING_FILE ||
+                        recv_op_code == ERR_STREAM_INIT
+                    ){
+                    // ht_remove_frame(&buffers.ht_frame, recv_seq_num);
+
+                    uintptr_t entry = htbl_remove_txframe(&buffers.htable_tx_frame, recv_seq_num);
+                    if(!entry){
+                        fprintf(stderr, "CRITICAL ERROR: fail to remove from tx_frame hash table? - null pointer returned!\n");
+                        break;
+                    }
+                    s_pool_free(&buffers.pool_tx_frames, (void*)entry);
                 }
+
                 break;
 
             case FRAME_TYPE_DISCONNECT:
@@ -534,6 +659,40 @@ DWORD WINAPI thread_proc_process_frame(LPVOID lpParam) {
     _endthreadex(0);    
     return 0;
 }
+// --- Pop a frame from frame queue for processing ---
+DWORD WINAPI thread_func_pop_tx_frame(LPVOID lpParam){
+   
+    while(client.client_status == STATUS_READY){
+        
+        UdpFrame *frame = (UdpFrame*)pop_tx_frame(&buffers.queue_tx_frame);
+        if(!frame){
+            fprintf(stderr,"Poped empty pointer from tx_frame?\n");
+            continue;
+        }
+        htbl_insert_txframe(&buffers.htable_tx_frame, (uintptr_t)frame);
+        send_frame(frame, client.socket, &client.server_addr, &buffers.pool_iocp_send_context);
+
+   }
+    _endthreadex(0);    
+    return 0;
+}
+// --- Pop a frame from priority queue for processing ---
+DWORD WINAPI thread_func_pop_prio_tx_frame(LPVOID lpParam){
+   
+    while(client.client_status == STATUS_READY){
+        
+        UdpFrame *frame = (UdpFrame*)pop_tx_frame(&buffers.queue_prio_tx_frame);
+        if(!frame){
+            fprintf(stderr,"Poped empty pointer from tx_frame?\n");
+            continue;
+        }
+        htbl_insert_txframe(&buffers.htable_tx_frame, (uintptr_t)frame);
+        send_frame(frame, client.socket, &client.server_addr, &buffers.pool_iocp_send_context);
+
+   }
+    _endthreadex(0);    
+    return 0;
+}
 // --- Send keep alive ---
 DWORD WINAPI thread_proc_keep_alive(LPVOID lpParam){
 
@@ -546,8 +705,21 @@ DWORD WINAPI thread_proc_keep_alive(LPVOID lpParam){
 
             now_keep_alive = time(NULL);
             if(now_keep_alive - last_keep_alive > keep_alive_clock_sec){
-                send_keep_alive(get_new_seq_num(), client.sid, client.socket, &client.server_addr);
-                // fprintf(stdout, "Sending keep alive frame session id: %u\n", client.sid);
+                UdpFrame *frame = s_pool_alloc(&buffers.pool_tx_frames);
+                if(!frame){
+                    fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for keep alive frame. Should never do since it has semaphore to block when full");
+                    Sleep(1000);
+                    continue;
+                }
+                int res = construct_keep_alive(frame,
+                                            get_new_seq_num(), 
+                                            client.sid);
+                if(res == RET_VAL_ERROR){
+                    fprintf(stderr, "CRITICAL ERROR: construct_keep_alive() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
+                    Sleep(1000);
+                    continue;
+                }
+                push_tx_frame(&buffers.queue_prio_tx_frame, (uintptr_t)frame);
                 last_keep_alive = time(NULL);
             }
             if(time(NULL) > (time_t)(client.last_active_time + client.session_timeout * 2)){
@@ -562,51 +734,52 @@ DWORD WINAPI thread_proc_keep_alive(LPVOID lpParam){
             continue;
         }
     }
-exit_thread:
     fprintf(stdout,"keep alive thread exiting...\n");
     _endthreadex(0);
     return 0;
 }
-// --- Re-send frames that ack time expired ---
-DWORD WINAPI thread_proc_resend_frame(LPVOID lpParam){
+// --- Send frames not acknowledges within set time ---
+DWORD WINAPI thread_proc_resend_tx_frame(LPVOID lpParam){
    
     while(client.client_status == STATUS_READY){ 
-        if(client.session_status == CONNECTION_CLOSED){
-            ht_clean(&buffers.ht_frame);
-            Sleep(250);
-            continue;
-        }
+        // if(client.session_status == CONNECTION_CLOSED){
+        //     ht_clean(&buffers.ht_frame);
+        //     Sleep(250);
+        //     continue;
+        // }
         time_t current_time = time(NULL);
-        if(buffers.ht_frame.count == 0){
+        if(buffers.htable_tx_frame.count == 0){
             Sleep(250);
             continue;
         }
         for(int i = 0; i < MAX_CLIENT_ACTIVE_FSTREAMS; i++){
-            BOOL frames_to_resend = buffers.fstream[i].pending_bytes == 0 || buffers.fstream[i].throttle;
-            if(!frames_to_resend){
-                Sleep(250);
-                continue;
-            }
-            EnterCriticalSection(&buffers.ht_frame.mutex);
-            for (int i = 0; i < HASH_SIZE_FRAME; i++) {
-                FramePendingAck *ptr = buffers.ht_frame.entry[i];
+            BOOL frames_to_resend = buffers.fstream[i].pending_bytes == 0;
+            // if(!frames_to_resend){
+            //     Sleep(250);
+            //     continue;
+            // }
+            EnterCriticalSection(&buffers.htable_tx_frame.mutex);
+            for (int i = 0; i < buffers.htable_tx_frame.size; i++) {
+                hTblNode_txFrame *ptr = buffers.htable_tx_frame.head[i];
                 while (ptr) {
-                    if(ptr->frame.header.frame_type == FRAME_TYPE_FILE_METADATA){
-                        send_frame(&ptr->frame, client.socket, &client.server_addr);
-                        ptr->time = current_time;
+                    UdpFrame *frame = (UdpFrame*)ptr->frame;
+                    if(frame->header.frame_type == FRAME_TYPE_FILE_METADATA){
+                        // send_frame(&ptr->frame, client.socket, &client.server_addr, &buffers.pool_iocp_send_context);
+                        // ptr->time = current_time;
+                        // Sleep(1000);
                     }
-                    if(current_time - ptr->time > (time_t)RESEND_TIMEOUT_SEC){
-                        send_frame(&ptr->frame, client.socket, &client.server_addr);
-                        ptr->time = current_time;
+                    if(current_time - ptr->sent_time > (time_t)RESEND_TIMEOUT_SEC){
+                        send_frame(frame, client.socket, &client.server_addr, &buffers.pool_iocp_send_context);
+                        // push_tx_frame(&buffers.queue_tx_frame, (uintptr_t)frame);
+                        ptr->sent_time = current_time;
                     }
                     ptr = ptr->next;
                 }                                         
             }
-            LeaveCriticalSection(&buffers.ht_frame.mutex);
+            LeaveCriticalSection(&buffers.htable_tx_frame.mutex);
         }
         Sleep(250);
     }
-exit_thread:
     fprintf(stdout,"resend frame thread exiting...\n");
     _endthreadex(0);
     return 0;
@@ -619,6 +792,9 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
     uint32_t chunk_fragment_offset;
     uint32_t frame_fragment_size;
     uint64_t frame_fragment_offset;
+
+    UdpFrame *frame;
+    int res;
    
     // DWORD wait_metadata_response;
 
@@ -705,25 +881,40 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
         fprintf(stdout, "Metadata ID: %d\n", fstream->fid);
 
         fstream->pending_metadata_seq_num = get_new_seq_num();
-        int metadata_bytes_sent = send_file_metadata(fstream->pending_metadata_seq_num, 
-                                                        client.sid, 
-                                                        fstream->fid, 
-                                                        fstream->fsize,
-                                                        fstream->rpath,
-                                                        fstream->rpath_len, 
-                                                        fstream->fname, 
-                                                        fstream->fname_len,
-                                                        FILE_FRAGMENT_SIZE, 
-                                                        client.socket, 
-                                                        &client.server_addr,
-                                                        &buffers
-                                                    );
-        if(metadata_bytes_sent == RET_VAL_ERROR){
-            fprintf(stderr, "Failed to send file metadata frame. Cancelling transfer\n");
+        
+        frame = s_pool_alloc(&buffers.pool_tx_frames);
+        if(!frame){
+            fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for metadata frame. Should never do since it has semaphore to block when full");
             goto clean;
         }
+        res = construct_file_metadata(frame,
+                                        fstream->pending_metadata_seq_num, 
+                                        client.sid, 
+                                        fstream->fid, 
+                                        fstream->fsize,
+                                        fstream->rpath,
+                                        fstream->rpath_len, 
+                                        fstream->fname, 
+                                        fstream->fname_len,
+                                        FILE_FRAGMENT_SIZE
+                                        );
+        if(res == RET_VAL_ERROR){
+            fprintf(stderr, "CRITICAL ERROR: construct_file_metadata() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
+            goto clean;
+        }
+        push_tx_frame(&buffers.queue_prio_tx_frame, (uintptr_t)frame);
 
-        WaitForSingleObject(fstream->hevent_metadata_response, INFINITE);
+        HANDLE events[2] = {fstream->hevent_metadata_response_ok, fstream->hevent_metadata_response_nok};
+
+        DWORD wait_result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+        
+        if(wait_result == WAIT_OBJECT_0){
+
+        } else if (wait_result == WAIT_OBJECT_0 + 1){
+            goto clean;
+        } else {
+            goto clean;
+        }
         
         frame_fragment_offset = 0;
         fstream->pending_bytes = fstream->fsize;
@@ -743,16 +934,16 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
             while (chunk_bytes_to_send > 0){
 
                 // THROTTLE
-                if(buffers.ht_frame.count > HASH_FRAME_HIGH_WATERMARK){
-                    fstream->throttle = TRUE;
-                }
-                if(buffers.ht_frame.count < HASH_FRAME_LOW_WATERMARK){
-                    fstream->throttle = FALSE;
-                }
-                if(fstream->throttle){
-                    Sleep(1);
-                    continue;
-                }
+                // if(buffers.ht_frame.count > HASH_FRAME_HIGH_WATERMARK){
+                //     fstream->throttle = TRUE;
+                // }
+                // if(buffers.ht_frame.count < HASH_FRAME_LOW_WATERMARK){
+                //     fstream->throttle = FALSE;
+                // }
+                // if(fstream->throttle){
+                //     Sleep(1);
+                //     continue;
+                // }
 
                 // CONTINUE
                 if(chunk_bytes_to_send > FILE_FRAGMENT_SIZE){
@@ -768,20 +959,26 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
                 if(frame_fragment_size < FILE_FRAGMENT_SIZE){
                     memset(buffer + frame_fragment_size, 0, FILE_FRAGMENT_SIZE - frame_fragment_size);
                 }
-
-                int fragment_bytes_sent = send_file_fragment(get_new_seq_num(), 
-                                                                client.sid, 
-                                                                fstream->fid, 
-                                                                frame_fragment_offset, 
-                                                                buffer, 
-                                                                frame_fragment_size, 
-                                                                client.socket, &client.server_addr,
-                                                                &buffers
-                                                            );
-                if(fragment_bytes_sent == RET_VAL_ERROR){
-                    Sleep(1);
-                    continue;
+                
+                frame = s_pool_alloc(&buffers.pool_tx_frames);
+                if(!frame){
+                    fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for file fragment frame. Should never do since it has semaphore to block when full");
+                    goto clean;
                 }
+                res = construct_file_fragment(frame, 
+                                                get_new_seq_num(),
+                                                client.sid,
+                                                fstream->fid,
+                                                frame_fragment_offset,
+                                                buffer, 
+                                                frame_fragment_size 
+                                                );
+                if(res == RET_VAL_ERROR){
+                    fprintf(stderr, "CRITICAL ERROR: construct_file_fragment() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
+                    goto clean;
+                }
+                
+                push_tx_frame(&buffers.queue_tx_frame, (uintptr_t)frame);
 
                 chunk_fragment_offset += frame_fragment_size;
                 frame_fragment_offset += frame_fragment_size;                       
@@ -791,15 +988,24 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
         }                  
 
         sha256_final(&sha256_ctx, (uint8_t *)&fstream->fhash.sha256);
-        send_file_end(get_new_seq_num(), 
-                        client.sid, 
-                        fstream->fid, 
-                        fstream->fsize, 
-                        (uint8_t *)&fstream->fhash.sha256,
-                        client.socket, 
-                        &client.server_addr,
-                        &buffers
-                    );
+
+        frame = s_pool_alloc(&buffers.pool_tx_frames);
+        if(!frame){
+            fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for end frame. Should never do since it has semaphore to block when full");
+            goto clean;
+        }
+        res = construct_file_end(frame,
+                                    get_new_seq_num(), 
+                                    client.sid, 
+                                    fstream->fid, 
+                                    fstream->fsize, 
+                                    (uint8_t *)&fstream->fhash.sha256);
+        if(res == RET_VAL_ERROR){
+            fprintf(stderr, "CRITICAL ERROR: construct_file_end() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
+            goto clean;
+        }
+        push_tx_frame(&buffers.queue_prio_tx_frame, (uintptr_t)frame);
+
     clean:
         clean_file_stream(fstream);
         LeaveCriticalSection(&fstream->lock);
@@ -810,6 +1016,9 @@ DWORD WINAPI thread_fstream_function(LPVOID lpParam){
     _endthreadex(0);
     return 0;               
 }
+
+
+
 // --- Send message thread function ---
 DWORD WINAPI thread_mstream_function(LPVOID lpParam){
 
@@ -817,13 +1026,20 @@ DWORD WINAPI thread_mstream_function(LPVOID lpParam){
     uint32_t frame_fragment_len;
 
     QueueCommandEntry entry;
+    UdpFrame *frame;
+    int res;
 
     while(client.client_status == STATUS_READY){
 
-         WaitForSingleObject(threads.mstream_semaphore, INFINITE);
+        WaitForSingleObject(threads.mstream_semaphore, INFINITE);
 
-        if (pop_command(&buffers.queue_mstream, &entry) == RET_VAL_ERROR) {
+        if(pop_command(&buffers.queue_mstream, &entry) == RET_VAL_ERROR) {
+            if(!entry.command.send_message.message_buffer){
+                fprintf(stderr, "ERROR: Queue message buffer invalid pointer.\n");
+                continue;
+            }
             free(entry.command.send_message.message_buffer);
+            entry.command.send_message.message_buffer = NULL;
             fprintf(stdout, "ERROR: Popping mstream command from queue\n");
             continue;
         }
@@ -832,7 +1048,6 @@ DWORD WINAPI thread_mstream_function(LPVOID lpParam){
             fprintf(stderr, "ERROR: Message size is too big.\n");
             continue;
         }
-
         if(entry.command.send_message.message_len <= 0){
             fprintf(stderr, "ERROR: Message size not valid (0 or less).\n");
             continue;
@@ -872,16 +1087,16 @@ DWORD WINAPI thread_mstream_function(LPVOID lpParam){
                 frame_fragment_len = mstream->remaining_bytes_to_send;
             }
 
-            if(buffers.ht_frame.count > HASH_FRAME_HIGH_WATERMARK){
-                mstream->throttle = TRUE;
-            }
-            if(buffers.ht_frame.count < HASH_FRAME_LOW_WATERMARK){
-                mstream->throttle = FALSE;
-            }
-            if(mstream->throttle){
-                Sleep(1);
-                continue;
-            }
+            // if(buffers.ht_frame.count > HASH_FRAME_HIGH_WATERMARK){
+            //     mstream->throttle = TRUE;
+            // }
+            // if(buffers.ht_frame.count < HASH_FRAME_LOW_WATERMARK){
+            //     mstream->throttle = FALSE;
+            // }
+            // if(mstream->throttle){
+            //     Sleep(1);
+            //     continue;
+            // }
 
             char buffer[TEXT_FRAGMENT_SIZE];
 
@@ -891,25 +1106,50 @@ DWORD WINAPI thread_mstream_function(LPVOID lpParam){
                 buffer[frame_fragment_len] = '\0';
             }
 
-            int fragment_bytes_sent = send_long_text_fragment(get_new_seq_num(), 
-                                                                client.sid, 
-                                                                mstream->message_id, 
-                                                                mstream->message_len, 
-                                                                frame_fragment_offset, 
-                                                                buffer, 
-                                                                frame_fragment_len, 
-                                                                client.socket, 
-                                                                &client.server_addr,
-                                                                &buffers
-                                                            );
-            if(fragment_bytes_sent == RET_VAL_ERROR){
-                Sleep(10);
-                continue;
+            // int fragment_bytes_sent = construct_text_fragment(get_new_seq_num(), 
+            //                                                     client.sid, 
+            //                                                     mstream->message_id, 
+            //                                                     mstream->message_len, 
+            //                                                     frame_fragment_offset, 
+            //                                                     buffer, 
+            //                                                     frame_fragment_len, 
+            //                                                     client.socket, 
+            //                                                     &client.server_addr,
+            //                                                     &buffers,
+            //                                                     &buffers.pool_iocp_send_context
+            //                                                 );
+
+            // if(fragment_bytes_sent == RET_VAL_ERROR){
+            //     Sleep(10);
+            //     continue;
+            // }
+
+            frame = s_pool_alloc(&buffers.pool_tx_frames);
+            if(!frame){
+                fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for text fragment. Should never do since it has semaphore to block when full");
+                goto clean;
             }
+
+            res = construct_text_fragment(frame,
+                                            get_new_seq_num(), 
+                                            client.sid, 
+                                            mstream->message_id, 
+                                            mstream->message_len, 
+                                            frame_fragment_offset, 
+                                            buffer, 
+                                            frame_fragment_len
+                                            );
+            if(res == RET_VAL_ERROR){
+                fprintf(stderr, "CRITICAL ERROR: construct_text_fragment() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
+                goto clean;
+            }
+            push_tx_frame(&buffers.queue_tx_frame, (uintptr_t)frame);
+
             frame_fragment_offset += frame_fragment_len;                       
             mstream->remaining_bytes_to_send -= frame_fragment_len;
         }
 
+    clean:
         clean_message_stream(mstream);
         ReleaseSemaphore(threads.mstream_semaphore, 1, NULL);
         LeaveCriticalSection(&mstream->lock);
@@ -946,8 +1186,7 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
             //--------------------------------------------------------------------------------------------------------------------------
             case 'q':
             case 'Q': // shutdown
-                client_shutdown();
-                goto exit_thread;
+                // client_shutdown();
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
             case 'h':
@@ -956,7 +1195,7 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                     break;
                 }
                 memset(_path, 0, MAX_PATH);
-                snprintf(_path, MAX_PATH, "%s%s", SRC_FPATH, "test_file.txt");
+                snprintf(_path, MAX_PATH, "%s%s", CLIENT_ROOT_FOLDER, "test_file.txt");
                 SendSingleFile(_path, strlen(_path));
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
@@ -966,7 +1205,7 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                     break;
                 }
                 memset(_path, 0, MAX_PATH);
-                snprintf(_path, MAX_PATH, "%s", SRC_FPATH);
+                snprintf(_path, MAX_PATH, "%s", CLIENT_ROOT_FOLDER);
                 SendAllFilesInFolder(_path, strlen(_path));
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
@@ -976,13 +1215,18 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
                     break;
                 }
                 memset(_path, 0, MAX_PATH);
-                snprintf(_path, MAX_PATH, "%s", SRC_FPATH);
+                snprintf(_path, MAX_PATH, "%s", CLIENT_ROOT_FOLDER);
                 SendAllFilesInFolderAndSubfolders(_path, strlen(_path));
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
             case 't':
             case 'T':
-                sent_text_file();
+                if(client.session_status != CONNECTION_ESTABLISHED){
+                    break;
+                }
+                memset(_path, 0, MAX_PATH);
+                snprintf(_path, MAX_PATH, "%s", "D:\\_test\\test_file.txt");
+                SendTextInFile(_path, strlen(_path));
                 break;
             //--------------------------------------------------------------------------------------------------------------------------
             case '\n':
@@ -994,7 +1238,6 @@ DWORD WINAPI thread_proc_client_command(LPVOID lpParam) {
         }
     Sleep(100);
     }        
-exit_thread:
     fprintf(stdout, "client command thread exiting...\n");
     _endthreadex(0);    
     return 0;
@@ -1009,12 +1252,14 @@ int main() {
     init_client_handles();
     start_threads();
     while(client.client_status == STATUS_READY){
-        fprintf(stdout, "\r\033[2K-- File: %.2f , Text: %.2f , Hash F: %u, Free B: %llu; Pending: %d", 
+        fprintf(stdout, "\r\033[2K-- File: %.2f, Pending: %d; FreeRecv: %llu; FreeSend: %llu; TXQueue: %llu; HT_TX: %llu; PoolF: %llu", 
                             (float)(buffers.fstream[0].fsize - buffers.fstream[0].pending_bytes) / (float)buffers.fstream[0].fsize * 100.0, 
-                            (float)(buffers.mstream[0].message_len - buffers.mstream[0].remaining_bytes_to_send) / (float)buffers.mstream[0].message_len * 100.0,
-                            buffers.ht_frame.count,
-                            buffers.ht_frame.pool.free_blocks,
-                            buffers.queue_fstream.pending
+                            buffers.queue_fstream.pending,
+                            buffers.pool_iocp_recv_context.free_blocks,
+                            buffers.pool_iocp_send_context.free_blocks,
+                            buffers.queue_tx_frame.pending,
+                            buffers.htable_tx_frame.count,
+                            buffers.pool_tx_frames.free_blocks
                             );
         fflush(stdout);
 
@@ -1038,25 +1283,36 @@ void request_connect(){
     ResetEvent(client.hevent_connection_closed);
     ResetEvent(client.hevent_connection_established);
     SetEvent(client.hevent_connection_pending);
-    // send connect request frame
-    send_connect_request(get_new_seq_num(), 
-                            client.sid, 
-                            client.cid, 
-                            client.flags, 
-                            client.client_name, 
-                            client.socket, 
-                            &client.server_addr
-                        );
+
+    UdpFrame *frame = s_pool_alloc(&buffers.pool_tx_frames);
+    if(!frame){
+        fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for connect request. Should never do since it has semaphore to block when full");
+        return;
+    }
+
+    int res = construct_connect_request(frame,
+                                        get_new_seq_num(), 
+                                        client.sid, 
+                                        client.cid, 
+                                        client.flags, 
+                                        client.client_name
+                                        );
+    if(res == RET_VAL_ERROR){
+        fprintf(stderr, "CRITICAL ERROR: construct_connect_request() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
+        return;
+    }
+    push_tx_frame(&buffers.queue_prio_tx_frame, (uintptr_t)frame);
+
     DWORD wait_connection_established = WaitForSingleObject(client.hevent_connection_established, CONNECT_REQUEST_TIMEOUT_MS);
     if (wait_connection_established == WAIT_OBJECT_0) {
         client.session_status = CONNECTION_ESTABLISHED;
         fprintf(stdout, "Connection established...\n");
     } else if (wait_connection_established == WAIT_TIMEOUT) {
-         ht_clean(&buffers.ht_frame);
+        // ht_clean(&buffers.ht_frame);
         reset_client_session();
         fprintf(stderr, "Connection closed...\n");
     } else {
-        ht_clean(&buffers.ht_frame);
+        // ht_clean(&buffers.ht_frame);
         reset_client_session();
         fprintf(stderr, "Unexpected error for established event: %lu\n", wait_connection_established);
     }
@@ -1070,7 +1326,19 @@ void request_disconnect(){
     }
     // send disconnect frame
     ResetEvent(client.hevent_connection_established);
-    send_disconnect(client.sid, client.socket, &client.server_addr);
+
+    UdpFrame *frame = s_pool_alloc(&buffers.pool_tx_frames);
+    if(!frame){
+        fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for disconnect request. Should never do since it has semaphore to block when full");
+        return;
+    }
+
+    int res = construct_disconnect_request(frame, client.sid);
+    if(res == RET_VAL_ERROR){
+        fprintf(stderr, "CRITICAL ERROR: construct_disconnect_request() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
+        return;
+    }
+    push_tx_frame(&buffers.queue_prio_tx_frame, (uintptr_t)frame);
  
     DWORD wait_connection_closed = WaitForSingleObject(client.hevent_connection_closed, DISCONNECT_REQUEST_TIMEOUT_MS);
 
@@ -1081,7 +1349,7 @@ void request_disconnect(){
     } else {    
         fprintf(stderr, "Unexpected error for disconnect event: %lu\n", wait_connection_closed);
     }  
-    ht_clean(&buffers.ht_frame);
+    // ht_clean(&buffers.ht_frame);
     reset_client_session();
     return;
 }
@@ -1101,7 +1369,6 @@ void force_disconnect(){
     } else {    
         fprintf(stderr, "Unexpected error for disconnect event: %lu\n", wait_connection_closed);
     }
-    ht_clean(&buffers.ht_frame);
     reset_client_session();
     return;
 }
@@ -1120,8 +1387,11 @@ static void clean_file_stream(ClientFileStream *fstream){
     }
     fstream->fid = 0;
     fstream->fsize = 0;
+    fstream->fpath_len = 0;
     memset(&fstream->fpath, 0, MAX_PATH);
+    fstream->rpath_len = 0;
     memset(&fstream->rpath, 0, MAX_PATH);
+    fstream->fname_len = 0;
     memset(&fstream->fname, 0, MAX_PATH);
     memset(&fstream->fhash, 0, sizeof(FileHash));
     fstream->pending_bytes = 0;
@@ -1147,72 +1417,8 @@ static void clean_message_stream(ClientMessageStream *mstream){
 
 
 
-void sent_text_file(){
 
 
-        char *fpath = "H:\\_test\\";
-        char *fname = "test_file.txt";
-        
-        char full_path[MAX_PATH] = {0};
-        snprintf(full_path, MAX_PATH, "%s%s", fpath, fname);
-        
-        FILE *fp = NULL;
-        
-        size_t text_file_size = get_file_size(full_path);
-      
-        uint32_t message_len = (uint32_t)text_file_size;
-
-        fp = fopen(full_path, "rb");
-        if(fp == NULL){
-            fprintf(stdout, "Error opening file!\n");
-            return;
-        }
-
-        char *message_buffer = malloc(message_len + 1);
-        if(message_buffer == NULL){
-            fprintf(stdout, "Error allocating memeory buffer for message!\n");
-            return;
-        }
-
-
-        size_t bytes_read = fread(message_buffer, 1, message_len, fp);
-        message_buffer[message_len] = '\0';
-        if (bytes_read == 0 && ferror(fp)) {
-            fprintf(stdout, "Error reading message file!\n");
-            return;
-        }
-        SendTextMessage(message_buffer, message_len);
-        free(message_buffer);
- 
-    return;
-}
-
-void SendTextMessage(const char *message_buffer, const size_t message_len) {
-
-    QueueCommandEntry entry;
-
-    if(!message_buffer){
-        fprintf(stderr, "ERROR: Message buffer invalid pointer.\n");
-        return;
-    }
-    if(message_len <= 0){
-        fprintf(stderr, "ERROR: Message length zero or less lenght.\n");
-        return;
-    }
-    if(message_len >= MAX_MESSAGE_SIZE_BYTES){
-        fprintf(stderr, "ERROR: Message size too long.\n");
-        return;
-    }
-
-    snprintf(entry.command.send_message.text, sizeof("SendTextMessage"), "%s", "SendTextMessage");
-    entry.command.send_message.message_len = message_len;
-    entry.command.send_message.message_buffer = malloc(message_len + 1);
-    memcpy(entry.command.send_message.message_buffer, message_buffer, message_len);
-    entry.command.send_message.message_buffer[message_len] = '\0';
-
-    push_command(&buffers.queue_mstream, &entry);
-    return;
-}
 
 
 

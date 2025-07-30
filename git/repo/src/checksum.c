@@ -49,23 +49,23 @@ static uint32_t crc32_table[256] = {
 
 
 // CRC32 calculation
-int calculate_crc32(const void *data, size_t len){
-    uint32_t crc = 0xFFFFFFFF; // Initial value
-    const uint8_t *byte_data = (const uint8_t *)data;
-    uint32_t polynomial = 0xEDB88320; // IEEE 802.3 polynomial (reversed)
-
-    for (size_t i = 0; i < len; i++) {
-        crc ^= byte_data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ polynomial;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    return ~crc; // Final XOR (sometimes not used depending on CRC variant)
-}
+// int calculate_crc32(const void *data, size_t len){
+//     uint32_t crc = 0xFFFFFFFF; // Initial value
+//     const uint8_t *byte_data = (const uint8_t *)data;
+//     uint32_t polynomial = 0xEDB88320; // IEEE 802.3 polynomial (reversed)
+//     fprintf(stdout, "Nr of bytes CRC: %llu\n", len);
+//     for (size_t i = 0; i < len; i++) {
+//         crc ^= byte_data[i];
+//         for (int j = 0; j < 8; j++) {
+//             if (crc & 1) {
+//                 crc = (crc >> 1) ^ polynomial;
+//             } else {
+//                 crc >>= 1;
+//             }
+//         }
+//     }
+//     return ~crc; // Final XOR (sometimes not used depending on CRC variant)
+// }
 //calculate crc32 with table
 uint32_t calculate_crc32_table(const void *data, size_t len) {
     uint32_t crc = 0xFFFFFFFF;

@@ -10,12 +10,112 @@
 #include "include/client.h"
 #include "include/client_api.h"
 
+// Send text
+// buffer: pointer to text buffer
+// len: The actual nr of bytes of the text buffer, NOT including the null terminator.
+void SendTextMessage(const char *buffer, const size_t len) {
+
+    QueueCommandEntry entry;
+
+    if(!buffer){
+        fprintf(stderr, "ERROR: Message buffer invalid pointer.\n");
+        return;
+    }
+    if(len <= 0){
+        fprintf(stderr, "ERROR: Message length zero or negative lenght.\n");
+        return;
+    }
+    if(len >= MAX_MESSAGE_SIZE_BYTES){
+        fprintf(stderr, "ERROR: Message size too long.\n");
+        return;
+    }
+
+    snprintf(entry.command.send_message.text, sizeof("SendTextMessage"), "%s", "SendTextMessage");
+    entry.command.send_message.message_len = len;
+    entry.command.send_message.message_buffer = malloc(len + 1);
+    memcpy(entry.command.send_message.message_buffer, buffer, len);
+    entry.command.send_message.message_buffer[len] = '\0';
+
+    push_command(&buffers.queue_mstream, &entry);
+    return;
+}
+
+// Send text in file
+// fpath: path to text file
+// len: The actual length of the string fpath, NOT including the null terminator.
+int SendTextInFile(const char *fpath, size_t fpath_len){
+
+    if (!fpath) {
+        fprintf(stderr, "ERROR: SendTextInFile - Input file path is NULL.\n");
+        return RET_VAL_ERROR;
+    }
+
+    if (fpath_len == 0) {
+        // An empty string (fpath_len=0) is a valid input if it means current directory or empty filename.
+        // However, given the context of sending a single file, an empty path might be an error.
+        // The original code treated strlen(fpath) == 0 as an error. We'll keep this logic.
+        fprintf(stderr, "ERROR: SendTextInFile - Input file path length is zero (empty path).\n");
+        return RET_VAL_ERROR;
+    }
+
+    // MAX_PATH typically includes space for the null terminator.
+    // So, if fpath_len is MAX_PATH, it means the string *exactly* fills the buffer,
+    // leaving no space for the null terminator if the buffer itself is MAX_PATH bytes.
+    // Therefore, for a string of 'fpath_len' characters to fit AND be null-terminated
+    // in a MAX_PATH buffer, 'fpath_len' must be strictly less than MAX_PATH.
+    if (fpath_len >= MAX_PATH) {
+        fprintf(stderr, "ERROR: SendTextInFile - Input file path length (%zu) is too long for MAX_PATH (%d) buffer (requires space for null terminator).\n", fpath_len, MAX_PATH);
+        return RET_VAL_ERROR;
+    }
+
+    if (fpath_len != strlen(fpath)) {
+        fprintf(stderr, "WARNING: SendTextInFile - Provided length (%zu) does not match actual string length (%zu).\n", fpath_len, strlen(fpath));
+        return RET_VAL_ERROR;
+    }
+
+    char _fpath[MAX_PATH] = {0};
+    snprintf(_fpath, MAX_PATH, "%s", fpath);
+    
+    FILE *fp = NULL;
+    
+    int message_len = (uint32_t)get_file_size(_fpath);
+    if(message_len == RET_VAL_ERROR){
+        fprintf(stdout, "Error when reading file size!\n");
+        return RET_VAL_ERROR;
+    }
+    if(message_len > MAX_MESSAGE_SIZE_BYTES){
+        fprintf(stdout, "Message too big!\n");
+        return RET_VAL_ERROR;
+    }
+    fp = fopen(_fpath, "rb");
+    if(fp == NULL){
+        fprintf(stdout, "Error opening file!\n");
+        return RET_VAL_ERROR;
+    }
+    char *message_buffer = malloc(message_len + 1);
+    if(message_buffer == NULL){
+        fprintf(stdout, "Error allocating memeory buffer for message!\n");
+        return RET_VAL_ERROR;
+    }
+    size_t bytes_read = fread(message_buffer, 1, message_len, fp);
+    message_buffer[message_len] = '\0';
+    if (bytes_read == 0 && ferror(fp)) {
+        fprintf(stdout, "Error reading message file!\n");
+        return RET_VAL_ERROR;
+    }
+    SendTextMessage(message_buffer, message_len);
+    free(message_buffer);
+    message_buffer = NULL;
+ 
+    return RET_VAL_SUCCESS;
+}
+//============================================================================================================================================================
 
 // helper function to send a file on the queue
 // fpath_len: The actual content length of fpath, EXCLUDING the null terminator.
 // rpath_len: The actual content length of rpath, EXCLUDING the null terminator.
 // fname_len: The actual content length of fname, EXCLUDING the null terminator.
-static void _StreamFile(const char *fpath, const size_t fpath_len,
+static void stream_file(const char *fpath, const size_t fpath_len,
                         const char *rpath, const size_t rpath_len,
                         const char *fname, const size_t fname_len) {
 
@@ -26,45 +126,45 @@ static void _StreamFile(const char *fpath, const size_t fpath_len,
     // --- Input Validation (now based on content lengths) ---
 
     // Validate fpath (full actual disk directory path)
-    if (!fpath) { fprintf(stderr, "ERROR: _StreamFile - Absolute directory path string invalid pointer.\n"); return; }
+    if (!fpath) { fprintf(stderr, "ERROR: stream_file - Absolute directory path string invalid pointer.\n"); return; }
     // fpath_len 0 is invalid for a path
-    if (fpath_len == 0) { fprintf(stderr, "ERROR: _StreamFile - Absolute directory path string zero content length.\n"); return; }
+    if (fpath_len == 0) { fprintf(stderr, "ERROR: stream_file - Absolute directory path string zero content length.\n"); return; }
     // A string of 'fpath_len' characters needs 'fpath_len + 1' bytes for the null terminator.
     // So, it must be strictly less than MAX_PATH to fit within a MAX_PATH buffer.
-    if (fpath_len >= MAX_PATH) { fprintf(stderr, "ERROR: _StreamFile - Absolute directory path string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, fpath_len); return; }
+    if (fpath_len >= MAX_PATH) { fprintf(stderr, "ERROR: stream_file - Absolute directory path string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, fpath_len); return; }
     // (Optional but good check: Verify actual null termination if function might pass to strlen-reliant APIs)
     // if (strnlen_s(fpath, fpath_len + 1) > fpath_len) { /* Good, null terminated within expected length */ }
-    // else { fprintf(stderr, "WARNING: _StreamFile - Absolute directory path may not be null-terminated within its claimed length + 1.\n"); }
+    // else { fprintf(stderr, "WARNING: stream_file - Absolute directory path may not be null-terminated within its claimed length + 1.\n"); }
 
 
     // Validate rpath (relative directory path)
-    if (!rpath) { fprintf(stderr, "ERROR: _StreamFile - Relative directory path string invalid pointer.\n"); return; }
+    if (!rpath) { fprintf(stderr, "ERROR: stream_file - Relative directory path string invalid pointer.\n"); return; }
     // rpath_len MUST be at least 1 (for '\'), so 0 content length is an error
     if (rpath_len == 0) { // Should not happen with correct logic from recursive function (should always be at least "\")
-        fprintf(stderr, "ERROR: _StreamFile - Relative directory path string zero content length.\n");
+        fprintf(stderr, "ERROR: stream_file - Relative directory path string zero content length.\n");
         return;
     }
-    if (rpath_len >= MAX_PATH) { fprintf(stderr, "ERROR: _StreamFile - Relative directory path string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, rpath_len); return; }
+    if (rpath_len >= MAX_PATH) { fprintf(stderr, "ERROR: stream_file - Relative directory path string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, rpath_len); return; }
     // (Optional null termination check)
 
 
     // Validate fname (just the filename)
-    if (!fname) { fprintf(stderr, "ERROR: _StreamFile - Filename string invalid pointer.\n"); return; }
-    if (fname_len == 0) { fprintf(stderr, "ERROR: _StreamFile - Filename string zero content length (filename cannot be empty).\n"); return; }
-    if (fname_len >= MAX_PATH) { fprintf(stderr, "ERROR: _StreamFile - Filename string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, fname_len); return; }
+    if (!fname) { fprintf(stderr, "ERROR: stream_file - Filename string invalid pointer.\n"); return; }
+    if (fname_len == 0) { fprintf(stderr, "ERROR: stream_file - Filename string zero content length (filename cannot be empty).\n"); return; }
+    if (fname_len >= MAX_PATH) { fprintf(stderr, "ERROR: stream_file - Filename string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, fname_len); return; }
     // (Optional null termination check)
 
 
     // --- Populate QueueCommandEntry using secure functions ---
 
-    // Populate 'text' field for _StreamFile command type
+    // Populate 'text' field for stream_file command type
     // Note: "sendfile" has 8 chars, fits easily in 32 bytes with null.
     result = snprintf(entry.command.send_file.text,
                       sizeof(entry.command.send_file.text),
                       "%s", "sendfile");
     // Check for errors (negative return) or truncation (result >= buffer size)
     if (result < 0 || (size_t)result >= sizeof(entry.command.send_file.text)) { // Cast result to size_t for comparison
-        fprintf(stderr, "ERROR: _StreamFile - Failed to set 'text' field for send_file command (truncation or error). Result: %d, Buffer Size: %zu\n",
+        fprintf(stderr, "ERROR: stream_file - Failed to set 'text' field for send_file command (truncation or error). Result: %d, Buffer Size: %zu\n",
                 result, sizeof(entry.command.send_file.text));
         return;
     }
@@ -76,7 +176,7 @@ static void _StreamFile(const char *fpath, const size_t fpath_len,
                       "%.*s", (int)fpath_len, fpath); // Cast fpath_len to int for printf specifier
     // Check if the exact number of characters was copied
     if (result < 0 || (size_t)result != fpath_len) {
-        fprintf(stderr, "ERROR: _StreamFile - Failed to copy absolute directory path to command entry (truncation or error). Path len: %zu, Result: %d, Buffer Size: %zu\n",
+        fprintf(stderr, "ERROR: stream_file - Failed to copy absolute directory path to command entry (truncation or error). Path len: %zu, Result: %d, Buffer Size: %zu\n",
                 fpath_len, result, sizeof(entry.command.send_file.fpath));
         return;
     }
@@ -88,7 +188,7 @@ static void _StreamFile(const char *fpath, const size_t fpath_len,
                       sizeof(entry.command.send_file.rpath),
                       "%.*s", (int)rpath_len, rpath);
     if (result < 0 || (size_t)result != rpath_len) {
-        fprintf(stderr, "ERROR: _StreamFile - Failed to copy relative directory path to command entry (truncation or error). Path len: %zu, Result: %d, Buffer Size: %zu\n",
+        fprintf(stderr, "ERROR: stream_file - Failed to copy relative directory path to command entry (truncation or error). Path len: %zu, Result: %d, Buffer Size: %zu\n",
                 rpath_len, result, sizeof(entry.command.send_file.rpath));
         return;
     }
@@ -100,7 +200,7 @@ static void _StreamFile(const char *fpath, const size_t fpath_len,
                       sizeof(entry.command.send_file.fname),
                       "%.*s", (int)fname_len, fname);
     if (result < 0 || (size_t)result != fname_len) {
-        fprintf(stderr, "ERROR: _StreamFile - Failed to copy filename to command entry (truncation or error). Name len: %zu, Result: %d, Buffer Size: %zu\n",
+        fprintf(stderr, "ERROR: stream_file - Failed to copy filename to command entry (truncation or error). Name len: %zu, Result: %d, Buffer Size: %zu\n",
                 fname_len, result, sizeof(entry.command.send_file.fname));
         return;
     }
@@ -144,8 +244,8 @@ void SendSingleFile(const char *fpath, size_t len) {
         return;
     }
 
-    char absoluteDirectoryPath[MAX_PATH]; // This will be the fpath for _StreamFile
-    char fileNameOnly[MAX_PATH];          // This will be the fname for _StreamFile
+    char absoluteDirectoryPath[MAX_PATH]; // This will be the fpath for stream_file
+    char fileNameOnly[MAX_PATH];          // This will be the fname for stream_file
     const char *relativeDirectoryPath = "\\"; // Fixed rpath for SendSingleFile
 
     // --- Extract Filename and Absolute Directory Path ---
@@ -214,9 +314,9 @@ void SendSingleFile(const char *fpath, size_t len) {
         }
     }
 
-    // Call the internal _StreamFile helper
+    // Call the internal stream_file helper
     // fpath_len, rpath_len, fname_len should include the null terminator (+1) as per original calls
-    _StreamFile(absoluteDirectoryPath, strlen(absoluteDirectoryPath),
+    stream_file(absoluteDirectoryPath, strlen(absoluteDirectoryPath),
                 relativeDirectoryPath, strlen(relativeDirectoryPath), // rpath is fixed to "\"
                 fileNameOnly, strlen(fileNameOnly));
 
@@ -275,7 +375,7 @@ void SendAllFilesInFolder(const char *fd_path, size_t len) {
         return;
     }
 
-    // --- Prepare 'fpath' for _StreamFile ---
+    // --- Prepare 'fpath' for stream_file ---
     // This will be the absolute directory path, ensuring a trailing backslash.
     char absoluteDirectoryPathForSend[MAX_PATH];
     size_t current_abs_dir_len = len; // Start with the provided length of fd_path
@@ -283,7 +383,7 @@ void SendAllFilesInFolder(const char *fd_path, size_t len) {
     // Copy the original fd_path using the provided length
     snprintf_res = snprintf(absoluteDirectoryPathForSend, MAX_PATH, "%.*s", (int)len, fd_path);
     if (snprintf_res < 0 || (size_t)snprintf_res != len) {
-        fprintf(stderr, "ERROR: SendAllFilesInFolder - Failed to copy base directory path '%.*s' for _StreamFile (truncation or error). Result: %d, Expected: %zu\n", (int)len, fd_path, snprintf_res, len);
+        fprintf(stderr, "ERROR: SendAllFilesInFolder - Failed to copy base directory path '%.*s' for stream_file (truncation or error). Result: %d, Expected: %zu\n", (int)len, fd_path, snprintf_res, len);
         FindClose(hFind);
         return;
     }
@@ -308,7 +408,7 @@ void SendAllFilesInFolder(const char *fd_path, size_t len) {
     }
 
 
-    // --- Prepare 'rpath' for _StreamFile ---
+    // --- Prepare 'rpath' for stream_file ---
     // Since this function only sends files from the *top-level* of fd_path
     // (no recursion), the relative path is simply the root relative path.
     // For consistency with your earlier examples, we'll make it "\".
@@ -329,7 +429,7 @@ void SendAllFilesInFolder(const char *fd_path, size_t len) {
 
         // Only process files, not directories (as this is non-recursive)
         if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            // --- Prepare 'fname' for _StreamFile ---
+            // --- Prepare 'fname' for stream_file ---
             // Just the filename from findFileData
             char fileNameOnly[MAX_PATH];
             size_t filename_content_len = strlen(findFileData.cFileName);
@@ -346,11 +446,11 @@ void SendAllFilesInFolder(const char *fd_path, size_t len) {
                 continue; // Skip this file and try the next
             }
 
-            // --- Call _StreamFile with the three path components ---
+            // --- Call stream_file with the three path components ---
             // fpath argument: absoluteDirectoryPathForSend (e.g., "C:\Folder\")
             // rpath argument: relativeDirectoryPathForSend (e.g., "\")
             // fname argument: fileNameOnly (e.g., "MyFile.txt")
-            _StreamFile(absoluteDirectoryPathForSend, current_abs_dir_len, // current_abs_dir_len updated above
+            stream_file(absoluteDirectoryPathForSend, current_abs_dir_len, // current_abs_dir_len updated above
                         relativeDirectoryPathForSend, strlen(relativeDirectoryPathForSend),
                         fileNameOnly, filename_content_len); // filename_content_len already calculated
 
@@ -371,7 +471,7 @@ void SendAllFilesInFolder(const char *fd_path, size_t len) {
 // root_len: The length of root_path_to_replace (excluding null terminator).
 // current_fd_path: The absolute path of the folder currently being processed.
 // current_len: The length of current_fd_path (excluding null terminator).
-static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, size_t root_len,
+static void send_all_files_in_folder_recursive(const char *root_path_to_replace, size_t root_len,
                                           const char *current_fd_path, size_t current_len) {
 
     WIN32_FIND_DATA findFileData;
@@ -382,11 +482,11 @@ static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, siz
 
     // Validation for incoming lengths (can be removed if confident about caller's validation)
     if (!current_fd_path || current_len == 0 || current_len >= MAX_PATH) {
-        fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Invalid current folder path or length (path: %p, len: %zu).\n", current_fd_path, current_len);
+        fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Invalid current folder path or length (path: %p, len: %zu).\n", current_fd_path, current_len);
         return;
     }
     if (!root_path_to_replace || root_len == 0 || root_len >= MAX_PATH) {
-        fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Invalid root path or length (path: %p, len: %zu).\n", root_path_to_replace, root_len);
+        fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Invalid root path or length (path: %p, len: %zu).\n", root_path_to_replace, root_len);
         return;
     }
 
@@ -394,14 +494,14 @@ static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, siz
     // Construct the search path using the actual current_fd_path for OS calls
     // current_len (for current_fd_path) + '\' + '*' + '\0'  =>  current_len + 3 bytes needed
     if (current_len >= MAX_PATH - 2) { // Need space for "\*" and null terminator
-        fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Current folder path '%.*s' is too long for search wildcard (len: %zu).\n",
+        fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Current folder path '%.*s' is too long for search wildcard (len: %zu).\n",
                 (int)current_len, current_fd_path, current_len);
         return;
     }
 
     snprintf_res = snprintf(folderPathSearch, MAX_PATH, "%.*s\\*", (int)current_len, current_fd_path);
     if (snprintf_res < 0 || (size_t)snprintf_res != current_len + 2) { // Expected written chars: current_len + '\' + '*'
-        fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Failed to format search path for '%.*s' (truncation or error). Result: %d, Expected: %zu\n",
+        fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Failed to format search path for '%.*s' (truncation or error). Result: %d, Expected: %zu\n",
                 (int)current_len, current_fd_path, snprintf_res, current_len + 2);
         return;
     }
@@ -411,20 +511,20 @@ static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, siz
     if (hFind == INVALID_HANDLE_VALUE) {
         DWORD lastError = GetLastError();
         if (lastError != ERROR_FILE_NOT_FOUND && lastError != ERROR_PATH_NOT_FOUND) {
-            fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Could not open folder '%.*s'. System Error Code: %lu\n", (int)current_len, current_fd_path, lastError);
+            fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Could not open folder '%.*s'. System Error Code: %lu\n", (int)current_len, current_fd_path, lastError);
         }
         return;
     }
 
     // Prepare the current ACTUAL disk directory path with a trailing backslash.
-    // This will be passed as the 'fpath' argument to _StreamFile.
+    // This will be passed as the 'fpath' argument to stream_file.
     char absoluteDirectoryPath[MAX_PATH]; // Full absolute path to current directory
     size_t abs_dir_path_len = current_len; // Start with the provided length
 
     // Copy the current_fd_path using its length
     snprintf_res = snprintf(absoluteDirectoryPath, MAX_PATH, "%.*s", (int)current_len, current_fd_path);
     if (snprintf_res < 0 || (size_t)snprintf_res != current_len) {
-        fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Failed to copy current actual directory path '%.*s' (truncation or error). Result: %d, Expected: %zu\n",
+        fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Failed to copy current actual directory path '%.*s' (truncation or error). Result: %d, Expected: %zu\n",
                 (int)current_len, current_fd_path, snprintf_res, current_len);
         FindClose(hFind);
         return;
@@ -440,7 +540,7 @@ static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, siz
             absoluteDirectoryPath[abs_dir_path_len + 1] = '\0';
             abs_dir_path_len++; // Update length to include the new backslash
         } else {
-            fprintf(stderr, "WARNING: _SendAllFilesInFolderRecursive - Current actual directory path '%.*s' is too long to add trailing backslash. Path may be incomplete.\n", (int)abs_dir_path_len, absoluteDirectoryPath);
+            fprintf(stderr, "WARNING: send_all_files_in_folder_recursive - Current actual directory path '%.*s' is too long to add trailing backslash. Path may be incomplete.\n", (int)abs_dir_path_len, absoluteDirectoryPath);
             // Decide if this is a fatal error or just a warning for your application
         }
     } else {
@@ -448,7 +548,7 @@ static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, siz
     }
 
 
-    // Prepare the RELATIVE DIRECTORY PATH (for rpath argument of _StreamFile)
+    // Prepare the RELATIVE DIRECTORY PATH (for rpath argument of stream_file)
     char relativeDirectoryPath[MAX_PATH]; // Will hold "relative\path\" or "\"
     size_t relative_path_content_start_idx; // Index in current_fd_path where relative path starts
 
@@ -471,7 +571,7 @@ static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, siz
             // Add leading backslash and trailing backslash
             // "\\", content, "\\" + NULL => relative_sub_path_len + 3 bytes
             if (relative_sub_path_len + 2 >= MAX_PATH) { // +2 for leading/trailing slashes, +1 for null
-                fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Calculated relative path '%.*s' is too long. Skipping this folder.\n",
+                fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Calculated relative path '%.*s' is too long. Skipping this folder.\n",
                         (int)relative_sub_path_len, current_fd_path + relative_path_content_start_idx);
                 FindClose(hFind);
                 return;
@@ -482,13 +582,13 @@ static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, siz
         // Fallback: This case should ideally not be hit with correct recursion logic.
         // If for some reason current_fd_path isn't under the root,
         // use a default of "\" for consistency.
-        fprintf(stderr, "WARNING: _SendAllFilesInFolderRecursive - Current path '%.*s' is not a subpath of root '%.*s'. Using default relative path.\n",
+        fprintf(stderr, "WARNING: send_all_files_in_folder_recursive - Current path '%.*s' is not a subpath of root '%.*s'. Using default relative path.\n",
                 (int)current_len, current_fd_path, (int)root_len, root_path_to_replace);
         snprintf_res = snprintf(relativeDirectoryPath, MAX_PATH, "\\");
     }
 
     if (snprintf_res < 0 || snprintf_res >= MAX_PATH) {
-        fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Failed to prepare relative directory path for '%.*s' (truncation or error). Result: %d. Skipping this folder.\n",
+        fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Failed to prepare relative directory path for '%.*s' (truncation or error). Result: %d. Skipping this folder.\n",
                 (int)current_len, current_fd_path, snprintf_res);
         FindClose(hFind);
         return;
@@ -505,7 +605,7 @@ static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, siz
         size_t found_filename_len = strlen(findFileData.cFileName);
         // Sanity check on found filename length
         if (found_filename_len == 0 || found_filename_len >= MAX_PATH) {
-            fprintf(stderr, "WARNING: _SendAllFilesInFolderRecursive - Invalid filename length for '%s' (len: %zu). Skipping.\n", findFileData.cFileName, found_filename_len);
+            fprintf(stderr, "WARNING: send_all_files_in_folder_recursive - Invalid filename length for '%s' (len: %zu). Skipping.\n", findFileData.cFileName, found_filename_len);
             continue;
         }
 
@@ -518,39 +618,39 @@ static void _SendAllFilesInFolderRecursive(const char *root_path_to_replace, siz
             size_t sub_path_len = current_len + 1 + found_filename_len;
 
             if (sub_path_len >= MAX_PATH) { // Check if the new path will exceed MAX_PATH
-                fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Constructed subfolder path '%.*s\\%s' is too long (len: %zu). Skipping recursion.\n",
+                fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Constructed subfolder path '%.*s\\%s' is too long (len: %zu). Skipping recursion.\n",
                         (int)current_len, current_fd_path, findFileData.cFileName, sub_path_len);
                 continue;
             }
 
             snprintf_res = snprintf(subFolderPathActual, MAX_PATH, "%.*s\\%s", (int)current_len, current_fd_path, findFileData.cFileName);
             if (snprintf_res < 0 || (size_t)snprintf_res != sub_path_len) {
-                fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Failed to construct actual subfolder path for '%.*s\\%s' (truncation or error). Result: %d. Skipping recursion.\n",
+                fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Failed to construct actual subfolder path for '%.*s\\%s' (truncation or error). Result: %d. Skipping recursion.\n",
                         (int)current_len, current_fd_path, findFileData.cFileName, snprintf_res);
                 continue;
             }
 
             // Recursive call with the original root and its length, and the new actual path and its length.
-            _SendAllFilesInFolderRecursive(root_path_to_replace, root_len,
+            send_all_files_in_folder_recursive(root_path_to_replace, root_len,
                                           subFolderPathActual, sub_path_len);
 
         } else {
-            // It's a file, prepare its paths for _StreamFile.
+            // It's a file, prepare its paths for stream_file.
 
-            // 1. Prepare JUST THE FILENAME for `fname` argument of _StreamFile
+            // 1. Prepare JUST THE FILENAME for `fname` argument of stream_file
             char fileNameOnly[MAX_PATH]; // Will hold "MyFile.txt"
             // We already have found_filename_len from above
             snprintf_res = snprintf(fileNameOnly, MAX_PATH, "%s", findFileData.cFileName);
             if (snprintf_res < 0 || (size_t)snprintf_res != found_filename_len) {
-                fprintf(stderr, "ERROR: _SendAllFilesInFolderRecursive - Failed to copy raw filename '%s' (truncation or error). Result: %d, Expected: %zu. Skipping this file.\n", findFileData.cFileName, snprintf_res, found_filename_len);
+                fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Failed to copy raw filename '%s' (truncation or error). Result: %d, Expected: %zu. Skipping this file.\n", findFileData.cFileName, snprintf_res, found_filename_len);
                 continue;
             }
 
-            // 2. Call _StreamFile with the three path components
+            // 2. Call stream_file with the three path components
             //    fpath argument: absoluteDirectoryPath (e.g., "C:\Folder\Subfolder\")
             //    rpath argument: relativeDirectoryPath (e.g., "Subfolder\" or "\")
             //    fname argument: fileNameOnly (e.g., "MyFile.txt")
-            _StreamFile(absoluteDirectoryPath, abs_dir_path_len,
+            stream_file(absoluteDirectoryPath, abs_dir_path_len,
                         relativeDirectoryPath, strlen(relativeDirectoryPath), // strlen here is fine as relativeDirectoryPath is null-terminated
                         fileNameOnly, found_filename_len);
 
@@ -588,5 +688,5 @@ void SendAllFilesInFolderAndSubfolders(const char *fd_path, size_t len) {
     }
 
     // Start the recursive traversal, passing the initial fd_path as the root to replace
-    _SendAllFilesInFolderRecursive(fd_path, len, fd_path, len);
+    send_all_files_in_folder_recursive(fd_path, len, fd_path, len);
 }

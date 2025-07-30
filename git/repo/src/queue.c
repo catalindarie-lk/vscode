@@ -344,3 +344,191 @@ int pop_command(QueueCommand *queue, QueueCommandEntry *entry){
     return RET_VAL_SUCCESS;
 }
 
+
+
+int init_queue_ack_frame(QueueAckUpdFrame *queue, const size_t size){
+    if (!queue){
+        fprintf(stderr, "Invalid queue pointer\n");
+        return RET_VAL_ERROR;
+    }
+    if(size <= 0){
+        fprintf(stderr, "Invalid size for frame queue init\n");
+        return RET_VAL_ERROR;
+    }
+    queue->size = size;
+
+    // Allocate memory aligned to cache line (64 bytes typical)
+    queue->entry = (uintptr_t *)_aligned_malloc(sizeof(uintptr_t) * size, 64);
+    if (!queue->entry) {
+        fprintf(stderr, "Error allocating aligned memory - frame queue init\n");
+        return RET_VAL_ERROR;
+    }
+    // Initialize memory to zero
+    memset(queue->entry, 0, sizeof(uintptr_t) * size);
+
+    // In destroy_queue_command(), use _aligned_free(queue->entry) to avoid memory leaks.
+
+    queue->head = 0;
+    queue->tail = 0;
+    queue->pending = 0;
+    queue->push_semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+    if (queue->push_semaphore == NULL) {
+        fprintf(stderr, "Error creating push_semaphore - frame queue init\n");
+        // Clean up already allocated memory and critical section
+        _aligned_free(queue->entry);
+    return RET_VAL_ERROR;
+    }
+    InitializeCriticalSection(&queue->lock);    
+    return RET_VAL_SUCCESS;
+}
+int push_ack_frame(QueueAckUpdFrame *queue,  const uintptr_t entry){
+    // Check if the queue is initialized
+    if (!queue) {
+         fprintf(stderr, "Push - Frame queue not initialized.\n");
+        return RET_VAL_ERROR;
+    }
+    if(queue->size <= 0){
+        fprintf(stderr, "Push - Frame queue size not initialized\n");
+        return RET_VAL_ERROR;
+    }
+    // Check if the queue is full
+    EnterCriticalSection(&queue->lock);
+    long next_tail = (queue->tail + 1) % queue->size;
+    if(next_tail == queue->head){
+        LeaveCriticalSection(&queue->lock);
+        fprintf(stdout, "WARNING: - Push frame queue FULL!\n");
+        return RET_VAL_ERROR;
+    }
+    queue->entry[queue->tail] = entry;
+    // Move the tail index forward    
+    queue->tail = next_tail;
+    queue->pending++;
+    
+    ReleaseSemaphore(queue->push_semaphore, 1, NULL);
+    LeaveCriticalSection(&queue->lock);    
+    return RET_VAL_SUCCESS;
+}
+uintptr_t pop_ack_frame(QueueAckUpdFrame *queue){       
+    // Check if the queue is initialized
+    uintptr_t entry = 0;
+    if (!queue) {
+        fprintf(stderr, "Pop - Frame queue not initialized.\n");
+        return entry;
+    }
+    if(queue->size <= 0){
+        fprintf(stderr, "Pop - Frame queue size not initialized\n");
+        return entry;
+    }
+    EnterCriticalSection(&queue->lock);
+    // Check if the queue is empty before removing
+    
+    if (queue->head == queue->tail) {
+        LeaveCriticalSection(&queue->lock);
+        fprintf(stderr, "ERROR: - Pop fream queue EMPTY\n");
+        return entry;
+    }
+    entry = queue->entry[queue->head];
+    queue->entry[queue->head] = (uintptr_t)0;
+    // Move the head index forward
+    queue->head = (queue->head + 1) % queue->size;
+    queue->pending--;
+
+    LeaveCriticalSection(&queue->lock);
+    return entry;
+}
+
+
+
+int init_queue_tx_frame(QueueTXFrame *queue, const size_t queue_size){
+    if (!queue){
+        fprintf(stderr, "Invalid queue tx_frame pointer\n");
+        return RET_VAL_ERROR;
+    }
+    if(queue_size <= 0){
+        fprintf(stderr, "Invalid size for queue tx_frame init\n");
+        return RET_VAL_ERROR;
+    }
+    queue->queue_size = queue_size;
+
+    // Allocate memory aligned to cache line (64 bytes)
+    queue->pool_entry = (uintptr_t *)_aligned_malloc(sizeof(uintptr_t) * queue_size, 64);
+    if (!queue->pool_entry) {
+        fprintf(stderr, "Error allocating aligned memory - queue tx_frame init\n");
+        return RET_VAL_ERROR;
+    }
+    // Initialize memory to zero
+    memset(queue->pool_entry, 0, sizeof(uintptr_t) * queue_size);
+
+    queue->head = 0;
+    queue->tail = 0;
+    queue->pending = 0;
+    queue->push_semaphore = CreateSemaphore(NULL, queue_size - 1, LONG_MAX, NULL);
+    queue->pop_semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+    if (!queue->push_semaphore || !queue->pop_semaphore) {
+        fprintf(stderr, "Error creating push_semaphore - queue tx_frame init\n");
+        // Clean up already allocated memory and critical section
+        _aligned_free(queue->pool_entry);
+    return RET_VAL_ERROR;
+    }
+    InitializeCriticalSection(&queue->lock);    
+    return RET_VAL_SUCCESS;
+}
+int push_tx_frame(QueueTXFrame *queue,  const uintptr_t pool_entry){
+    // Check if the queue is initialized
+    if (!queue) {
+         fprintf(stderr, "Push - queue tx_frame not initialized.\n");
+        return RET_VAL_ERROR;
+    }
+    if(queue->queue_size <= 0){
+        fprintf(stderr, "Push - queue tx_frame invalid queue size\n");
+        return RET_VAL_ERROR;
+    }
+    // Check if the queue is full
+    WaitForSingleObject(queue->push_semaphore, INFINITE);
+    EnterCriticalSection(&queue->lock);
+    size_t next_tail = (queue->tail + 1) % queue->queue_size;
+    if(next_tail == queue->head){
+        LeaveCriticalSection(&queue->lock);
+        fprintf(stdout, "WARNING: - tx_frame frame queue FULL (push fail)!\n");
+        return RET_VAL_ERROR;
+    }
+    queue->pool_entry[queue->tail] = pool_entry;
+    // Move the tail index forward    
+    queue->tail = next_tail;
+    queue->pending++;
+
+    ReleaseSemaphore(queue->pop_semaphore, 1, NULL);
+    LeaveCriticalSection(&queue->lock);
+    return RET_VAL_SUCCESS;
+}
+uintptr_t pop_tx_frame(QueueTXFrame *queue){       
+    // Check if the queue is initialized
+    uintptr_t pool_entry = 0;
+    if (!queue) {
+        fprintf(stderr, "Pop - queue tx_frame not initialized.\n");
+        return pool_entry;
+    }
+    if(queue->queue_size <= 0){
+        fprintf(stderr, "Pop - queue tx_frame invalid queue size\n");
+        return pool_entry;
+    }
+
+    WaitForSingleObject(queue->pop_semaphore, INFINITE);
+    EnterCriticalSection(&queue->lock);
+    // Check if the queue is empty before removing
+    
+    if (queue->head == queue->tail) {
+        LeaveCriticalSection(&queue->lock);
+        fprintf(stderr, "WARNING: - tx_frame frame queue empty (pop fail)!\n");
+        return pool_entry;
+    }
+    pool_entry = queue->pool_entry[queue->head];
+    queue->pool_entry[queue->head] = 0;
+    // Move the head index forward
+    queue->head = (queue->head + 1) % queue->queue_size;
+    queue->pending--;
+
+    ReleaseSemaphore(queue->push_semaphore, 1, NULL);
+    LeaveCriticalSection(&queue->lock);
+    return pool_entry;
+}

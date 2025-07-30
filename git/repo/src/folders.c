@@ -7,6 +7,20 @@
 #include "include/protocol_frames.h"
 
 
+// Function to check if a file exists and is not a directory.
+// Uses Windows API for direct and robust checks without actually opening the file.
+bool FileExists(const char* fileName) {
+    DWORD attributes = GetFileAttributesA(fileName);
+    return (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+// Function to check if a drive exists and is a directory.
+// Uses Windows API for direct checks
+bool DriveExists(const char* drivePath) {
+    DWORD attributes = GetFileAttributesA(drivePath);
+    return (attributes != INVALID_FILE_ATTRIBUTES) && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 // This function takes a FULL, ABSOLUTE path and ensures all its parent directories exist.
 bool CreateAbsoluteFolderRecursive(const char *absolutePathToCreate) {
     char tempPath[MAX_PATH];
@@ -78,7 +92,6 @@ bool CreateAbsoluteFolderRecursive(const char *absolutePathToCreate) {
     return TRUE;
 }
 
-
 // wrapper function to create a relative path within a given root
 bool CreateRelativeFolderRecursive(const char *rootDirectory, const char *relativePath) {
     char fullPathToCreate[MAX_PATH];
@@ -133,13 +146,7 @@ bool CreateRelativeFolderRecursive(const char *rootDirectory, const char *relati
     return CreateAbsoluteFolderRecursive(fullPathToCreate);
 }
 
-//======================================================================================================================================================================================================
-// Function to check if a file exists and is not a directory.
-// Uses Windows API for direct and robust checks without actually opening the file.
-static bool file_exists(const char* filename) {
-    DWORD attributes = GetFileAttributesA(filename);
-    return (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY));
-}
+// ============================================================================================================
 
 // Function to generate a unique filename by appending a timestamp (including milliseconds).
 // It takes the original full path, a buffer to write the new path into, and the buffer's size.
@@ -185,7 +192,6 @@ static bool generate_timestamp_filename_fixed_buffer(const char* original_full_p
     return true; // Successfully generated new path.
 }
 
-
 // Opens a file with the specified mode. If the file already exists,
 // it generates a new timestamped name and attempts to open that.
 //
@@ -196,7 +202,7 @@ static bool generate_timestamp_filename_fixed_buffer(const char* original_full_p
 // - mode: The file opening mode string (e.g., "wb+", "r", "a").
 //
 // Returns a FILE* pointer on success, or NULL on failure.
-FILE* _fopen_rename(const char* in_fpath, char* out_fpath, size_t fpath_max_size, const char* mode) {
+FILE* FopenRename(const char* in_fpath, char* out_fpath, size_t fpath_max_size, const char* mode) {
     // Basic validation of input paths and buffer.
     if (!in_fpath || !in_fpath[0] || !out_fpath || fpath_max_size == 0) {
         fprintf(stderr, "Error in _fopen_rename: Invalid input path, output buffer, or buffer size.\n");
@@ -214,7 +220,7 @@ FILE* _fopen_rename(const char* in_fpath, char* out_fpath, size_t fpath_max_size
     FILE* fp = NULL;
 
     // Check if the file (at the path currently in out_fpath) already exists.
-    if (file_exists(out_fpath)) {
+    if (FileExists(out_fpath)) {
         // fprintf(stdout, "File '%s' already exists. Generating new file name with timestamp...\n", out_fpath);
 
         // Generate the new timestamped filename directly into out_fpath.
@@ -248,3 +254,4 @@ FILE* _fopen_rename(const char* in_fpath, char* out_fpath, size_t fpath_max_size
     // Return the FILE* pointer (NULL on failure, valid pointer on success).
     return fp;
 }
+

@@ -7,6 +7,7 @@
 #include <windows.h>                    // For Windows-specific functions like CreateThread, Sleep
 #include <mswsock.h>                    // Optional: For WSARecvFrom and advanced I/O
 #include <iphlpapi.h>                   // For IP Helper API functions
+#include "include/mem_pool.h"
 
 
 #ifndef RET_VAL_SUCCESS
@@ -28,19 +29,15 @@
 
 #define MAX_NAME_SIZE                       (255)                 // Maximum size for client/server names
 
-#define DEFAULT_DISCONNECT_SEQ           (UINT64_MAX - 1)
-#define DEFAULT_KEEP_ALIVE_SEQ           (UINT64_MAX - 2)
-#define DEFAULT_CONNECT_REQUEST_SEQ      (UINT64_MAX - 3)
-#define DEFAULT_CONNECT_RESPONSE_SEQ     (UINT64_MAX - 4)
+#define DEFAULT_DISCONNECT_SEQ              (UINT64_MAX - 1)
+#define DEFAULT_KEEP_ALIVE_SEQ              (UINT64_MAX - 2)
+#define DEFAULT_CONNECT_REQUEST_SEQ         (UINT64_MAX - 3)
+#define DEFAULT_CONNECT_RESPONSE_SEQ        (UINT64_MAX - 4)
 
-#define DEFAULT_CONNECT_REQUEST_SID      (UINT32_MAX - 1)
+#define DEFAULT_CONNECT_REQUEST_SID         (UINT32_MAX - 1)
 
 #define WSARECV_TIMEOUT_MS                  (100)         // Timeout in milliseconds in the receive frame thread
 #define GETQCOMPL_TIMEOUT                   (258L)
-
-#define SRC_FPATH                           "D:\\_test\\_src\\"
-#define DEST_FPATH                          "D:\\_test\\_dest\\"
-
 
 // --- Frame Types ---
 typedef uint8_t FrameType;
@@ -91,7 +88,8 @@ enum AckErrorCode {
 // Common Header for all frames
 typedef struct {
     uint16_t start_delimiter;                               // Magic number (e.g., 0xAABB)
-    uint8_t  frame_type;                                    // Discriminator: what kind of payload is in the union
+    uint8_t frame_type;                                    // Discriminator: what kind of payload is in the union
+    uint8_t padding_0;
     uint64_t seq_num;                                       // Global sequence number for this frame from the sender
     uint32_t session_id;                                    // Unique identifier for the session (e.g., client ID or session ID)
     uint32_t checksum;                                      // Checksum for this frame's header + active union member (CRC32 recommended)
@@ -169,28 +167,36 @@ typedef struct {
         uint8_t raw_payload[MAX_PAYLOAD_SIZE];              // For generic access or padding
     } payload;
 } UdpFrame;
-#pragma pack(pop)
 
 typedef struct {
-    OVERLAPPED overlapped;
+    FrameHeader header;
+    AckPayload ack;
+} AckUdpFrame;
+
+#pragma pack(pop)
+
+// Enumeration for operation type within IOCP_CONTEXT
+typedef enum {
+    OP_RECV,
+    OP_SEND
+} OPERATION_TYPE;
+
+typedef struct {
+    OVERLAPPED overlapped; // Must be the first member for easy casting
     WSABUF wsaBuf;
     CHAR buffer[sizeof(UdpFrame)];
-    struct sockaddr_in src_addr;
-    int src_addr_len;
+    struct sockaddr_in addr;  // Source/Destination address
+    int addr_len;
+    OPERATION_TYPE type;      // To distinguish between send and receive operations
 } IOCP_CONTEXT;
 
-int send_frame(const UdpFrame *frame, 
-                    const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr
-                );
 
-int send_disconnect(const uint32_t session_id, 
-                    const SOCKET src_socket, 
-                    const struct sockaddr_in *dest_addr
-                );
+void init_iocp_context(IOCP_CONTEXT *iocp_context, OPERATION_TYPE type);
+int udp_recv_from(const SOCKET socket, IOCP_CONTEXT *iocp_context);
+int udp_send_to(const SOCKET socket, const char *data, size_t data_len, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
+void refill_recv_iocp_pool(const SOCKET socket, MemPool *mem_pool);
+int send_frame(const UdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
+int send_ack_frame(const AckUdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
 
-
-int issue_WSARecvFrom(const SOCKET socket, 
-                    IOCP_CONTEXT *iocp_context);
 
 #endif 

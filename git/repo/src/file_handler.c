@@ -215,20 +215,20 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBu
         goto exit_error;
     }
 
-    // creating root folder (based on session ID of the client)
-    char rootFolder[MAX_PATH];
-    snprintf(rootFolder, MAX_PATH, "%s""Client_SID_%d", DEST_FPATH, fstream->sid);
 
-    if (CreateDirectory(rootFolder, NULL)) {
-        // printf("Root folder created successfully.\n");
-    } else {
-        DWORD error = GetLastError();
-        if (error == ERROR_ALREADY_EXISTS) {
-            // printf("Folder already exists.\n");
-        } else {
-            printf("Failed to create root folder \"%s\". Error code: %lu\n", rootFolder, error);
-            goto exit_error;
-        }
+    if(!DriveExists(SERVER_PARTITION_DRIVE)){
+        fprintf(stderr, "Drive Partition \"%s\" doesn't exit\n", SERVER_PARTITION_DRIVE);
+        fstream->fstream_err = STREAM_ERR_DRIVE_PARTITION;
+        goto exit_error;
+    }
+
+    // creating root folder\\session_folder
+    char rootFolder[MAX_PATH];
+    snprintf(rootFolder, MAX_PATH, "%s""SessionID_%d", SERVER_ROOT_FOLDER, fstream->sid);
+
+    if (CreateAbsoluteFolderRecursive(rootFolder) == FALSE) {
+        fprintf(stderr, "Failed to create recursive path for root folder: \"%s\". Error code: %lu\n", rootFolder, GetLastError());
+        goto exit_error;
     }
 
     fprintf(stdout,"RECEIVED RPATH: %s", fstream->rpath);
@@ -238,18 +238,24 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBu
         goto exit_error;
     }
 
-    snprintf(fstream->fpath, MAX_PATH, "%s%s%s", rootFolder, fstream->rpath, fstream->fname);
-        
-    char fpath[MAX_PATH] = {0};
+    snprintf(fstream->fpath, MAX_PATH, "%s%s%s", rootFolder, fstream->rpath, fstream->fname);  
 
-    // fstream->fp = fopen(fstream->fpath, "wb+"); // "wb+" allows writing and reading, creates or truncates
-    fstream->fp = _fopen_rename(fstream->fpath, fpath, MAX_PATH, "wb+");
-    if(fstream->fp == NULL){
-        fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fname, errno);
-        fstream->fstream_err = STREAM_ERR_FP;
+    if(FileExists(fstream->fpath)){
+        fprintf(stderr, "File \"%s\" already exits\n", fstream->fpath);
+        fstream->fstream_err = STREAM_ERR_FILENAME_EXIST;
         goto exit_error;
     }
-    fprintf(stdout, "Received file: %s\n", fpath);
+    fstream->fp = fopen(fstream->fpath, "wb+"); // "wb+" allows writing and reading, creates or truncates
+
+    
+    // char fpath[MAX_PATH] = {0};
+    // fstream->fp = FopenRename(fstream->fpath, fpath, MAX_PATH, "wb+");
+    // if(fstream->fp == NULL){
+    //     fprintf(stderr, "Error creating/opening file for write: %s (errno: %d)\n", fstream->fname, errno);
+    //     fstream->fstream_err = STREAM_ERR_FP;
+    //     goto exit_error;
+    // }
+    // fprintf(stdout, "Received file: %s\n", fpath);
 
     if(push_fstream(&buffers->queue_fstream, (uintptr_t)fstream) == RET_VAL_ERROR){
         goto exit_error;
@@ -399,8 +405,25 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
 
     file_attach_fragment_to_chunk(fstream, frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size, buffers);
 
-    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->fqueue_ack, &ack_entry);
+    // new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, client->srv_socket, &client->client_addr);
+    // push_ack(&buffers->fqueue_ack, &ack_entry);
+
+
+    QueueEntryAckUdpFrame *entry_ack_udp_frame = (QueueEntryAckUdpFrame *)pool_alloc(&buffers->pool_queue_ack_udp_frame);
+    if(!entry_ack_udp_frame){
+        fprintf(stderr, "Failed to allocate memory in the pool for ack frame\n");
+        LeaveCriticalSection(&client->lock);
+        return RET_VAL_ERROR;
+    }
+    entry_ack_udp_frame->frame.header.start_delimiter = _htons(FRAME_DELIMITER);
+    entry_ack_udp_frame->frame.header.frame_type = FRAME_TYPE_ACK;
+    entry_ack_udp_frame->frame.header.seq_num = frame->header.seq_num;
+    entry_ack_udp_frame->frame.header.session_id = frame->header.session_id;
+    entry_ack_udp_frame->frame.ack.op_code = STS_FRAME_DATA_ACK;
+    entry_ack_udp_frame->frame.header.checksum = _htonl(calculate_crc32_table(&entry_ack_udp_frame->frame, sizeof(AckUdpFrame)));
+    memcpy(&entry_ack_udp_frame->addr, &client->client_addr, sizeof(struct sockaddr_in));
+    push_ack_frame(&buffers->queue_ack_udp_frame, (uintptr_t)entry_ack_udp_frame);
+   
 
     LeaveCriticalSection(&client->lock);
     ReleaseSemaphore(buffers->test_semaphore, 1, NULL);
