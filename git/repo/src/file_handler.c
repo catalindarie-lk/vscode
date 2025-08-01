@@ -8,6 +8,8 @@
 
 #include "include/file_handler.h"
 #include "include/protocol_frames.h"
+#include "include/server.h"
+#include "include/server_frames.h"
 #include "include/netendians.h"
 #include "include/queue.h"
 #include "include/hash.h"
@@ -15,37 +17,46 @@
 #include "include/checksum.h"
 #include "include/mem_pool.h"
 #include "include/fileio.h"
-#include "include/server_frames.h"
-#include "include/server.h"
 #include "include/folders.h"
 
 
-static ServerFileStream *get_free_file_stream(ServerBuffers *buffers){
-    EnterCriticalSection(&buffers->fstreams_lock);
+static ServerFileStream *get_free_file_stream(){
+    
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
+    EnterCriticalSection(&server->fstreams_lock);
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        ServerFileStream *fstream = &buffers->fstream[i];
+        ServerFileStream *fstream = &server->fstream[i];
         if(!fstream->fstream_busy){
             fstream->fstream_busy = TRUE;
-            LeaveCriticalSection(&buffers->fstreams_lock);
+            LeaveCriticalSection(&server->fstreams_lock);
             return fstream;
         }
     }
-    LeaveCriticalSection(&buffers->fstreams_lock);
+    LeaveCriticalSection(&server->fstreams_lock);
     return NULL;
 }
-static ServerFileStream *search_file_stream(ServerBuffers *buffers, const uint32_t session_id, const uint32_t file_id){
+static ServerFileStream *search_file_stream(const uint32_t session_id, const uint32_t file_id){
+    
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
+    EnterCriticalSection(&server->fstreams_lock);
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        ServerFileStream *fstream = &buffers->fstream[i];
+        ServerFileStream *fstream = &server->fstream[i];
         // EnterCriticalSection(&fstream->lock);
         if(fstream->fstream_busy == TRUE && fstream->sid == session_id && fstream->fid == file_id){
             // LeaveCriticalSection(&fstream->lock);
+            LeaveCriticalSection(&server->fstreams_lock);
             return fstream;
         }
         // LeaveCriticalSection(&fstream->lock);
     }
+    LeaveCriticalSection(&server->fstreams_lock);
     return NULL;
 }
-static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size, ServerBuffers* buffers){
+static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     // Acquire the critical section lock for the specific FileStream.
     EnterCriticalSection(&fstream->lock);
@@ -100,7 +111,9 @@ static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragm
     return;
 
 }
-static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBuffers* buffers) {
+static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame) {
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     EnterCriticalSection(&fstream->lock);
 
@@ -257,7 +270,7 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBu
     // }
     // fprintf(stdout, "Received file: %s\n", fpath);
 
-    if(push_fstream(&buffers->queue_fstream, (uintptr_t)fstream) == RET_VAL_ERROR){
+    if(push_fstream(queue_fstream, (uintptr_t)fstream) == RET_VAL_ERROR){
         goto exit_error;
     }
 
@@ -266,7 +279,7 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, ServerBu
 
 exit_error:
     //Call close_file_stream to free any partially allocated resources
-    close_file_stream(fstream, buffers);
+    close_file_stream(fstream);
     LeaveCriticalSection(&fstream->lock);
     return RET_VAL_ERROR;
 
@@ -274,7 +287,9 @@ exit_error:
 
 
 // Process received file metadata frame
-int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers) {
+int handle_file_metadata(Client *client, UdpFrame *frame) {
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     if(client == NULL){
         fprintf(stdout, "Received frame for non existing client context!\n");
@@ -293,52 +308,54 @@ int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
 
-    if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_WAITING_FRAGMENTS) == TRUE){
+    if(ht_search_id(ht_fid, recv_session_id, recv_file_id, ID_WAITING_FRAGMENTS) == TRUE){
         fprintf(stderr, "Received duplicated metadata frame Seq: %llu for fID: %u sID %u\n", recv_seq_num, recv_file_id, recv_session_id);
         op_code = ERR_DUPLICATE_FRAME;
         goto exit_err;
     }
 
-    if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
+    if(ht_search_id(ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received metadata frame Seq: %llu for completed fID: %u sID %u\n", recv_seq_num, recv_file_id, recv_session_id);
         op_code = ERR_EXISTING_FILE;
         goto exit_err;
     }
 
-    ServerFileStream *fstream = get_free_file_stream(buffers);
+    ServerFileStream *fstream = get_free_file_stream();
     if(fstream == NULL){
-        // fprintf(stderr, "All new file transfers streams are in use!\n");
+        fprintf(stderr, "All server file transfers streams are in use!\n");
         op_code = ERR_RESOURCE_LIMIT;
         goto exit_err; 
     }
 
     memcpy(&fstream->client_addr, &client->client_addr, sizeof(struct sockaddr_in));
 
-    if(init_file_stream(fstream, frame, buffers) == RET_VAL_ERROR){
+    if(init_file_stream(fstream, frame) == RET_VAL_ERROR){
         fprintf(stderr, "Error initializing file stream\n");
         op_code = ERR_STREAM_INIT;
         goto exit_err;
     }
 
-    if(ht_insert_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_WAITING_FRAGMENTS) == RET_VAL_ERROR){
+    if(ht_insert_id(ht_fid, recv_session_id, recv_file_id, ID_WAITING_FRAGMENTS) == RET_VAL_ERROR){
         fprintf(stderr, "Failed to allocate memory for file ID in hash table\n");
         op_code = ERR_MEMORY_ALLOCATION;
         goto exit_err;
     }
 
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_METADATA, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    push_ack(queue_priority_ack, &ack_entry);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
 
 exit_err:
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    push_ack(queue_priority_ack, &ack_entry);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }
 // Process received file fragment frame
-int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers){
+int handle_file_fragment(Client *client, UdpFrame *frame){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     if(client == NULL){
         fprintf(stdout, "Received frame for non existing client context!\n");
@@ -358,13 +375,13 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
 
-    if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
+    if(ht_search_id(ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received fragment frame Seq: %llu; for old completed fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
         op_code = ERR_EXISTING_FILE;
         goto exit_err;
     }
 
-    ServerFileStream *fstream = search_file_stream(buffers, recv_session_id, recv_file_id);
+    ServerFileStream *fstream = search_file_stream(recv_session_id, recv_file_id);
     if(!fstream){
         fprintf(stderr, "Received fragment frame Seq: %llu for unknown fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
         op_code = ERR_MISSING_METADATA;
@@ -394,7 +411,7 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
     uint64_t i = (recv_fragment_offset / FILE_FRAGMENT_SIZE) / 64ULL; // Assuming 64 fragments per bitmap entry
     if(fstream->bitmap[i] == 0ULL){
         // Allocate a new memory chunk from the `pool_file_chunk` memory pool.
-        fstream->pool_block_file_chunk[i] = pool_alloc(&buffers->pool_file_chunk);
+        fstream->pool_block_file_chunk[i] = pool_alloc(pool_file_chunk);
         // Check if the memory chunk allocation was successful.
         if(fstream->pool_block_file_chunk[i] == NULL){
             fprintf(stderr, "Error allocating memory chunk for sID: %u; fID: %u;\n", recv_session_id, recv_file_id);
@@ -403,40 +420,32 @@ int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers
         }
     }
 
-    file_attach_fragment_to_chunk(fstream, frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size, buffers);
+    file_attach_fragment_to_chunk(fstream, frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size);
 
-    // new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, client->srv_socket, &client->client_addr);
-    // push_ack(&buffers->fqueue_ack, &ack_entry);
-
-
-    QueueEntryAckUdpFrame *entry_ack_udp_frame = (QueueEntryAckUdpFrame *)pool_alloc(&buffers->pool_queue_ack_udp_frame);
-    if(!entry_ack_udp_frame){
+    PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+    if(!entry){
         fprintf(stderr, "Failed to allocate memory in the pool for ack frame\n");
         LeaveCriticalSection(&client->lock);
         return RET_VAL_ERROR;
     }
-    entry_ack_udp_frame->frame.header.start_delimiter = _htons(FRAME_DELIMITER);
-    entry_ack_udp_frame->frame.header.frame_type = FRAME_TYPE_ACK;
-    entry_ack_udp_frame->frame.header.seq_num = frame->header.seq_num;
-    entry_ack_udp_frame->frame.header.session_id = frame->header.session_id;
-    entry_ack_udp_frame->frame.ack.op_code = STS_FRAME_DATA_ACK;
-    entry_ack_udp_frame->frame.header.checksum = _htonl(calculate_crc32_table(&entry_ack_udp_frame->frame, sizeof(AckUdpFrame)));
-    memcpy(&entry_ack_udp_frame->addr, &client->client_addr, sizeof(struct sockaddr_in));
-    push_ack_frame(&buffers->queue_ack_udp_frame, (uintptr_t)entry_ack_udp_frame);
-   
 
+    construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
+    push_ack_frame(queue_ack_udp_frame, (uintptr_t)entry);
+   
     LeaveCriticalSection(&client->lock);
-    ReleaseSemaphore(buffers->test_semaphore, 1, NULL);
+
     return RET_VAL_SUCCESS;
 
 exit_err:
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    push_ack(queue_priority_ack, &ack_entry);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }
 // Process received file end frame
-int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
+int handle_file_end(Client *client, UdpFrame *frame){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     if(client == NULL){
         fprintf(stdout, "Received frame for non existing client context!\n");
@@ -454,13 +463,13 @@ int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
 
-    if(ht_search_id(&buffers->ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
+    if(ht_search_id(ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received file end frame for completed file Seq: %llu; sID: %u; fID: %u;\n", recv_seq_num, recv_session_id, recv_file_id);
         op_code = ERR_EXISTING_FILE;
         goto exit_err;
     }
 
-    ServerFileStream *fstream = search_file_stream(buffers, recv_session_id, recv_file_id);
+    ServerFileStream *fstream = search_file_stream(recv_session_id, recv_file_id);
     if(!fstream){
         fprintf(stderr, "Received end frame Seq: %llu for unknown fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
         op_code = ERR_MISSING_METADATA;
@@ -475,7 +484,7 @@ int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
 
     if(fstream->file_complete){
         new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_END, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->queue_priority_ack, &ack_entry);
+        push_ack(queue_priority_ack, &ack_entry);
     }
  
     LeaveCriticalSection(&client->lock);
@@ -483,7 +492,7 @@ int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers){
 
 exit_err:
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->queue_priority_ack, &ack_entry);
+    push_ack(queue_priority_ack, &ack_entry);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }

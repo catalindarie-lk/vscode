@@ -35,6 +35,8 @@
         "process.h": "c",
         "folders.h": "c",
         "server_frames.h": "c",
-        "mswsock.h": "c"
+        "mswsock.h": "c",
+        "client_api.h": "c",
+        "client_statistics.h": "c"
     }
 }

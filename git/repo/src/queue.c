@@ -439,60 +439,60 @@ uintptr_t pop_ack_frame(QueueAckUpdFrame *queue){
 
 
 
-int init_queue_tx_frame(QueueTXFrame *queue, const size_t queue_size){
+int init_queue_send_frame(QueueSendFrame *queue, const size_t size){
     if (!queue){
         fprintf(stderr, "Invalid queue tx_frame pointer\n");
         return RET_VAL_ERROR;
     }
-    if(queue_size <= 0){
+    if(size <= 0){
         fprintf(stderr, "Invalid size for queue tx_frame init\n");
         return RET_VAL_ERROR;
     }
-    queue->queue_size = queue_size;
+    queue->size = size;
 
     // Allocate memory aligned to cache line (64 bytes)
-    queue->pool_entry = (uintptr_t *)_aligned_malloc(sizeof(uintptr_t) * queue_size, 64);
-    if (!queue->pool_entry) {
+    queue->entry = (uintptr_t *)_aligned_malloc(sizeof(uintptr_t) * size, 64);
+    if (!queue->entry) {
         fprintf(stderr, "Error allocating aligned memory - queue tx_frame init\n");
         return RET_VAL_ERROR;
     }
     // Initialize memory to zero
-    memset(queue->pool_entry, 0, sizeof(uintptr_t) * queue_size);
+    memset(queue->entry, 0, sizeof(uintptr_t) * size);
 
     queue->head = 0;
     queue->tail = 0;
     queue->pending = 0;
-    queue->push_semaphore = CreateSemaphore(NULL, queue_size - 1, LONG_MAX, NULL);
+    queue->push_semaphore = CreateSemaphore(NULL, size - 1, LONG_MAX, NULL);
     queue->pop_semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
     if (!queue->push_semaphore || !queue->pop_semaphore) {
         fprintf(stderr, "Error creating push_semaphore - queue tx_frame init\n");
         // Clean up already allocated memory and critical section
-        _aligned_free(queue->pool_entry);
+        _aligned_free(queue->entry);
     return RET_VAL_ERROR;
     }
     InitializeCriticalSection(&queue->lock);    
     return RET_VAL_SUCCESS;
 }
-int push_tx_frame(QueueTXFrame *queue,  const uintptr_t pool_entry){
+int push_send_frame(QueueSendFrame *queue,  const uintptr_t entry){
     // Check if the queue is initialized
     if (!queue) {
          fprintf(stderr, "Push - queue tx_frame not initialized.\n");
         return RET_VAL_ERROR;
     }
-    if(queue->queue_size <= 0){
+    if(queue->size <= 0){
         fprintf(stderr, "Push - queue tx_frame invalid queue size\n");
         return RET_VAL_ERROR;
     }
     // Check if the queue is full
     WaitForSingleObject(queue->push_semaphore, INFINITE);
     EnterCriticalSection(&queue->lock);
-    size_t next_tail = (queue->tail + 1) % queue->queue_size;
+    size_t next_tail = (queue->tail + 1) % queue->size;
     if(next_tail == queue->head){
         LeaveCriticalSection(&queue->lock);
         fprintf(stdout, "WARNING: - tx_frame frame queue FULL (push fail)!\n");
         return RET_VAL_ERROR;
     }
-    queue->pool_entry[queue->tail] = pool_entry;
+    queue->entry[queue->tail] = entry;
     // Move the tail index forward    
     queue->tail = next_tail;
     queue->pending++;
@@ -501,14 +501,14 @@ int push_tx_frame(QueueTXFrame *queue,  const uintptr_t pool_entry){
     LeaveCriticalSection(&queue->lock);
     return RET_VAL_SUCCESS;
 }
-uintptr_t pop_tx_frame(QueueTXFrame *queue){       
+uintptr_t pop_send_frame(QueueSendFrame *queue){       
     // Check if the queue is initialized
     uintptr_t pool_entry = 0;
     if (!queue) {
         fprintf(stderr, "Pop - queue tx_frame not initialized.\n");
         return pool_entry;
     }
-    if(queue->queue_size <= 0){
+    if(queue->size <= 0){
         fprintf(stderr, "Pop - queue tx_frame invalid queue size\n");
         return pool_entry;
     }
@@ -522,10 +522,10 @@ uintptr_t pop_tx_frame(QueueTXFrame *queue){
         fprintf(stderr, "WARNING: - tx_frame frame queue empty (pop fail)!\n");
         return pool_entry;
     }
-    pool_entry = queue->pool_entry[queue->head];
-    queue->pool_entry[queue->head] = 0;
+    pool_entry = queue->entry[queue->head];
+    queue->entry[queue->head] = 0;
     // Move the head index forward
-    queue->head = (queue->head + 1) % queue->queue_size;
+    queue->head = (queue->head + 1) % queue->size;
     queue->pending--;
 
     ReleaseSemaphore(queue->push_semaphore, 1, NULL);

@@ -13,7 +13,6 @@
 #include "include/mem_pool.h"
 
 
-// Utility function to initialize an IOCP_CONTEXT
 void init_iocp_context(IOCP_CONTEXT *iocp_context, OPERATION_TYPE type) {
     if (!iocp_context) 
         return;
@@ -26,7 +25,7 @@ void init_iocp_context(IOCP_CONTEXT *iocp_context, OPERATION_TYPE type) {
     return;
 }
 
-int udp_recv_from(const SOCKET socket, IOCP_CONTEXT *iocp_context){
+int udp_recv_from(const SOCKET src_socket, IOCP_CONTEXT *iocp_context){
 
     if (!iocp_context) {
         return RET_VAL_ERROR;
@@ -38,7 +37,7 @@ int udp_recv_from(const SOCKET socket, IOCP_CONTEXT *iocp_context){
     DWORD flags = 0;
 
     int recvfrom_result = WSARecvFrom(
-        socket,
+        src_socket,
         &iocp_context->wsaBuf,
         1,
         &bytes_recv,
@@ -57,7 +56,7 @@ int udp_recv_from(const SOCKET socket, IOCP_CONTEXT *iocp_context){
     return RET_VAL_SUCCESS;
 }
 
-int udp_send_to(const SOCKET socket, const char *data, size_t data_len, const struct sockaddr_in *dest_addr, MemPool *mem_pool) {
+int udp_send_to(const char *data, size_t data_len, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool) {
     // Allocate a new iocp_context for each send operation
     IOCP_CONTEXT *iocp_context = (IOCP_CONTEXT*)pool_alloc(mem_pool);
     if (iocp_context == NULL) {
@@ -81,7 +80,7 @@ int udp_send_to(const SOCKET socket, const char *data, size_t data_len, const st
 
     DWORD bytes_sent = 0;
     int result = WSASendTo(
-        socket,
+        src_socket,
         &iocp_context->wsaBuf,
         1,
         &bytes_sent,
@@ -107,7 +106,7 @@ int udp_send_to(const SOCKET socket, const char *data, size_t data_len, const st
     return (int)bytes_sent;
 }
 
-void refill_recv_iocp_pool(const SOCKET socket, MemPool *mem_pool){
+void refill_recv_iocp_pool(const SOCKET src_socket, MemPool *mem_pool){
     uint64_t mem_pool_free_blocks = mem_pool->free_blocks;
     for(int i = 0; i < mem_pool_free_blocks; i++){
         IOCP_CONTEXT* recv_context = (IOCP_CONTEXT*)pool_alloc(mem_pool);
@@ -116,7 +115,7 @@ void refill_recv_iocp_pool(const SOCKET socket, MemPool *mem_pool){
             continue;
         }
         init_iocp_context(recv_context, OP_RECV);
-        if (udp_recv_from(socket, recv_context) == RET_VAL_ERROR) {
+        if (udp_recv_from(src_socket, recv_context) == RET_VAL_ERROR) {
             fprintf(stderr, "Failed to re-post receive operation %d. Exiting.\n", i);
             pool_free(mem_pool, recv_context);
             continue;
@@ -125,7 +124,7 @@ void refill_recv_iocp_pool(const SOCKET socket, MemPool *mem_pool){
     return;
 }
 
-int send_frame(const UdpFrame *frame, const SOCKET socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool){
+int send_frame(const UdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool){
     // Determine the actual size to send based on frame type if payloads are variable
     size_t frame_size = 0;
     switch (frame->header.frame_type) {
@@ -167,24 +166,71 @@ int send_frame(const UdpFrame *frame, const SOCKET socket, const struct sockaddr
             break;
     }
 
-    // int bytes_sent = sendto(socket, (const char*)frame, frame_size, 0, (SOCKADDR*)dest_addr, sizeof(*dest_addr));
-    // if (bytes_sent == SOCKET_ERROR) {
-    //     fprintf(stderr, "sendto() failed with error: %d\n", WSAGetLastError());
-    //     return SOCKET_ERROR;        
-    // }
-    // return bytes_sent;
-
-    return udp_send_to(socket, (const char*)frame, frame_size, dest_addr, mem_pool);
+    return udp_send_to((const char*)frame, frame_size, src_socket, dest_addr, mem_pool);
 
 }
 
 
+int send_pool_frame(PoolEntrySendFrame *pool_entry, MemPool *mem_pool){
+    
+    UdpFrame *frame = &pool_entry->frame;
+    SOCKET src_socket = pool_entry->src_socket;
+    struct sockaddr_in *dest_addr = &pool_entry->dest_addr;
+    
+    size_t frame_size = 0;
+    switch (frame->header.frame_type) {
+        case FRAME_TYPE_FILE_METADATA:
+            frame_size = sizeof(FrameHeader) + sizeof(FileMetadataPayload);
+            break;
+        case FRAME_TYPE_FILE_METADATA_RESPONSE:
+            frame_size = sizeof(FrameHeader) + sizeof(FileMetadataResponsePayload);
+            break;
+        case FRAME_TYPE_FILE_FRAGMENT:
+            frame_size = sizeof(FrameHeader) + sizeof(FileFragmentPayload); // Or header + payload_len + related metadata
+            break;
+        case FRAME_TYPE_FILE_END:
+            frame_size = sizeof(FrameHeader) + sizeof(FileEndPayload); // Or header + payload_len + related metadata
+            break;
+        case FRAME_TYPE_FILE_COMPLETE:
+            frame_size = sizeof(FrameHeader) + sizeof(FileCompletePayload); // Or header + payload_len + related metadata
+            break;
+        case FRAME_TYPE_LONG_TEXT_MESSAGE:
+            frame_size = sizeof(FrameHeader) + sizeof(LongTextPayload); // Or header + payload_len + related metadata
+            break;
+        case FRAME_TYPE_ACK:
+            frame_size = sizeof(FrameHeader) + sizeof(AckPayload); // Acknowledgment frame
+            break;
+        case FRAME_TYPE_CONNECT_REQUEST:
+            frame_size = sizeof(FrameHeader) + sizeof(ConnectRequestPayload);
+            break;
+        case FRAME_TYPE_CONNECT_RESPONSE:
+            frame_size = sizeof(FrameHeader) + sizeof(ConnectResponsePayload);
+            break;
+        case FRAME_TYPE_DISCONNECT:
+            frame_size = sizeof(FrameHeader);
+            break;
+        case FRAME_TYPE_KEEP_ALIVE:
+            frame_size = sizeof(FrameHeader);
+            break;
+        default:
+            frame_size = sizeof(UdpFrame); // Fallback to max size
+            break;
+    }
 
-int send_ack_frame(const AckUdpFrame *frame, const SOCKET socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool){
-    // Determine the actual size to send based on frame type if payloads are variable
-    return udp_send_to(socket, (const char*)frame, sizeof(AckUdpFrame), dest_addr, mem_pool);
+    return udp_send_to((const char*)frame, frame_size, src_socket, dest_addr, mem_pool);
+
 }
 
+
+int send_pool_ack_frame(PoolEntryAckFrame *pool_ack_entry, MemPool *mem_pool){
+    
+    AckUdpFrame *frame = &pool_ack_entry->frame;
+    SOCKET src_socket = pool_ack_entry->src_socket;
+    struct sockaddr_in *dest_addr = &pool_ack_entry->dest_addr;
+    
+    return udp_send_to((const char*)frame, sizeof(AckUdpFrame), src_socket, dest_addr, mem_pool);
+
+}
 
 
 

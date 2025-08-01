@@ -29,10 +29,9 @@
 
 #define MAX_NAME_SIZE                       (255)                 // Maximum size for client/server names
 
-#define DEFAULT_DISCONNECT_SEQ              (UINT64_MAX - 1)
-#define DEFAULT_KEEP_ALIVE_SEQ              (UINT64_MAX - 2)
-#define DEFAULT_CONNECT_REQUEST_SEQ         (UINT64_MAX - 3)
-#define DEFAULT_CONNECT_RESPONSE_SEQ        (UINT64_MAX - 4)
+#define DEFAULT_DISCONNECT_REQUEST_SEQ      (UINT64_MAX - 1)
+#define DEFAULT_CONNECT_REQUEST_SEQ         (UINT64_MAX - 2)
+#define DEFAULT_KEEP_ALIVE_SEQ              (UINT64_MAX - 3)
 
 #define DEFAULT_CONNECT_REQUEST_SID         (UINT32_MAX - 1)
 
@@ -170,7 +169,7 @@ typedef struct {
 
 typedef struct {
     FrameHeader header;
-    AckPayload ack;
+    AckPayload payload;
 } AckUdpFrame;
 
 #pragma pack(pop)
@@ -190,13 +189,28 @@ typedef struct {
     OPERATION_TYPE type;      // To distinguish between send and receive operations
 } IOCP_CONTEXT;
 
+typedef struct{
+    UdpFrame frame; // The UDP frame to be sent
+    SOCKET src_socket;
+    struct sockaddr_in dest_addr; // Destination address for the frame
+}PoolEntrySendFrame;
+
+typedef struct{
+    AckUdpFrame frame; // The UDP frame to be sent
+    SOCKET src_socket;
+    struct sockaddr_in dest_addr; // Destination address for the frame
+}PoolEntryAckFrame;
+
 
 void init_iocp_context(IOCP_CONTEXT *iocp_context, OPERATION_TYPE type);
-int udp_recv_from(const SOCKET socket, IOCP_CONTEXT *iocp_context);
-int udp_send_to(const SOCKET socket, const char *data, size_t data_len, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
-void refill_recv_iocp_pool(const SOCKET socket, MemPool *mem_pool);
+int udp_recv_from(const SOCKET src_socket, IOCP_CONTEXT *iocp_context);
+int udp_send_to(const char *data, size_t data_len, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
+
+void refill_recv_iocp_pool(const SOCKET src_socket, MemPool *mem_pool);
+
 int send_frame(const UdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
-int send_ack_frame(const AckUdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
+int send_pool_frame(PoolEntrySendFrame *entry, MemPool *mem_pool);
+int send_pool_ack_frame(PoolEntryAckFrame *pool_ack_entry, MemPool *mem_pool);
 
 
 #endif 

@@ -77,25 +77,26 @@ void ht_print_id(HashTableIdentifierNode *ht);
 
 //--------------------------------------------------------------------------------------------------------------------------
 
-__declspec(align(64))typedef struct hTblNode_txFrame{
-    uintptr_t frame;
+__declspec(align(64))typedef struct TableNodeSendFrame{
+    uintptr_t entry;
     time_t sent_time;
     uint16_t count;
-    struct hTblNode_txFrame *next;
-}hTblNode_txFrame;
+    struct TableNodeSendFrame *next;
+}TableNodeSendFrame;
 
 __declspec(align(64))typedef struct{
     size_t size;
-    hTblNode_txFrame **head;  // array of pointers to hTblNode_txFrame
+    TableNodeSendFrame **head;  // array of pointers to TableNodeSendFrame
     CRITICAL_SECTION mutex;
     size_t count;
     MemPool pool_nodes;
-}hTbl_txFrame;
+}TableSendFrame;
 
-void htbl_init_txframe(hTbl_txFrame *htable, const size_t size, const size_t max_nodes);
-uint64_t htbl_get_hash_txframe(const uint64_t seq_num, const size_t size);
-int htbl_insert_txframe(hTbl_txFrame *htable, const uintptr_t pool_frame);
-uintptr_t htbl_remove_txframe(hTbl_txFrame *htable, const uint64_t seq_num);
+void init_table_send_frame(TableSendFrame *table, const size_t size, const size_t max_nodes);
+uint64_t get_hash_table_send_frame(const uint64_t seq_num, const size_t size);
+int insert_table_send_frame(TableSendFrame *table, const uintptr_t entry);
+uintptr_t remove_table_send_frame(TableSendFrame *table, const uint64_t seq_num);
+uintptr_t search_table_send_frame(TableSendFrame *table, const uint64_t seq_num);
 
 // void ht_txframe_clean(HTableTXFrame *htable);
 

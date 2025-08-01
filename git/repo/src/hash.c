@@ -131,8 +131,13 @@ void ht_clean(HashTableFramePendingAck *ht){
     return;
 }
 
+
+
+
+
+
 //--------------------------------------------------------------------------------------------------------------------------
-void htbl_init_txframe(hTbl_txFrame *htable, const size_t size, const size_t max_nodes){
+void init_table_send_frame(TableSendFrame *table, const size_t size, const size_t max_nodes){
     if(size <= 0){
         fprintf(stderr, "ERROR: Invalid size for tx_frame hash table init\n");
         return;
@@ -141,104 +146,138 @@ void htbl_init_txframe(hTbl_txFrame *htable, const size_t size, const size_t max
         fprintf(stderr, "ERROR: Invalid max_nodes for tx_frame hash table init\n");
         return;
     }
-    htable->size = size;
-    htable->head = (hTblNode_txFrame **)_aligned_malloc(sizeof(hTblNode_txFrame) * size, 64);
-    if(!htable->head){
+    table->size = size;
+    table->head = (TableNodeSendFrame **)_aligned_malloc(sizeof(TableNodeSendFrame) * size, 64);
+    if(!table->head){
         fprintf(stderr, "ERROR: Unable to allocate memory for tx_frame hash table\n");
         return;
     }
-    pool_init(&htable->pool_nodes, sizeof(hTblNode_txFrame), max_nodes);
-    memset(htable->head, 0, sizeof(uintptr_t) * size);
+    init_pool(&table->pool_nodes, sizeof(TableNodeSendFrame), max_nodes);
+    memset(table->head, 0, sizeof(uintptr_t) * size);
 
-    InitializeCriticalSection(&htable->mutex);
-    htable->count = 0;
+    InitializeCriticalSection(&table->mutex);
+    table->count = 0;
     return;
 }
-uint64_t htbl_get_hash_txframe(const uint64_t seq_num, const size_t size){
+uint64_t get_hash_table_send_frame(const uint64_t seq_num, const size_t size){
     if(size <= 0){
         fprintf(stderr, "ERROR: Invalid size for tx_frame hash table get_seq_num()\n");
         return RET_VAL_ERROR;
     }
     return (seq_num % size);
 }
-int htbl_insert_txframe(hTbl_txFrame *htable, const uintptr_t pool_frame){
-    if(!htable->head){
+int insert_table_send_frame(TableSendFrame *table, const uintptr_t entry){
+    if(!table->head){
         fprintf(stderr, "ERROR: Invalid node array pointer for hash table - insert_tx_frame()\n");
         return RET_VAL_ERROR;
     }
-    if(!pool_frame){
+    if(!entry){
         fprintf(stderr, "ERROR: Invalid pool_frame pointer for insert_tx_frame() into hash table\n");
         return RET_VAL_ERROR;
     }
-    if(htable->size <= 0){
+    if(table->size <= 0){
         fprintf(stderr, "ERROR: Invalid size for hash table insert_tx_frame()\n");
         return RET_VAL_ERROR;
     }
-    EnterCriticalSection(&htable->mutex);
-    UdpFrame *frame = (UdpFrame*)pool_frame;    
+    EnterCriticalSection(&table->mutex);
+    PoolEntrySendFrame *pool_entry = (PoolEntrySendFrame*)entry;
     
-    uint64_t seq_num = _ntohll(frame->header.seq_num);
-    uint64_t index = htbl_get_hash_txframe(seq_num, htable->size);
+    uint64_t seq_num = _ntohll(pool_entry->frame.header.seq_num);
+    uint64_t index = get_hash_table_send_frame(seq_num, table->size);
     
-    //fprintf(stdout, "SeqNum: %llu inserted at index: %llu\n", seq_num, index);
-    // Node_HTableTXFrame *node = (Node_HTableTXFrame *)pool_alloc(&htable->pool);
-    hTblNode_txFrame *node = (hTblNode_txFrame *)pool_alloc(&htable->pool_nodes);
+    TableNodeSendFrame *node = (TableNodeSendFrame*)pool_alloc(&table->pool_nodes);
     if(node == NULL){
-        fprintf(stderr, "Failed to allocate memeory for tx_frame hash table node");
+        fprintf(stderr, "ERROR: Failed to allocate memeory for tx_frame hash table node\n");
         return RET_VAL_ERROR;
     }
-    // memcpy(&node->pool_entry, pool_entry, sizeof(uintptr_t));
-    node->frame = pool_frame;
+    // fprintf(stdout, "DEBUG: Inserting seq num: %llu at index: %llu\n", seq_num, index);
+    node->entry = entry;
     node->sent_time = time(NULL);
     node->count = 1;
 
-    node->next = (hTblNode_txFrame*)htable->head[index];  // Insert at the head (linked list)
-    htable->head[index] = node;
-    htable->count++;
-    LeaveCriticalSection(&htable->mutex);
+    node->next = (TableNodeSendFrame*)table->head[index];  // Insert at the head (linked list)
+    table->head[index] = node;
+    table->count++;
+    LeaveCriticalSection(&table->mutex);
     return RET_VAL_SUCCESS;
 }
-uintptr_t htbl_remove_txframe(hTbl_txFrame *htable, const uint64_t seq_num){
-    if(!htable->head){
-        fprintf(stderr, "ERROR: Invalid node array pointer for hash table - insert_tx_frame()\n");
+uintptr_t remove_table_send_frame(TableSendFrame *table, const uint64_t seq_num){
+    if(!table->head){
+        fprintf(stderr, "ERROR: Invalid node array pointer for hash table - htbl_remove_txframe()\n");
         return 0;
     }
-    if(htable->size <= 0){
-        fprintf(stderr, "ERROR: Invalid size for hash table remove_tx_frame()\n");
+    if(table->size <= 0){
+        fprintf(stderr, "ERROR: Invalid size for hash table htbl_remove_txframe()\n");
         return 0;
     }
-    EnterCriticalSection(&htable->mutex);
-    uint64_t index = htbl_get_hash_txframe(seq_num, htable->size);
+    EnterCriticalSection(&table->mutex);
+    uint64_t index = get_hash_table_send_frame(seq_num, table->size);
 
-    hTblNode_txFrame *curr = htable->head[index];
-    hTblNode_txFrame *prev = NULL;
+    TableNodeSendFrame *curr = table->head[index];
+    TableNodeSendFrame *prev = NULL;
     while (curr) {
         
-        UdpFrame *pool_frame = (UdpFrame*)curr->frame;
-        uint64_t frame_seq_num = _ntohll(pool_frame->header.seq_num);
+        PoolEntrySendFrame *pool_entry = (PoolEntrySendFrame*)curr->entry;
+        uint64_t frame_seq_num = _ntohll(pool_entry->frame.header.seq_num);
 
         if (frame_seq_num == seq_num) {
-            // fprintf(stdout, "Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
+            // fprintf(stdout, "DEBUG: Removing frame with seq num: %llu from index: %llu\n", seq_num, index);
             // Found it
             if (prev) {
                 prev->next = curr->next;
             } else {
-                htable->head[index] = curr->next;
+                table->head[index] = curr->next;
             }
             // free(curr);
-            pool_free(&htable->pool_nodes, (void*)curr);
-            htable->count--;
+            pool_free(&table->pool_nodes, (void*)curr);
+            table->count--;
             //fprintf(stdout, "Hash count: %d\n", *count);
-            LeaveCriticalSection(&htable->mutex);
-            return (uintptr_t)pool_frame;
+            LeaveCriticalSection(&table->mutex);
+            return (uintptr_t)pool_entry;
         }
         prev = curr;
         curr = curr->next;
     }
-    LeaveCriticalSection(&htable->mutex);
+    LeaveCriticalSection(&table->mutex);
     return 0;
  
 }
+uintptr_t search_table_send_frame(TableSendFrame *table, const uint64_t seq_num){
+    if(!table->head){
+        fprintf(stderr, "ERROR: Invalid node array pointer for hash table - search_tx_frame()\n");
+        return 0;
+    }
+    if(table->size <= 0){
+        fprintf(stderr, "ERROR: Invalid size for hash table search_tx_frame()\n");
+        return 0;
+    }
+    EnterCriticalSection(&table->mutex);
+    uint64_t index = get_hash_table_send_frame(seq_num, table->size);
+
+    TableNodeSendFrame *curr = table->head[index];
+    TableNodeSendFrame *prev = NULL;
+    while (curr) {
+        
+        PoolEntrySendFrame *pool_entry = (PoolEntrySendFrame*)curr->entry;
+        uint64_t frame_seq_num = _ntohll(pool_entry->frame.header.seq_num);
+
+        if (frame_seq_num == seq_num) {
+            LeaveCriticalSection(&table->mutex);
+            fprintf(stdout, "DEBUG: Found frame node in hash table with seq_num: %llu at index: %llu\n", seq_num, index);
+            return (uintptr_t)pool_entry;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    LeaveCriticalSection(&table->mutex);
+    fprintf(stdout, "DEBUG: Node frame not found in hash table with seq_num: %llu\n", seq_num);
+    return 0;
+ 
+}
+
+
+
+
 
 //--------------------------------------------------------------------------------------------------------------------------
 void init_ht_id(HashTableIdentifierNode *ht){

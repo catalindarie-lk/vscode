@@ -1,197 +1,258 @@
 #ifndef CLIENT_H
 #define CLIENT_H
 
+#include <stdint.h>                                             // For fixed-width integer types like uint8_t, uint32_t, uint64_t
+#include <windows.h>                                            // For Windows-specific types like BOOL, HANDLE, CRITICAL_SECTION, SOCKET, MAX_PATH, etc.
+#include "include/protocol_frames.h"                            // Includes definitions related to network frame structures and types
+#include "include/queue.h"                                      // Includes definitions for queue data structures
+#include "include/mem_pool.h"                                   // Includes definitions for memory pool management
+#include "include/hash.h"                                       // Includes definitions for hash table structures
 
-#include <stdint.h>
-#include <windows.h>
-#include "include/protocol_frames.h"
-#include "include/queue.h"
-#include "include/mem_pool.h"
-#include "include/hash.h"
-
+// --- Standard Return Value Definitions ---
 #ifndef RET_VAL_SUCCESS
 #define RET_VAL_SUCCESS 0
 #endif
 #ifndef RET_VAL_ERROR
 #define RET_VAL_ERROR -1
 #endif
-#ifndef MAX_CLIENT_MESSAGE_STREAMS
-#define MAX_CLIENT_MESSAGE_STREAMS              (10)
-#endif
-#ifndef MAX_CLIENT_FILE_STREAMS
-#define MAX_CLIENT_FILE_STREAMS                 10
-#endif
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
-#define DEFAULT_SESSION_TIMEOUT_SEC             (120)
+#define DEFAULT_SESSION_TIMEOUT_SEC 120
 #endif
- 
-// --- Constants ---
 
-#define CLIENT_ID                               (0xFF)        // Example client ID, can be set dynamically
+// --- Client-Specific Constants ---
+
+#define CLIENT_ID                               (0xFF)                // Example client ID, can be set dynamically by the application
 #define CLIENT_NAME                             "lkdc UDP Text/File Transfer Client"
+#define MIN_CONNECTION_TIMEOUT_SEC              15                     // Minimum timeout for a connection in seconds
 
-#define CLIENT_ROOT_FOLDER                     "D:\\_test\\client_root\\"
+#define CLIENT_ROOT_FOLDER                      "H:\\_test\\client_root\\"
 
-#define CONNECT_REQUEST_TIMEOUT_MS              2500
-#define DISCONNECT_REQUEST_TIMEOUT_MS           2500
+#define CONNECT_REQUEST_TIMEOUT_MS              2500                  // Timeout for a connection request in milliseconds
+#define DISCONNECT_REQUEST_TIMEOUT_MS           2500                  // Timeout for a disconnect request in milliseconds
 
-#define TEXT_CHUNK_SIZE                         (TEXT_FRAGMENT_SIZE * 128)
-#define FILE_CHUNK_SIZE                         (FILE_FRAGMENT_SIZE * 128)
+#define TEXT_CHUNK_SIZE                         (TEXT_FRAGMENT_SIZE * 128) // Size of a text data chunk (derived from protocol_frames.h)
+#define FILE_CHUNK_SIZE                         (FILE_FRAGMENT_SIZE * 128) // Size of a file data chunk (derived from protocol_frames.h)
 
-#define RESEND_TIMEOUT_SEC                      3           //seconds
+#define RESEND_TIMEOUT_SEC                      3                     // Seconds before a pending frame is considered for retransmission
+#define MAX_MESSAGE_SIZE_BYTES                  (4 * 1024 * 1024)     // Maximum size for a single large text message (4 MB)
 
-#define MAX_MESSAGE_SIZE_BYTES                  (4 * 1024 * 1024)         // Max size of a long text message
+// --- Client Stream Configuration ---
+#define CLIENT_MAX_ACTIVE_FSTREAMS              5                     // Maximum number of concurrent file streams (transfers)
+#define CLIENT_MAX_ACTIVE_MSTREAMS              1                     // Maximum number of concurrent message streams (e.g., long text messages)
 
-// #define TIMEOUT_METADATA_RESPONSE_MS            5000      //wait for 5 sec after sending a metadata fragment for response
-// #define MAX_RETRIES_STOP_TRANSFER               5         //max retries to stop file/message transfer
-//----------------------------------------------------------------------------------------------------------
-#define MAX_CLIENT_ACTIVE_FSTREAMS              5
-#define MAX_CLIENT_ACTIVE_MSTREAMS              1
+// --- Client Worker Thread Configuration ---
+#define CLIENT_MAX_THREADS_RECV_SEND_FRAME      2                     // Number of threads dedicated to receiving and sending frames
+#define CLIENT_MAX_TREADS_PROCESS_FRAME         2                     // Number of threads dedicated to processing received frames
+#define CLIENT_MAX_THREADS_POP_SEND_FRAME       1                     // Number of threads for popping normal send frames from queue
+#define CLIENT_MAX_THREADS_POP_SEND_PRIO_FRAME  1                    // Number of threads for popping priority send frames from queue
+#define CLIENT_MAX_THREADS_POP_SEND_CTRL_FRAME  1                    // Number of threads for popping control frames from queue
 
-#define CLIENT_SIZE_QUEUE_COMMAND_FSTREAM       256      // Nr of send file commands that can be queued
-#define CLIENT_SIZE_QUEUE_COMMAND_MSTREAM       256       // Nr of send file commands that can be queued
+// --- Client Memory Pool Sizes ---
+#define CLIENT_POOL_SIZE_IOCP_SEND              1024 // Total size for IOCP send contexts
+#define CLIENT_POOL_SIZE_IOCP_RECV              1024                  // Size for IOCP receive contexts
 
-#define CLIENT_SIZE_QUEUE_FRAME                 (4096 + (512 * MAX_CLIENT_ACTIVE_FSTREAMS))
-#define CLIENT_SIZE_QUEUE_PRIORITY_FRAME        (CLIENT_SIZE_QUEUE_FRAME / 4)
-#define HASH_SIZE_FRAME                         (CLIENT_SIZE_QUEUE_FRAME + CLIENT_SIZE_QUEUE_PRIORITY_FRAME)
-#define HASH_FRAME_HIGH_WATERMARK               (HASH_SIZE_FRAME * 0.5)
-#define HASH_FRAME_LOW_WATERMARK                (HASH_SIZE_FRAME * 0.3)
-#define BLOCK_SIZE_FRAME                        ((uint64_t)(sizeof(FramePendingAck)))
-#define BLOCK_COUNT_FRAME                       ((uint64_t)(HASH_SIZE_FRAME))
+#define CLIENT_POOL_SIZE_SEND_FRAME             (CLIENT_QUEUE_SIZE_SEND_FRAME + \
+                                                CLIENT_QUEUE_SIZE_SEND_PRIO_FRAME + \
+                                                CLIENT_QUEUE_SIZE_SEND_CTRL_FRAME) \
 
-#define IOCP_RECV_MEM_POOL_BLOCKS               1024
-#define IOCP_SEND_MEM_POOL_BLOCKS               4096
-#define CLIENT_RECV_SEND_FRAME_WRK_THREADS      1
+// --- Client Queue Buffer Sizes ---
+#define CLIENT_QUEUE_SIZE_SEND_FRAME            256
+#define CLIENT_QUEUE_SIZE_SEND_PRIO_FRAME       32
+#define CLIENT_QUEUE_SIZE_SEND_CTRL_FRAME       8
 
+
+#define CLIENT_QUEUE_SIZE_RECV_FRAME            (4096 + (512 * CLIENT_MAX_ACTIVE_FSTREAMS)) // Size of the queue for received frames
+#define CLIENT_QUEUE_SIZE_RECV_PRIO_FRAME       1024                  // Size of the queue for received priority frames
+
+#define CLIENT_QUEUE_SIZE_FSTREAM_COMMANDS      1024                  // Size of the queue for file stream commands
+#define CLIENT_QUEUE_SIZE_MSTREAM_COMMANDS      1024                  // Size of the queue for message stream commands
+
+// --- Macro to Parse Global Data to Threads ---
+// This macro simplifies passing pointers to global client data structures into thread functions.
+// It creates local pointers within the thread function's scope, pointing to the global instances.
+#define PARSE_GLOBAL_DATA(client_obj, buffers_obj, threads_obj) \
+    ClientData *client = &(client_obj); /* Pointer to the global ClientData structure */ \
+    ClientBuffers *buffers = &(buffers_obj); /* Pointer to the global ClientBuffers structure */ \
+    ClientThreads *threads = &(threads_obj); /* Pointer to threads struct queue */ \
+    MemPool *pool_send_iocp_context = &((buffers_obj).pool_send_iocp_context); /* Pointer to IOCP send context memory pool */ \
+    MemPool *pool_recv_iocp_context = &((buffers_obj).pool_recv_iocp_context); /* Pointer to IOCP recv context memory pool */ \
+    QueueFrame *queue_recv_frame = &((buffers_obj).queue_recv_frame); /* Pointer to received frame queue */ \
+    QueueFrame *queue_recv_prio_frame = &((buffers_obj).queue_recv_prio_frame);/* Pointer to received priority frame queue */\
+    s_MemPool *pool_send_frame = &((buffers_obj).pool_send_frame); /* Pointer to send frame memory pool */ \
+    QueueSendFrame *queue_send_frame = &((buffers_obj).queue_send_frame); /* Pointer to send queue for normal frames */ \
+    QueueSendFrame *queue_send_prio_frame = &((buffers_obj).queue_send_prio_frame); /* Pointer to send queue for priority frames */ \
+    QueueSendFrame *queue_send_ctrl_frame = &((buffers_obj).queue_send_ctrl_frame); /* Pointer to send queue for control frames */ \
+    TableSendFrame *table_send_frame = &((buffers_obj).table_send_frame); /* Pointer to hash table for sent frames awaiting ACK */ \
+    QueueCommand *queue_fstream = &((buffers_obj).queue_process_fstream); /* Pointer to file stream command queue */ \
+    QueueCommand *queue_mstream = &((buffers_obj).queue_process_mstream); /* Pointer to message stream command queue */ \
+    // end of #define PARSE_GLOBAL_DATA // End marker for the macro definition
+
+
+// --- Enumerations ---
+
+// General status enumeration for a client entity
 enum Status{
-    STATUS_CLOSED = 0,
-    STATUS_BUSY = 1,
-    STATUS_READY = 2,
-    STATUS_ERROR = 3
+    STATUS_CLOSED = 0,                          // Client is closed or inactive
+    STATUS_BUSY = 1,                            // Client is currently performing an operation
+    STATUS_READY = 2,                           // Client is ready for operations
+    STATUS_ERROR = 3                            // Client is in an error state
 };
 
-typedef uint8_t SessionStatus;
+// Session status enumeration for a client's connection
+typedef uint8_t SessionStatus;                  // Define SessionStatus as an 8-bit unsigned integer
 enum SessionStatus{
-    CONNECTION_CLOSED = 0,
-    CONNECTION_PENDING = 1,
-    CONNECTION_ESTABLISHED = 2,
+    CONNECTION_CLOSED = 0,                      // Connection is not established
+    CONNECTION_PENDING = 1,                     // Connection request sent, awaiting response
+    CONNECTION_ESTABLISHED = 2,                 // Connection is active and established
 };
 
+// --- Structure Definitions ---
+
+// Structure to hold a file's SHA256 hash
 typedef struct{
-    uint8_t sha256[32];
+    uint8_t sha256[32];                         // 32 bytes for SHA256 hash
 }FileHash;
 
+// Structure representing a single client message stream
 typedef struct{
-    BOOL mstream_busy;
+    BOOL mstream_busy;                          // Flag indicating if the message stream is active/busy
     
-    char *message_buffer;
-    uint32_t message_len;
+    char *message_buffer;                       // Pointer to the buffer holding the message content
+    uint32_t message_len;                       // Length of the message in bytes
     
-    uint32_t message_id;
-    uint32_t remaining_bytes_to_send;
-    BOOL throttle;
+    uint32_t message_id;                        // Unique identifier for this message
+    uint32_t remaining_bytes_to_send;           // Bytes yet to be sent for this message
+    BOOL throttle;                              // Flag to indicate if sending should be throttled
 
-    CRITICAL_SECTION lock;
+    CRITICAL_SECTION lock;                      // Critical section for protecting access to this stream's data
 }ClientMessageStream;
 
+// Structure representing a single client file stream
 typedef struct{
-    BOOL fstream_busy;
-    FILE *fp;
+    BOOL fstream_busy;                          // Flag indicating if the file stream is active/busy
+    FILE *fp;                                   // File pointer for the open file
     
-    uint32_t fid;
-    long long fsize;
-    char fpath[MAX_PATH];
-    uint32_t fpath_len;
-    char rpath[MAX_PATH];
-    uint32_t rpath_len;
-    char fname[MAX_PATH];
-    uint32_t fname_len;
-    FileHash fhash;
+    uint32_t fid;                               // File ID unique to this transfer
+    long long fsize;                            // Total size of the file in bytes
+    char fpath[MAX_PATH];                       // Full path to the file on the client
+    uint32_t fpath_len;                         // Length of the file path string
+    char rpath[MAX_PATH];                       // Relative path for the file (for server-side storage)
+    uint32_t rpath_len;                         // Length of the relative path string
+    char fname[MAX_PATH];                       // File name (without path)
+    uint32_t fname_len;                         // Length of the file name string
+    FileHash fhash;                             // SHA256 hash of the file
 
-    uint64_t pending_bytes;
-    uint64_t pending_metadata_seq_num;
-    uint8_t *chunk_buffer;//[FILE_CHUNK_SIZE];
-    BOOL throttle;    
+    uint64_t pending_bytes;                     // Remaining bytes of the file data to be sent/received
+    uint64_t pending_metadata_seq_num;          // Sequence number for pending metadata frames
+    uint8_t *chunk_buffer;                      // Buffer to hold chunks of file data for reading/writing
+    BOOL throttle;                              // Flag to indicate if transfer should be throttled    
 
-    HANDLE hevent_metadata_response_ok;
-    HANDLE hevent_metadata_response_nok;
-    CRITICAL_SECTION lock;
+    HANDLE hevent_metadata_response_ok;         // Event handle for successful metadata response
+    HANDLE hevent_metadata_response_nok;        // Event handle for unsuccessful metadata response
+    CRITICAL_SECTION lock;                      // Critical section for protecting access to this stream's data
 }ClientFileStream;
 
+// Main structure holding global client data and state
 typedef struct{
-    SOCKET socket;
-    struct sockaddr_in client_addr;
-    struct sockaddr_in server_addr;
+    SOCKET socket;                              // The UDP socket for communication
+    struct sockaddr_in client_addr;             // Client's local address information
+    struct sockaddr_in server_addr;             // Server's address information
 
-    uint8_t client_status;         
-    uint8_t session_status;     // 0-DISCONNECTED; 1-CONNECTED
-    uint32_t cid;
-    uint8_t flags;
-    char client_name[MAX_NAME_SIZE];
-    time_t last_active_time;
+    uint8_t client_status;                      // Current status of the client (from Status enum)
+    uint8_t session_status;                     // Current status of the session (from SessionStatus enum)
+    uint32_t cid;                               // Client ID
+    uint8_t flags;                              // Various flags for client state
+    char client_name[MAX_NAME_SIZE];            // Human readable client name
+    time_t last_active_time;                    // Timestamp of last activity, used for session timeout
    
-    volatile uint64_t frame_count;       // this will be sent as seq_num
-    volatile uint32_t fid_count;
-    volatile uint32_t mid_count;
+    volatile uint64_t frame_count;              // Monotonically increasing counter for frame sequence numbers
+    volatile uint32_t fid_count;                // Counter for generating new unique file IDs
+    volatile uint32_t mid_count;                // Counter for generating new unique message IDs
 
-    uint32_t sid;        // session id received from the server after connection accepted
-    uint8_t server_status;      // 0-NOK; 1-OK (connection confirmed by server)
-    uint32_t session_timeout;   // timeout received from the server; to be used to send KEEP_ALIVE frames
-    char server_name[MAX_NAME_SIZE];       // Human readable server name
+    uint32_t sid;                               // Session ID assigned by the server upon successful connection
+    uint8_t server_status;                      // Server's reported status (e.g., 0-NOK; 1-OK)
+    uint32_t session_timeout;                   // Session timeout value received from the server (for keep-alive)
+    char server_name[MAX_NAME_SIZE];            // Human readable server name
     
-    HANDLE hevent_connection_pending;
-    HANDLE hevent_connection_established;
-    HANDLE hevent_connection_closed;
+    HANDLE hevent_connection_pending;           // Event handle for connection pending state
+    HANDLE hevent_connection_established;       // Event handle for connection established state
+    HANDLE hevent_connection_closed;            // Event handle for connection closed state
 
-    IOCP_CONTEXT iocp_context;
-    HANDLE iocp_handle;
+    IOCP_CONTEXT iocp_context;                  // IOCP context structure
+    HANDLE iocp_handle;                         // Handle to the IOCP port
+
+    HANDLE fstreams_semaphore;                  // Semaphore to control access to file stream slots
+    HANDLE mstreams_semaphore;                  // Semaphore to control access to message stream slots
+
+    CRITICAL_SECTION fstreams_lock;             // Critical section for protecting access to the fstream array
+
+    ClientFileStream fstream[CLIENT_MAX_ACTIVE_FSTREAMS]; // Array of active file streams
+    ClientMessageStream mstream[CLIENT_MAX_ACTIVE_MSTREAMS]; // Array of active message streams
+
 } ClientData;
 
+// Structure holding handles to all client-related threads
 typedef struct {
-    HANDLE fstream[MAX_CLIENT_ACTIVE_FSTREAMS];
-    HANDLE fstream_semaphore;
+    HANDLE recv_send_frame[CLIENT_MAX_THREADS_RECV_SEND_FRAME]; // Handles for threads managing frame receive/send
+    HANDLE process_frame[CLIENT_MAX_TREADS_PROCESS_FRAME];     // Handles for threads processing frames
+    HANDLE resend_frame;                                       // Handle for the resend management thread
+    HANDLE keep_alive;                                         // Handle for the keep-alive thread
+    HANDLE pop_send_frame[CLIENT_MAX_THREADS_POP_SEND_FRAME];  // Handles for threads popping normal send frames
+    HANDLE pop_send_prio_frame;                                // Handle for thread popping priority send frames
+    HANDLE pop_send_ctrl_frame;                                // Handle for thread popping control send frames
 
-    HANDLE mstream[MAX_CLIENT_ACTIVE_MSTREAMS];
-    HANDLE mstream_semaphore;
+    HANDLE process_fstream[CLIENT_MAX_ACTIVE_FSTREAMS]; // Handles for individual file stream threads (if any)
+    HANDLE process_mstream[CLIENT_MAX_ACTIVE_MSTREAMS]; // Handles for individual message stream threads (if any)   
+
+    HANDLE client_command;                      // Handle for the client command processing thread
 }ClientThreads;
 
+// Structure holding all client-related buffer and memory pool structures
 typedef struct {
-    MemPool pool_iocp_send_context;
-    MemPool pool_iocp_recv_context;
+    MemPool pool_send_iocp_context;             // Memory pool for IOCP send contexts
+    MemPool pool_recv_iocp_context;             // Memory pool for IOCP receive contexts
 
-    QueueFrame queue_frame;
-    QueueFrame queue_priority_frame;
-    // HashTableFramePendingAck ht_frame;
+    QueueFrame queue_recv_frame;                // Queue for incoming received frames
+    QueueFrame queue_recv_prio_frame;           // Queue for incoming priority received frames
 
-    ClientFileStream fstream[MAX_CLIENT_ACTIVE_FSTREAMS];
-    CRITICAL_SECTION fstreams_lock;
-    QueueCommand queue_fstream;
+    s_MemPool pool_send_frame;                  // Memory pool for normal frames to be sent
+    // s_MemPool pool_send_ctrl_frame;             // Memory pool for control frames to be sent
+    
+    QueueSendFrame queue_send_frame;            // Queue for normal frames awaiting transmission
+    QueueSendFrame queue_send_prio_frame;       // Queue for priority frames awaiting transmission
+    QueueSendFrame queue_send_ctrl_frame;       // Queue for control frames awaiting transmission
+    TableSendFrame table_send_frame;              // Hash table to track sent frames awaiting acknowledgment (ACK)
 
-    ClientMessageStream mstream[MAX_CLIENT_MESSAGE_STREAMS];
-    QueueCommand queue_mstream;
-
-
-    s_MemPool pool_tx_frames;
-
-    QueueTXFrame queue_tx_frame;
-    QueueTXFrame queue_prio_tx_frame;
-    hTbl_txFrame htable_tx_frame;
-
+    QueueCommand queue_process_fstream;         // Queue for file stream commands
+    QueueCommand queue_process_mstream;         // Queue for message stream commands
 }ClientBuffers;
 
+// --- Global Data Declarations (defined in a corresponding .c file) ---
+extern ClientData Client;                       // Global instance of client data
+extern ClientBuffers Buffers;                   // Global instance of client buffers and pools
+extern ClientThreads Threads;                   // Global instance of client thread handles
 
-extern ClientData client;
-extern ClientThreads threads;
-extern ClientBuffers buffers;
-  
-static void clean_message_stream(ClientMessageStream *mstream);
+// --- Function Prototypes ---
+// Functions related to sequence number generation and session management
+uint64_t get_new_seq_num();                     // Generates and returns a new unique sequence number for frames
+int init_client_session();                      // Initializes the client session, sockets, pools, queues, etc.
+int reset_client_session();                     // Resets the client session to a clean state
 
-uint64_t get_new_seq_num();
-void request_disconnect();
-void force_disconnect();
-void timeout_disconnect();
-void request_connect();
-void transfer_file();
-void send_text_message();
+// Functions for cleaning up stream-specific resources
+void clean_file_stream(ClientFileStream *fstream);          // Cleans up resources associated with a file stream
+void clean_message_stream(ClientMessageStream *mstream);    // Cleans up resources associated with a message stream
  
-#endif 
+// Thread entry point functions
+DWORD WINAPI fthread_recv_send_frame(LPVOID lpParam);       // Thread for receiving and dispatching frames
+DWORD WINAPI fthread_process_frame(LPVOID lpParam);         // Thread for processing received frames
+DWORD WINAPI fthread_resend_frame(LPVOID lpParam);          // Thread for managing retransmissions
+DWORD WINAPI fthread_keep_alive(LPVOID lpParam);            // Thread for sending keep-alive messages to maintain session
+DWORD WINAPI fthread_pop_send_frame(LPVOID lpParam);        // Thread for popping normal frames from send queue and initiating send
+DWORD WINAPI fthread_pop_send_prio_frame(LPVOID lpParam);   // Thread for popping priority frames from send queue
+DWORD WINAPI fthread_pop_send_ctrl_frame(LPVOID lpParam);   // Thread for popping control frames from send queue
+DWORD WINAPI fthread_process_fstream(LPVOID lpParam);               // Thread for managing a specific file stream operation
+DWORD WINAPI fthread_process_mstream(LPVOID lpParam);               // Thread for managing a specific message stream operation
+DWORD WINAPI fthread_client_command(LPVOID lpParam);        // Thread for processing client commands (e.g., from UI or other modules)
+
+
+#endif // CLIENT_H // End of header guard

@@ -20,7 +20,7 @@
 #define DEFAULT_SESSION_TIMEOUT_SEC             120
 #endif
 
-#define MAX_SERVER_ACTIVE_FSTREAMS              100
+#define MAX_SERVER_ACTIVE_FSTREAMS              10
 #define SERVER_ACK_FILE_FRAMES_THREADS          20
 
 #define MAX_SERVER_ACTIVE_MSTREAMS              1
@@ -33,9 +33,9 @@
 #define SERVER_NAME                             "lkdc UDP Text/File Transfer Server"
 #define MAX_CLIENTS                             10
 
-#define SERVER_PARTITION_DRIVE                  "D:\\"
-#define SERVER_ROOT_FOLDER                      "D:\\_test\\server_root\\"
-#define SERVER_MESSAGE_TEXT_FILES_FOLDER        "D:\\_test\\messages_root\\"
+#define SERVER_PARTITION_DRIVE                  "H:\\"
+#define SERVER_ROOT_FOLDER                      "H:\\_test\\server_root\\"
+#define SERVER_MESSAGE_TEXT_FILES_FOLDER        "H:\\_test\\messages_root\\"
 
 #define FRAGMENTS_PER_CHUNK                     (64ULL)
 #define CHUNK_TRAILING                          (1u << 7) // 0b10000000
@@ -56,6 +56,30 @@
 
 #define IOCP_RECV_MEM_POOL_BLOCKS               4096
 #define IOCP_SEND_MEM_POOL_BLOCKS               4096
+
+
+// --- Macro to Parse Global Data to Threads ---
+// This macro simplifies passing pointers to global client data structures into thread functions.
+// It creates local pointers within the thread function's scope, pointing to the global instances.
+#define PARSE_SERVER_GLOBAL_DATA(server_obj, client_list_obj, buffers_obj) \
+    ServerData *server = &(server_obj); \
+    ClientListData *client_list = &(client_list_obj); \
+    ServerBuffers *buffers = &(buffers_obj); \
+    MemPool *pool_file_chunk = &((buffers_obj).pool_file_chunk); \
+    MemPool *pool_iocp_send_context = &((buffers_obj).pool_iocp_send_context); \
+    MemPool *pool_iocp_recv_context = &((buffers_obj).pool_iocp_recv_context); \
+    QueueFrame *queue_frame = &((buffers_obj).queue_frame); \
+    QueueFrame *queue_priority_frame = &((buffers_obj).queue_priority_frame); \
+    QueueFstream *queue_fstream = &((buffers_obj).queue_fstream); \
+    HashTableIdentifierNode *ht_fid = &((buffers_obj).ht_fid); \
+    HashTableIdentifierNode *ht_mid = &((buffers_obj).ht_mid); \
+    QueueAck *mqueue_ack = &((buffers_obj).mqueue_ack); \
+    QueueAck *queue_priority_ack = &((buffers_obj).queue_priority_ack); \
+    MemPool *pool_queue_ack_udp_frame = &((buffers_obj).pool_queue_ack_udp_frame); \
+    QueueAckUpdFrame *queue_ack_udp_frame = &((buffers_obj).queue_ack_udp_frame); \
+
+// end of #define PARSE_GLOBAL_DATA // End marker for the macro definition
+
 
 
 enum Status{
@@ -100,18 +124,6 @@ enum ClientSlotStatus {
     SLOT_FREE = 0,
     SLOT_BUSY = 1
 };
-
-typedef struct{
-    SOCKET socket;
-    struct sockaddr_in server_addr;            // Server address structure
-    uint8_t server_status;                // Status of the server (e.g., busy, ready, error)
-    uint32_t session_timeout;           // Timeout period for client inactivity
-    volatile uint32_t session_id_counter;   // Global counter for unique session IDs
-    char name[MAX_NAME_SIZE];               // Human-readable server name
-    
-    IOCP_CONTEXT iocp_context;
-    HANDLE iocp_handle;
-}ServerData;
 
 typedef struct{
     FILETIME ft;
@@ -211,22 +223,30 @@ typedef struct {
     uint8_t slot_status;                // 0->FREE; 1->BUSY
 
     MessageStream mstream[MAX_SERVER_ACTIVE_MSTREAMS];
-//    ServerFileStream fstream[MAX_CLIENT_FILE_STREAMS];
+    CRITICAL_SECTION mstreams_lock;
      
-    Statistics statistics;
-
     CRITICAL_SECTION lock;
 } Client;
  
 typedef struct{
     Client client[MAX_CLIENTS];     // Array of connected clients
     CRITICAL_SECTION lock;          // For thread-safe access to connected_clients
-}ClientList;
+}ClientListData;
 
 typedef struct{
-    uint32_t map[MAX_CLIENTS];
-    CRITICAL_SECTION lock;
-}ClientMap;
+    SOCKET socket;
+    struct sockaddr_in server_addr;            // Server address structure
+    uint8_t server_status;                // Status of the server (e.g., busy, ready, error)
+    uint32_t session_timeout;           // Timeout period for client inactivity
+    volatile uint32_t session_id_counter;   // Global counter for unique session IDs
+    char name[MAX_NAME_SIZE];               // Human-readable server name
+    
+    IOCP_CONTEXT iocp_context;
+    HANDLE iocp_handle;
+
+    ServerFileStream fstream[MAX_SERVER_ACTIVE_FSTREAMS];
+    CRITICAL_SECTION fstreams_lock;
+}ServerData;
 
 typedef struct {
     MemPool pool_file_chunk;
@@ -237,13 +257,10 @@ typedef struct {
     QueueFrame queue_priority_frame;
 
     QueueAck mqueue_ack;
-    QueueAck fqueue_ack;
+    // QueueAck fqueue_ack;
     QueueAck queue_priority_ack;
 
     QueueFstream queue_fstream;
-    ServerFileStream fstream[MAX_SERVER_ACTIVE_FSTREAMS];
-    CRITICAL_SECTION fstreams_lock;
-
 
     MemPool pool_queue_ack_udp_frame;
     QueueAckUpdFrame queue_ack_udp_frame;
@@ -255,5 +272,23 @@ typedef struct {
     HashTableIdentifierNode ht_fid;
     HashTableIdentifierNode ht_mid;
 }ServerBuffers;
+
+extern ServerData Server;
+extern ServerBuffers Buffers;
+extern ClientListData ClientList;
+
+void close_file_stream(ServerFileStream *fstream);
+void close_message_stream(MessageStream *mstream);
+
+
+// Client management functions
+static Client* find_client(const uint32_t session_id);
+static Client* add_client(const UdpFrame *recv_frame, const struct sockaddr_in *client_addr);
+static int remove_client(const uint32_t slot);
+
+static void cleanup_client(Client *client);
+static BOOL validate_file_hash(ServerFileStream *fstream);
+static void check_open_file_stream();
+
 
 #endif

@@ -17,16 +17,18 @@ size_t s_strnlen(const char *s, size_t maxlen) {
 }
 
 /* ************************************************************************************************************************* */
-int construct_connect_request(UdpFrame *frame,
-                            const uint64_t seq_num, 
+int construct_connect_request(PoolEntrySendFrame *entry,
                             const uint32_t session_id, 
                             const uint32_t client_id, 
                             const uint32_t flags, 
-                            const char *client_name){
-
+                            const char *client_name,
+                            const SOCKET src_socket, const struct sockaddr_in *dest_addr){
+    
+    UdpFrame *frame = &entry->frame;
+    
     frame->header.start_delimiter = _htons(FRAME_DELIMITER);
     frame->header.frame_type = FRAME_TYPE_CONNECT_REQUEST;
-    frame->header.seq_num = _htonll(seq_num);
+    frame->header.seq_num = _htonll(DEFAULT_CONNECT_REQUEST_SEQ);
     frame->header.session_id = _htonl(session_id);
     frame->payload.connection_request.client_id = _htonl(client_id);
     frame->payload.connection_request.flags = flags;
@@ -35,43 +37,63 @@ int construct_connect_request(UdpFrame *frame,
 
     // Calculate the checksum for the frame
     frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(ConnectRequestPayload)));
+
+    entry->src_socket = src_socket;
+    memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
+
     return RET_VAL_SUCCESS;
 }
 
-int construct_disconnect_request(UdpFrame *frame, 
-                            const uint32_t session_id){
+int construct_disconnect_request(PoolEntrySendFrame *entry,
+                            const uint32_t session_id,
+                            const SOCKET src_socket, const struct sockaddr_in *dest_addr){
+
+    UdpFrame *frame = &entry->frame;
 
     frame->header.start_delimiter = _htons(FRAME_DELIMITER);
     frame->header.frame_type = FRAME_TYPE_DISCONNECT;
-    frame->header.seq_num = _htonll(DEFAULT_DISCONNECT_SEQ);
+    frame->header.seq_num = _htonll(DEFAULT_DISCONNECT_REQUEST_SEQ);
     frame->header.session_id = _htonl(session_id);
 
     frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader)));
+
+    entry->src_socket = src_socket;
+    memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
+
     return RET_VAL_SUCCESS;
 }
 
-int construct_keep_alive(UdpFrame *frame,
-                            const uint64_t seq_num, 
-                            const uint32_t session_id){
-
+int construct_keep_alive(PoolEntrySendFrame *entry,
+                            const uint32_t session_id,
+                            const SOCKET src_socket, const struct sockaddr_in *dest_addr){
+    
+    UdpFrame *frame = &entry->frame;
+    
     // Set the header fields
     frame->header.start_delimiter = _htons(FRAME_DELIMITER);
     frame->header.frame_type = FRAME_TYPE_KEEP_ALIVE;
-    frame->header.seq_num = _htonll(seq_num);
+    frame->header.seq_num = _htonll(DEFAULT_KEEP_ALIVE_SEQ);
     frame->header.session_id = _htonl(session_id); // Use the session ID provided  
     // Calculate CRC32 for the frame
     frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader)));
+
+    entry->src_socket = src_socket;
+    memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
     
     return RET_VAL_SUCCESS;
 }
 
-int construct_file_fragment(UdpFrame *frame,
+int construct_file_fragment(PoolEntrySendFrame *entry,
                             const uint64_t seq_num, 
                             const uint32_t session_id, 
                             const uint32_t file_id, 
                             const uint64_t fragment_offset, 
                             const char* fragment_buffer, 
-                            const uint32_t fragment_size){
+                            const uint32_t fragment_size,
+                            const SOCKET src_socket, const struct sockaddr_in *dest_addr){
+    
+    UdpFrame *frame = &entry->frame;
+    
     // Set the header fields
     frame->header.start_delimiter = _htons(FRAME_DELIMITER);
     frame->header.frame_type = FRAME_TYPE_FILE_FRAGMENT;
@@ -84,10 +106,14 @@ int construct_file_fragment(UdpFrame *frame,
     memcpy(frame->payload.file_fragment.bytes, fragment_buffer, fragment_size);
     
     frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(FileFragmentPayload)));
+
+    entry->src_socket = src_socket;
+    memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
+
     return RET_VAL_SUCCESS;
 }
 
-int construct_file_metadata(UdpFrame *frame,
+int construct_file_metadata(PoolEntrySendFrame *entry,
                             const uint64_t seq_num, 
                             const uint32_t session_id, 
                             const uint32_t file_id, 
@@ -96,9 +122,12 @@ int construct_file_metadata(UdpFrame *frame,
                             const uint32_t rpath_len,
                             const char *fname,
                             const uint32_t fname_len,
-                            const uint32_t file_fragment_size){
- 
-  // --- Validate rpath ---
+                            const uint32_t file_fragment_size,
+                            const SOCKET src_socket, const struct sockaddr_in *dest_addr){
+   
+    UdpFrame *frame = &entry->frame;
+    
+    // --- Validate rpath ---
     if(rpath == NULL){
         fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Invalid relative file path pointer (NULL).\n");
         return RET_VAL_ERROR;
@@ -181,16 +210,22 @@ int construct_file_metadata(UdpFrame *frame,
 
     frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));
 
+    entry->src_socket = src_socket;
+    memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
+
     return RET_VAL_SUCCESS;
 }
 
-int construct_file_end(UdpFrame *frame,
+int construct_file_end(PoolEntrySendFrame *entry,
                             const uint64_t seq_num, 
                             const uint32_t session_id, 
                             const uint32_t file_id, 
                             const uint64_t file_size, 
-                            const char *file_hash){
-
+                            const char *file_hash,
+                            const SOCKET src_socket, const struct sockaddr_in *dest_addr){
+    
+    UdpFrame *frame = &entry->frame;
+    
     // Set the header fields
     frame->header.start_delimiter = _htons(FRAME_DELIMITER);
     frame->header.frame_type = FRAME_TYPE_FILE_END;
@@ -205,20 +240,26 @@ int construct_file_end(UdpFrame *frame,
     // Calculate the checksum for the frame
     frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(FileEndPayload)));
     
+    entry->src_socket = src_socket;
+    memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
+
     return RET_VAL_SUCCESS;
 }
 
 
 
-int construct_text_fragment(UdpFrame *frame,
+int construct_text_fragment(PoolEntrySendFrame *entry,
                             const uint64_t seq_num, 
                             const uint32_t session_id, 
                             const uint32_t message_id, 
                             const uint32_t message_len, 
                             const uint32_t fragment_offset, 
                             const char* fragment_buffer, 
-                            const uint32_t fragment_len){
-
+                            const uint32_t fragment_len,
+                            const SOCKET src_socket, const struct sockaddr_in *dest_addr){
+    
+    UdpFrame *frame = &entry->frame;
+    
     frame->header.start_delimiter = _htons(FRAME_DELIMITER);
     frame->header.frame_type = FRAME_TYPE_LONG_TEXT_MESSAGE;
     frame->header.seq_num = _htonll(seq_num);
@@ -232,6 +273,10 @@ int construct_text_fragment(UdpFrame *frame,
     memcpy(frame->payload.text_fragment.chars, fragment_buffer, fragment_len);
    
     // Calculate the checksum for the frame
-    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(LongTextPayload)));  
+    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(LongTextPayload)));
+
+    entry->src_socket = src_socket;
+    memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
+
     return RET_VAL_SUCCESS;
 }

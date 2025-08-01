@@ -30,7 +30,7 @@ __declspec(align(64)) typedef struct {
     // HANDLE semaphore;
 } MemPool;
 
-void pool_init(MemPool* pool, const uint64_t block_size, const uint64_t block_count);
+void init_pool(MemPool* pool, const uint64_t block_size, const uint64_t block_count);
 void* pool_alloc(MemPool* pool);
 void pool_free(MemPool* pool, void* ptr);
 void pool_destroy(MemPool* pool);
@@ -50,7 +50,7 @@ __declspec(align(64)) typedef struct {
 } s_MemPool;
 
 //--------------------------------------------------------------------------------------------------------------------------
-void s_pool_init(s_MemPool* pool, const uint64_t block_size, const uint64_t block_count);
+void init_s_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t block_count);
 void* s_pool_alloc(s_MemPool* pool);
 void s_pool_free(s_MemPool* pool, void* ptr);
 void s_pool_destroy(s_MemPool* pool);

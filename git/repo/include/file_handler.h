@@ -12,8 +12,8 @@
 #define RET_VAL_ERROR -1
 #endif
 
-int handle_file_metadata(Client *client, UdpFrame *frame, ServerBuffers* buffers);
-int handle_file_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers);
-int handle_file_end(Client *client, UdpFrame *frame, ServerBuffers* buffers);
+int handle_file_metadata(Client *client, UdpFrame *frame);
+int handle_file_fragment(Client *client, UdpFrame *frame);
+int handle_file_end(Client *client, UdpFrame *frame);
 
 #endif // FRAME_HANDLERS_H

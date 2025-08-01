@@ -8,12 +8,95 @@
 
 #include "include/queue.h"
 #include "include/client.h"
+#include "include/client_frames.h"
 #include "include/client_api.h"
+
+void RequestConnect(){
+
+    PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+
+    ResetEvent(client->hevent_connection_closed);
+    ResetEvent(client->hevent_connection_established);
+    SetEvent(client->hevent_connection_pending);
+
+    PoolEntrySendFrame *send_pool_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
+    if(!send_pool_entry){
+        fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for connect request. Should never do since it has semaphore to block when full");
+        return;
+    }
+
+    int res = construct_connect_request(send_pool_entry,
+                                        client->sid, 
+                                        client->cid, 
+                                        client->flags, 
+                                        client->client_name,
+                                        client->socket, &client->server_addr);
+    if(res == RET_VAL_ERROR){
+        fprintf(stderr, "CRITICAL ERROR: construct_connect_request() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
+        return;
+    }
+    push_send_frame(queue_send_ctrl_frame, (uintptr_t)send_pool_entry);
+
+    DWORD wait_connection_established = WaitForSingleObject(client->hevent_connection_established, CONNECT_REQUEST_TIMEOUT_MS);
+    if (wait_connection_established == WAIT_OBJECT_0) {
+        client->session_status = CONNECTION_ESTABLISHED;
+        fprintf(stdout, "Connection established...\n");
+    } else if (wait_connection_established == WAIT_TIMEOUT) {
+        reset_client_session();
+        fprintf(stderr, "Connection closed...\n");
+    } else {
+        reset_client_session();
+        fprintf(stderr, "Unexpected error for established event: %lu\n", wait_connection_established);
+    }
+    return;
+}
+
+void RequestDisconnect(){
+    
+    PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    
+    if(client->session_status == CONNECTION_CLOSED){
+        fprintf(stdout, "Not connected to server\n");
+        return;
+    }
+    // send disconnect frame
+    ResetEvent(client->hevent_connection_established);
+
+    PoolEntrySendFrame *send_pool_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
+    if(!send_pool_entry){
+        fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for disconnect request. Should never do since it has semaphore to block when full");
+        return;
+    }
+
+    int res = construct_disconnect_request(send_pool_entry, 
+                                            client->sid,
+                                            client->socket, &client->server_addr);
+    if(res == RET_VAL_ERROR){
+        fprintf(stderr, "CRITICAL ERROR: construct_disconnect_request() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
+        return;
+    }
+    push_send_frame(queue_send_ctrl_frame, (uintptr_t)send_pool_entry);
+ 
+    DWORD wait_connection_closed = WaitForSingleObject(client->hevent_connection_closed, DISCONNECT_REQUEST_TIMEOUT_MS);
+
+    if (wait_connection_closed == WAIT_OBJECT_0) {
+        fprintf(stderr, "Connection closed\n"); 
+    } else if (wait_connection_closed == WAIT_TIMEOUT) {
+        fprintf(stdout, "Connection close timeout - closing connection anyway\n");
+    } else {    
+        fprintf(stderr, "Unexpected error for disconnect event: %lu\n", wait_connection_closed);
+    }  
+    reset_client_session();
+    return;
+}
+
 
 // Send text
 // buffer: pointer to text buffer
 // len: The actual nr of bytes of the text buffer, NOT including the null terminator.
 void SendTextMessage(const char *buffer, const size_t len) {
+
+    PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     QueueCommandEntry entry;
 
@@ -36,7 +119,7 @@ void SendTextMessage(const char *buffer, const size_t len) {
     memcpy(entry.command.send_message.message_buffer, buffer, len);
     entry.command.send_message.message_buffer[len] = '\0';
 
-    push_command(&buffers.queue_mstream, &entry);
+    push_command(queue_mstream, &entry);
     return;
 }
 
@@ -119,8 +202,10 @@ static void stream_file(const char *fpath, const size_t fpath_len,
                         const char *rpath, const size_t rpath_len,
                         const char *fname, const size_t fname_len) {
 
+    PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+
     QueueCommandEntry entry; // Represents the command to be enqueued
-    int result; // For checking return values of secure functions
+    int res; // For checking return values of secure functions
     memset(&entry, 0, sizeof(QueueCommandEntry));
 
     // --- Input Validation (now based on content lengths) ---
@@ -154,60 +239,59 @@ static void stream_file(const char *fpath, const size_t fpath_len,
     if (fname_len >= MAX_PATH) { fprintf(stderr, "ERROR: stream_file - Filename string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, fname_len); return; }
     // (Optional null termination check)
 
-
     // --- Populate QueueCommandEntry using secure functions ---
 
     // Populate 'text' field for stream_file command type
     // Note: "sendfile" has 8 chars, fits easily in 32 bytes with null.
-    result = snprintf(entry.command.send_file.text,
+    res = snprintf(entry.command.send_file.text,
                       sizeof(entry.command.send_file.text),
                       "%s", "sendfile");
     // Check for errors (negative return) or truncation (result >= buffer size)
-    if (result < 0 || (size_t)result >= sizeof(entry.command.send_file.text)) { // Cast result to size_t for comparison
+    if (res < 0 || (size_t)res >= sizeof(entry.command.send_file.text)) { // Cast result to size_t for comparison
         fprintf(stderr, "ERROR: stream_file - Failed to set 'text' field for send_file command (truncation or error). Result: %d, Buffer Size: %zu\n",
-                result, sizeof(entry.command.send_file.text));
+                res, sizeof(entry.command.send_file.text));
         return;
     }
 
     // Populate 'fpath' field with the FULL ACTUAL DISK DIRECTORY PATH
     // Use '%.*s' to copy exactly 'fpath_len' characters
-    result = snprintf(entry.command.send_file.fpath,
+    res = snprintf(entry.command.send_file.fpath,
                       sizeof(entry.command.send_file.fpath),
                       "%.*s", (int)fpath_len, fpath); // Cast fpath_len to int for printf specifier
     // Check if the exact number of characters was copied
-    if (result < 0 || (size_t)result != fpath_len) {
+    if (res < 0 || (size_t)res != fpath_len) {
         fprintf(stderr, "ERROR: stream_file - Failed to copy absolute directory path to command entry (truncation or error). Path len: %zu, Result: %d, Buffer Size: %zu\n",
-                fpath_len, result, sizeof(entry.command.send_file.fpath));
+                fpath_len, res, sizeof(entry.command.send_file.fpath));
         return;
     }
     entry.command.send_file.fpath_len = (uint32_t)fpath_len;
 
     // Populate 'rpath' field with the RELATIVE DIRECTORY PATH
     // Use '%.*s' to copy exactly 'rpath_len' characters
-    result = snprintf(entry.command.send_file.rpath,
+    res = snprintf(entry.command.send_file.rpath,
                       sizeof(entry.command.send_file.rpath),
                       "%.*s", (int)rpath_len, rpath);
-    if (result < 0 || (size_t)result != rpath_len) {
+    if (res < 0 || (size_t)res != rpath_len) {
         fprintf(stderr, "ERROR: stream_file - Failed to copy relative directory path to command entry (truncation or error). Path len: %zu, Result: %d, Buffer Size: %zu\n",
-                rpath_len, result, sizeof(entry.command.send_file.rpath));
+                rpath_len, res, sizeof(entry.command.send_file.rpath));
         return;
     }
     entry.command.send_file.rpath_len = (uint32_t)rpath_len;
 
     // Populate 'fname' field with JUST THE FILENAME
     // Use '%.*s' to copy exactly 'fname_len' characters
-    result = snprintf(entry.command.send_file.fname,
+    res = snprintf(entry.command.send_file.fname,
                       sizeof(entry.command.send_file.fname),
                       "%.*s", (int)fname_len, fname);
-    if (result < 0 || (size_t)result != fname_len) {
+    if (res < 0 || (size_t)res != fname_len) {
         fprintf(stderr, "ERROR: stream_file - Failed to copy filename to command entry (truncation or error). Name len: %zu, Result: %d, Buffer Size: %zu\n",
-                fname_len, result, sizeof(entry.command.send_file.fname));
+                fname_len, res, sizeof(entry.command.send_file.fname));
         return;
     }
     entry.command.send_file.fname_len = (uint32_t)fname_len;
 
     // Push the command to the queue
-    push_command(&buffers.queue_fstream, &entry); // Use the mock queue
+    push_command(queue_fstream, &entry); // Use the mock queue
     return;
 }
 

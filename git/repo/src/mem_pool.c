@@ -7,7 +7,7 @@
 #include "include/mem_pool.h"
 
 //--------------------------------------------------------------------------------------------------------------------------
-void pool_init(MemPool* pool, const uint64_t block_size, const uint64_t block_count) {
+void init_pool(MemPool* pool, const uint64_t block_size, const uint64_t block_count) {
 
     pool->block_size = block_size;
     pool->block_count = block_count;
@@ -143,7 +143,7 @@ void pool_destroy(MemPool* pool) {
 
 
 //--------------------------------------------------------------------------------------------------------------------------
-void s_pool_init(s_MemPool* pool, const uint64_t block_size, const uint64_t block_count) {
+void init_s_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t block_count) {
 
     pool->block_size = block_size;
     pool->block_count = block_count;

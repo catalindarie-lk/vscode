@@ -101,3 +101,25 @@ int send_ack(const uint64_t seq_num,
     }
     return bytes_sent;
 }
+
+
+int construct_ack_frame(PoolEntryAckFrame *entry,
+                    const uint64_t seq_num, 
+                    const uint32_t session_id, 
+                    const uint8_t op_code, 
+                    const SOCKET src_socket, const struct sockaddr_in *dest_addr){
+
+    AckUdpFrame *frame = &entry->frame;
+
+    frame->header.start_delimiter = _htons(FRAME_DELIMITER);
+    frame->header.frame_type = FRAME_TYPE_ACK;
+    frame->header.seq_num = _htonll(seq_num);
+    frame->header.session_id = _htonl(session_id);
+    frame->payload.op_code = op_code;
+    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(AckUdpFrame)));
+    
+    entry->src_socket = src_socket;
+    memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
+    return RET_VAL_SUCCESS;
+ 
+}

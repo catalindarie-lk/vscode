@@ -10,9 +10,6 @@
 #include <mswsock.h>                    // Optional: For WSARecvFrom and advanced I/O
 #include <iphlpapi.h>                   // For IP Helper API functions
 
-#pragma comment(lib, "Ws2_32.lib")      // Link against Winsock library
-#pragma comment(lib, "iphlpapi.lib")    // Link against IP Helper API library
-
 #include "include/server.h"             // For server data structures and definitions
 #include "include/protocol_frames.h"    // For protocol frame definitions
 #include "include/netendians.h"         // For network byte order conversions
@@ -26,10 +23,11 @@
 #include "include/file_handler.h"       // For frame handling functions
 #include "include/message_handler.h"    // For frame handling functions
 #include "include/server_frames.h"
+#include "include/server_statistics.h"
 
-ServerData server;
-ServerBuffers buffers;
-ClientList client_list;
+ServerData Server;
+ServerBuffers Buffers;
+ClientListData ClientList;
 
 HANDLE hthread_recv_send_frame[SERVER_RECV_SEND_FRAME_WRK_THREADS];
 HANDLE hthread_process_frame[SERVER_PROCESS_FRAME_WRK_THREAS];
@@ -44,25 +42,11 @@ HANDLE hthread_server_command;
 
 const char *server_ip = "10.10.10.1";
 
-// Client management functions
-static Client* find_client(ClientList *client_list, const uint32_t session_id);
-static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, const SOCKET srv_socket, const struct sockaddr_in *client_addr);
-static int remove_client(ClientList *client_list, ServerBuffers* buffers, const uint32_t slot);
-
-void close_file_stream(ServerFileStream *fstream, ServerBuffers* buffers);
-void close_message_stream(MessageStream *mstream, ServerBuffers* buffers);
-void cleanup_client(Client *client, ServerBuffers* buffers);
-BOOL validate_file_hash(ServerFileStream *fstream);
-void check_open_file_stream(ServerBuffers *buffers);
-
-static void update_statistics(Client *client);
-
 // Thread functions
 DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam);
 DWORD WINAPI func_thread_process_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_send_priority_ack(LPVOID lpParam);
 DWORD WINAPI thread_proc_send_message_ack(LPVOID lpParam);
-DWORD WINAPI thread_proc_send_file_ack(LPVOID lpParam);
 DWORD WINAPI thread_proc_send_file_ack_frame(LPVOID lpParam);
 DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam);
 DWORD WINAPI thread_proc_file_stream(LPVOID lpParam);
@@ -96,16 +80,21 @@ static void get_network_config(){
 
 static int init_server_session(){
 
-    memset(&client_list, 0, sizeof(ClientList));
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
-    server.server_status = STATUS_NONE;
-    server.session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
-    server.session_id_counter = 0;
-    snprintf(server.name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, SERVER_NAME);
+    memset(&client_list, 0, sizeof(ClientListData));
+
+    server->server_status = STATUS_NONE;
+    server->session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
+    server->session_id_counter = 0;
+    snprintf(server->name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, SERVER_NAME);
 
     return RET_VAL_SUCCESS;
 }
 static int init_server_config(){
+    
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
     WSADATA wsaData;
 
     int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -114,21 +103,21 @@ static int init_server_config(){
         exit(EXIT_FAILURE);
     }
 
-    server.socket = WSASocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED);
-    if (server.socket == INVALID_SOCKET) {
+    server->socket = WSASocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    if (server->socket == INVALID_SOCKET) {
         fprintf(stderr, "WSASocket failed: %d\n", WSAGetLastError());
-        closesocket(server.socket);
+        closesocket(server->socket);
         WSACleanup();
         return RET_VAL_ERROR;
     }
 
-    server.server_addr.sin_family = AF_INET;
-    server.server_addr.sin_port = _htons(SERVER_PORT);
-    inet_pton(AF_INET, server_ip, &server.server_addr.sin_addr);
+    server->server_addr.sin_family = AF_INET;
+    server->server_addr.sin_port = _htons(SERVER_PORT);
+    inet_pton(AF_INET, server_ip, &server->server_addr.sin_addr);
  
-    if (bind(server.socket, (SOCKADDR*)&server.server_addr, sizeof(server.server_addr)) == SOCKET_ERROR) {
+    if (bind(server->socket, (SOCKADDR*)&server->server_addr, sizeof(server->server_addr)) == SOCKET_ERROR) {
         fprintf(stderr, "bind failed with error: %d\n", WSAGetLastError());
-        closesocket(server.socket);
+        closesocket(server->socket);
         WSACleanup();
         return RET_VAL_ERROR;
     }
@@ -136,10 +125,10 @@ static int init_server_config(){
     printf("Server listening on port %d...\n", SERVER_PORT);
 
 
-    server.iocp_handle = CreateIoCompletionPort((HANDLE)server.socket, NULL, 0, 0);
-    if (server.iocp_handle == NULL || server.iocp_handle == INVALID_HANDLE_VALUE) {
+    server->iocp_handle = CreateIoCompletionPort((HANDLE)server->socket, NULL, 0, 0);
+    if (server->iocp_handle == NULL || server->iocp_handle == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "CreateIoCompletionPort failed: %d\n", GetLastError());
-        closesocket(server.socket);
+        closesocket(server->socket);
         WSACleanup();
         return RET_VAL_ERROR;
     }
@@ -149,61 +138,48 @@ static int init_server_config(){
 }
 static int init_server_buffers(){
 
-    init_queue_frame(&buffers.queue_frame, SERVER_SIZE_QUEUE_FRAME);
-    init_queue_frame(&buffers.queue_priority_frame, SERVER_SIZE_QUEUE_PRIORITY_FRAME);
-    init_queue_ack(&buffers.fqueue_ack, SERVER_SIZE_FQUEUE_ACK);
-    init_queue_ack(&buffers.mqueue_ack, SERVER_SIZE_MQUEUE_ACK);
-    init_queue_ack(&buffers.queue_priority_ack, SERVER_SIZE_QUEUE_PRIORITY_ACK);
-    init_queue_fstream(&buffers.queue_fstream, MAX_SERVER_ACTIVE_FSTREAMS);
-    init_ht_id(&buffers.ht_fid);
-    init_ht_id(&buffers.ht_mid);
-    pool_init(&buffers.pool_file_chunk, BLOCK_SIZE_CHUNK, BLOCK_COUNT_CHUNK);
-    pool_init(&buffers.pool_iocp_send_context, sizeof(IOCP_CONTEXT), IOCP_SEND_MEM_POOL_BLOCKS);
-    pool_init(&buffers.pool_iocp_recv_context, sizeof(IOCP_CONTEXT), IOCP_RECV_MEM_POOL_BLOCKS);
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
-    pool_init(&buffers.pool_queue_ack_udp_frame, sizeof(QueueEntryAckUdpFrame), 32768);
-    init_queue_ack_frame(&buffers.queue_ack_udp_frame, 32768);
+    init_queue_frame(queue_frame, SERVER_SIZE_QUEUE_FRAME);
+    init_queue_frame(queue_priority_frame, SERVER_SIZE_QUEUE_PRIORITY_FRAME);
+    init_queue_ack(mqueue_ack, SERVER_SIZE_MQUEUE_ACK);
+    init_queue_ack(queue_priority_ack, SERVER_SIZE_QUEUE_PRIORITY_ACK);
+    init_queue_fstream(queue_fstream, MAX_SERVER_ACTIVE_FSTREAMS);
+    init_ht_id(ht_fid);
+    init_ht_id(ht_mid);
+    init_pool(pool_file_chunk, BLOCK_SIZE_CHUNK, BLOCK_COUNT_CHUNK);
+    init_pool(pool_iocp_send_context, sizeof(IOCP_CONTEXT), IOCP_SEND_MEM_POOL_BLOCKS);
+    init_pool(pool_iocp_recv_context, sizeof(IOCP_CONTEXT), IOCP_RECV_MEM_POOL_BLOCKS);
+
+    init_pool(pool_queue_ack_udp_frame, sizeof(PoolEntryAckFrame), 32768);
+    init_queue_ack_frame(queue_ack_udp_frame, 32768);
 
     for(int i = 0; i < MAX_CLIENTS; i++){
-        InitializeCriticalSection(&client_list.client[i].lock);
+        InitializeCriticalSection(&client_list->client[i].lock);
         for(int j = 0; j < MAX_SERVER_ACTIVE_MSTREAMS; j++){
-            InitializeCriticalSection(&client_list.client[i].mstream[j].lock);
+            InitializeCriticalSection(&client_list->client[i].mstream[j].lock);
         }
     }
-    InitializeCriticalSection(&client_list.lock);
+    InitializeCriticalSection(&client_list->lock);
 
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        InitializeCriticalSection(&buffers.fstream[i].lock);
+        InitializeCriticalSection(&server->fstream[i].lock);
     }
-    InitializeCriticalSection(&buffers.fstreams_lock);
-    buffers.test_semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+    InitializeCriticalSection(&server->fstreams_lock);
 
-    server.server_status = STATUS_READY;
+    server->server_status = STATUS_READY;
 
     for (int i = 0; i < IOCP_RECV_MEM_POOL_BLOCKS; ++i) {
-        IOCP_CONTEXT* recv_context = (IOCP_CONTEXT*)pool_alloc(&buffers.pool_iocp_recv_context);
+        IOCP_CONTEXT* recv_context = (IOCP_CONTEXT*)pool_alloc(pool_iocp_recv_context);
         if (recv_context == NULL) {
             fprintf(stderr, "Failed to allocate receive context from pool %d. Exiting.\n", i);
-            // Proper cleanup for partially initialized pools and sockets.
-            pool_destroy(&buffers.pool_iocp_send_context);
-            pool_destroy(&buffers.pool_iocp_recv_context);
-            CloseHandle(server.iocp_handle);
-            closesocket(server.socket);
-            WSACleanup();
-            return EXIT_FAILURE;
+            return RET_VAL_ERROR;
         }
         init_iocp_context(recv_context, OP_RECV); // Initialize the context
 
-        if (udp_recv_from(server.socket, recv_context) == RET_VAL_ERROR) {
+        if (udp_recv_from(server->socket, recv_context) == RET_VAL_ERROR) {
             fprintf(stderr, "Failed to post initial receive operation %d. Exiting.\n", i);
-            pool_free(&buffers.pool_iocp_recv_context, recv_context); // Free the one that failed
-            // Proper cleanup for partially initialized pools and sockets.
-            pool_destroy(&buffers.pool_iocp_send_context);
-            pool_destroy(&buffers.pool_iocp_recv_context);
-            CloseHandle(server.iocp_handle);
-            closesocket(server.socket);
-            WSACleanup();
-            return EXIT_FAILURE;
+            return RET_VAL_ERROR;
         }
     }
     printf("Server: All initial receive operations posted.\n");
@@ -212,6 +188,9 @@ static int init_server_buffers(){
 
 }
 static int start_threads() {
+    
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
     // Create threads for receiving and processing frames
     for(int i = 0; i < SERVER_RECV_SEND_FRAME_WRK_THREADS; i++){
         hthread_recv_send_frame[i] = (HANDLE)_beginthreadex(NULL, 0, func_thread_recv_send_frame, NULL, 0, NULL);
@@ -274,82 +253,38 @@ static int start_threads() {
         fprintf(stderr, "Failed to create server command thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
-    server.server_status = STATUS_READY;
+    server->server_status = STATUS_READY;
     return RET_VAL_SUCCESS;
 }
 static void shutdown_server() {
-
-    server.server_status = STATUS_NONE;
-
-    if (hthread_process_frame) {
-        // Signal the receive thread to stop and wait for it to finish
-        WaitForSingleObject(hthread_process_frame, INFINITE);
-        CloseHandle(hthread_process_frame);
-    }
-    fprintf(stdout,"process thread closed...\n");
-
-    if (hthread_client_timeout) {
-        // Signal the receive thread to stop and wait for it to finish
-        WaitForSingleObject(hthread_client_timeout, INFINITE);
-        CloseHandle(hthread_client_timeout);
-    }
-    fprintf(stdout,"client timeout thread closed...\n");
-
-    if (hthread_file_stream) {
-        // Signal the receive thread to stop and wait for it to finish
-        WaitForSingleObject(hthread_file_stream, INFINITE);
-        CloseHandle(hthread_file_stream);
-    }
-    fprintf(stdout,"file stream io thread closed...\n");
-
-    if (hthread_server_command) {
-        // Signal the receive thread to stop and wait for it to finish
-        WaitForSingleObject(hthread_server_command, INFINITE);
-        CloseHandle(hthread_server_command);
-    }
-    fprintf(stdout,"server command thread closed...\n");
-
-    for(int i = 0; i < MAX_CLIENTS; i++){
-        DeleteCriticalSection(&client_list.client[i].lock);
-        // for(int j = 0; j < MAX_CLIENT_FILE_STREAMS; j++){
-        //     DeleteCriticalSection(&client_list.client[i].fstream[j].lock);
-        // }
-        for(int j = 0; j < MAX_SERVER_ACTIVE_MSTREAMS; j++){
-            DeleteCriticalSection(&client_list.client[i].mstream[j].lock);
-        }
-    }
-    DeleteCriticalSection(&client_list.lock);
-
-    DeleteCriticalSection(&buffers.mqueue_ack.lock);
-    DeleteCriticalSection(&buffers.fqueue_ack.lock);
-    DeleteCriticalSection(&buffers.queue_priority_ack.lock);
-
-    DeleteCriticalSection(&buffers.queue_frame.lock);
-    DeleteCriticalSection(&buffers.queue_priority_frame.lock);
-    
-
-    closesocket(server.socket);
-    WSACleanup();
     printf("Server shut down!\n");
 }
 
 // Find client by session ID
-static Client* find_client(ClientList *client_list, const uint32_t session_id) {
+static Client* find_client(const uint32_t session_id) {
+    
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
     // Search for a client within the provided ClientList that matches the given session ID.
+    EnterCriticalSection(&client_list->lock);
     for (int slot = 0; slot < MAX_CLIENTS; slot++) {
         Client *client = &client_list->client[slot];
         if(client->slot_status == SLOT_FREE){
             continue; // Move to the next slot in the loop.
         }
         if(client->sid == session_id){
+            LeaveCriticalSection(&client_list->lock);
             return client;
         }
     }
+    LeaveCriticalSection(&client_list->lock);
     return NULL;
 }
 // Add a new client
-static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, const SOCKET srv_socket, const struct sockaddr_in *client_addr) {
+static Client* add_client(const UdpFrame *recv_frame, const struct sockaddr_in *client_addr) {
        
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
     uint32_t free_slot = 0;
 
     EnterCriticalSection(&client_list->lock);
@@ -368,80 +303,132 @@ static Client* add_client(ClientList *client_list, const UdpFrame *recv_frame, c
    
     Client *new_client = &client_list->client[free_slot]; 
     
-    // Enter a critical section to protect the 'new_client' data structure.
-    // This lock ensures that the client's data is initialized safely without race conditions.
     EnterCriticalSection(&new_client->lock);
 
-    new_client->slot = free_slot; // Assigns the found slot number to the new client's data structure.
-    new_client->slot_status = SLOT_BUSY; // Marks the slot as busy, indicating it's now in use.
-    // Copies the client's network address information (IP and port) from 'client_addr' to the new client's structure.
-    new_client->srv_socket = srv_socket;
+    new_client->slot = free_slot;
+    new_client->slot_status = SLOT_BUSY;
+    new_client->srv_socket = server->socket;
     memcpy(&new_client->client_addr, client_addr, sizeof(struct sockaddr_in));
-    new_client->connection_status = CLIENT_CONNECTED; // Sets the connection status to 'CLIENT_CONNECTED'.
-    new_client->last_activity_time = time(NULL); // Records the current time as the last activity time for the new client.
+    new_client->connection_status = CLIENT_CONNECTED;
+    new_client->last_activity_time = time(NULL);
 
-    // Extracts the client ID from the received frame's payload, converting it from network byte order.
     new_client->cid = _ntohl(recv_frame->payload.connection_request.client_id); 
-    // Assigns a unique session ID to the new client by atomically incrementing a global counter.
-    new_client->sid = InterlockedIncrement(&server.session_id_counter);
-    // Copies the flag from the received frame's request payload to the new client's data.
+    new_client->sid = InterlockedIncrement(&server->session_id_counter);
     new_client->flags = recv_frame->payload.connection_request.flags;
-    
-    // Formats and copies the client's name from the received frame's payload into the new client's structure.
-    // 'snprintf' is used for safe string copying, preventing buffer overflows.
+
     snprintf(new_client->name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, recv_frame->payload.connection_request.client_name);
 
-    // Converts the client's IP address from binary form to a human-readable string (IPv4).
     inet_ntop(AF_INET, &client_addr->sin_addr, new_client->ip, INET_ADDRSTRLEN);
-    // Converts the client's port number from network byte order to host byte order.
     new_client->port = _ntohs(client_addr->sin_port);
 
     fprintf(stdout, "\n[ADDING NEW CLIENT] %s:%d Session ID:%d\n", new_client->ip, new_client->port, new_client->sid);
 
-    // Leaves the critical section, releasing the lock on the 'new_client' data structure.
-    // This makes the newly initialized client data accessible to other threads.
     LeaveCriticalSection(&new_client->lock);
     LeaveCriticalSection(&client_list->lock);
-    return new_client; // Returns a pointer to the newly added and initialized ClientData structure.
+    return new_client;
 }
 // Remove a client
-static int remove_client(ClientList *client_list, ServerBuffers* buffers, const uint32_t slot) {
-    // Search for the client with the given session ID
-    // Checks if the provided ClientList pointer is NULL, indicating an invalid list.
-    if(client_list == NULL){
-        fprintf(stderr, "\nInvalid client pointer!\n"); // Prints an error message to standard error.
-        return RET_VAL_ERROR;
-    }
-    // Validates the 'slot' index to ensure it is within the permissible range [0, MAX_CLIENTS - 1].
-    if (slot < 0 || slot >= MAX_CLIENTS) {
-        fprintf(stderr, "\nInvalid client slot nr:  %d", slot); // Prints an error message if the slot number is out of bounds.
-        return RET_VAL_ERROR;
-    }
-    fprintf(stdout, "\nRemoving client with session ID: %d from slot %d\n", client_list->client[slot].sid, client_list->client[slot].slot);
-    // Enters a critical section associated with the specific client slot.    
-    EnterCriticalSection(&client_list->lock);
-    // Calls a helper function to perform cleanup operations for the client in the specified slot.
+static int remove_client(const uint32_t slot) {
     
-    cleanup_client(&client_list->client[slot], buffers);
-    // Leaves the critical section, releasing the lock on the client's data.
-    LeaveCriticalSection(&client_list->lock);
-    fprintf(stdout, "\nRemoved client successfully!\n");
-    return RET_VAL_SUCCESS; // Returns a success value.
-}
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
+    if(client_list == NULL){
+        fprintf(stderr, "\nInvalid client pointer!\n");
+        return RET_VAL_ERROR;
+    }
+    if (slot < 0 || slot >= MAX_CLIENTS) {
+        fprintf(stderr, "\nInvalid client slot nr:  %d", slot); 
+        return RET_VAL_ERROR;
+    }
+    fprintf(stdout, "\nRemoving client with session ID: %d from slot %d\n", client_list->client[slot].sid, client_list->client[slot].slot);   
+    
+    EnterCriticalSection(&client_list->lock);    
+    cleanup_client(&client_list->client[slot]);
+    LeaveCriticalSection(&client_list->lock);
+
+    return RET_VAL_SUCCESS;
+}
+// Release client resources
+static void cleanup_client(Client *client){
+    
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
+    if(client == NULL){
+        fprintf(stdout, "Error: Tried to remove null pointer client!\n");
+        return;
+    }
+    EnterCriticalSection(&client->lock);
+
+    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
+        ServerFileStream *fstream = &server->fstream[i];
+        if(fstream->sid ==  client->sid){
+            close_file_stream(fstream);
+        }
+    }
+
+    ht_remove_all_sid(ht_fid, client->sid);
+
+    for(int i = 0; i < MAX_SERVER_ACTIVE_MSTREAMS; i++){
+        EnterCriticalSection(&client->mstream[i].lock);
+        close_message_stream(&client->mstream[i]);
+        LeaveCriticalSection(&client->mstream[i].lock);
+    }
+
+    memset(&client->client_addr, 0, sizeof(struct sockaddr_in));
+    memset(&client->ip, 0, INET_ADDRSTRLEN);
+    client->port = 0;
+    client->cid = 0;
+    memset(&client->name, 0, MAX_NAME_SIZE);
+    client->flags = 0;
+    client->connection_status = CLIENT_DISCONNECTED;
+    client->last_activity_time = time(NULL);
+    client->slot = 0;
+    client->slot_status = SLOT_FREE;
+    LeaveCriticalSection(&client->lock);
+    return;
+}
+// Compare received hash with calculated hash
+static BOOL validate_file_hash(ServerFileStream *fstream){
+
+    // fprintf(stdout, "File hash received: ");
+    // for(int i = 0; i < 32; i++){
+    //     fprintf(stdout, "%02x", (uint8_t)fstream->received_sha256[i]);
+    // }
+    // fprintf(stdout, "\n");
+    // fprintf(stdout, "File hash calculated: ");
+    // for(int i = 0; i < 32; i++){
+    //     fprintf(stdout, "%02x", (uint8_t)fstream->calculated_sha256[i]);
+    // }
+    // fprintf(stdout, "\n");
+
+    for(int i = 0; i < 32; i++){
+        if((uint8_t)fstream->calculated_sha256[i] != (uint8_t)fstream->received_sha256[i]){
+            fprintf(stdout, "ERROR: SHA256 MISSMATCH\n");
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+// Check for any open file streams across all clients.
+static void check_open_file_stream(){
+    
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
+    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
+        if(server->fstream[i].fstream_busy == TRUE){
+            fprintf(stdout, "File stream still open: %d\n", i);
+        }
+    }
+    fprintf(stdout, "Completed checking opened file streams\n");
+    return;
+}
 // --- Receive frame thread function ---
 DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam) {
 
-    ServerData *srv = &server;
-    ServerBuffers *buff = &buffers;
-
-    QueueFrame *q_frame = &buffers.queue_frame;
-    QueueFrame *q_prio_frame = &buffers.queue_priority_frame;
-
-    MemPool *recv_pool = &buffers.pool_iocp_recv_context;
-    MemPool *send_pool = &buffers.pool_iocp_send_context;
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
     
-    HANDLE CompletitionPort = srv->iocp_handle;
+    HANDLE CompletitionPort = server->iocp_handle;
     DWORD NrOfBytesTransferred;
     ULONG_PTR lpCompletitionKey;
     LPOVERLAPPED lpOverlapped;
@@ -449,7 +436,7 @@ DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam) {
 
     QueueFrameEntry frame_entry;
     
-    while (srv->server_status == STATUS_READY) {
+    while (server->server_status == STATUS_READY) {
 
         BOOL getqcompl_result = GetQueuedCompletionStatus(
             CompletitionPort,
@@ -476,11 +463,11 @@ DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam) {
                 fprintf(stderr, "GetQueuedCompletionStatus failed with error: %d\n", wsa_error);
                 // If it's a real error on a specific operation
                 if (context->type == OP_SEND) {
-                    pool_free(send_pool, context);
+                    pool_free(pool_iocp_send_context, context);
                 } else if (context->type == OP_RECV) {
                     // Critical error on a receive context -"retire" this context from the pool.
                     fprintf(stderr, "Server: Error in RECV operation, attempting re-post context %p...\n", (void*)context);
-                    pool_free(recv_pool, context);
+                    pool_free(pool_iocp_recv_context, context);
                 }
                 continue; // Continue loop to get next completion
             }
@@ -502,12 +489,12 @@ DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam) {
                                                     frame_type == FRAME_TYPE_DISCONNECT);
 
                     if (is_high_priority_frame == TRUE) {
-                        if (push_frame(q_prio_frame, &frame_entry) == RET_VAL_ERROR) {
+                        if (push_frame(queue_priority_frame, &frame_entry) == RET_VAL_ERROR) {
                             Sleep(100);
                             continue;
                         }
                     } else {
-                        if (push_frame(q_frame, &frame_entry) == RET_VAL_ERROR) {
+                        if (push_frame(queue_frame, &frame_entry) == RET_VAL_ERROR) {
                             Sleep(100);
                             continue;
                         }
@@ -526,14 +513,14 @@ DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam) {
 
                 // *** CRITICAL: Re-post the receive operation using the SAME context ***
                 // This ensures the buffer is continuously available for incoming data.
-                if (udp_recv_from(srv->socket, context) == RET_VAL_ERROR){
+                if (udp_recv_from(server->socket, context) == RET_VAL_ERROR){
                     fprintf(stderr, "Critical: WSARecvFrom re-issue failed for context %p: %d. Freeing.\n", (void*)context, WSAGetLastError());
                     // This is a severe problem. Retire the context from the pool.
-                    pool_free(recv_pool, context); // Return to pool if it fails
+                    pool_free(pool_iocp_recv_context, context); // Return to pool if it fails
                 }
                 // refill the recv context mem pool when it drops bellow half
-                if(recv_pool->free_blocks > (recv_pool->block_count / 2)){
-                    refill_recv_iocp_pool(srv->socket, recv_pool);
+                if(pool_iocp_recv_context->free_blocks > (pool_iocp_recv_context->block_count / 2)){
+                    refill_recv_iocp_pool(server->socket, pool_iocp_recv_context);
                 }
                 break; // End of OP_RECV case
 
@@ -548,13 +535,13 @@ DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam) {
                 } else {
                     fprintf(stderr, "Server: Send operation completed with 0 bytes or error.\n");
                 }
-                pool_free(send_pool, context);
+                pool_free(pool_iocp_send_context, context);
                 break;
 
             default:
                 fprintf(stderr, "Server: Unknown operation type in completion.\n");
                 // Free context if it's unknown and shouldn't be re-used, to prevent leak
-                pool_free(send_pool, context);
+                pool_free(pool_iocp_send_context, context);
                 break;
         } // end of switch(context->type)
     } // end of while (server->server_status == STATUS_READY)
@@ -566,20 +553,7 @@ DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam) {
 // --- Processes a received frame ---
 DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
 
-    ServerData *srv = &server;
-    ServerBuffers *buff = &buffers;
-    ClientList *cli_list = &client_list;
-    Client *cli;                 // A pointer to the Client structure associated with the current frame's session.
-
-    QueueAck *fq_ack = &buffers.fqueue_ack;
-    QueueAck *mq_ack = &buffers.mqueue_ack;
-    QueueAck *q_prio_ack = &buffers.queue_priority_ack;
-
-    QueueFrame *q_frame = &buffers.queue_frame;
-    QueueFrame *q_prio_frame = &buffers.queue_priority_frame;
-
-    MemPool *recv_pool = &buffers.pool_iocp_recv_context;
-    MemPool *send_pool = &buffers.pool_iocp_send_context;
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     uint16_t recv_delimiter;      // Stores the extracted start delimiter from the frame header.
     uint8_t  recv_frame_type;     // Stores the extracted frame type from the frame header.
@@ -596,20 +570,20 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
     char src_ip[INET_ADDRSTRLEN];   // Buffer to store the human-readable string representation of the source IP address.
     uint16_t src_port;              // Stores the source port number.
 
-    HANDLE events[2] = {q_prio_frame->push_semaphore,
-                        q_frame->push_semaphore,
+    HANDLE events[2] = {queue_priority_frame->push_semaphore,
+                        queue_frame->push_semaphore,
                         };
 
-    while(srv->server_status == STATUS_READY) {
+    while(server->server_status == STATUS_READY) {
         memset(&frame_entry, 0, sizeof(QueueFrameEntry));
         DWORD result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            if (pop_frame(q_prio_frame, &frame_entry) == RET_VAL_ERROR) {
+            if (pop_frame(queue_priority_frame, &frame_entry) == RET_VAL_ERROR) {
                 fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from frame priority queue RET_VAL_ERROR\n");
                 continue;
             }
         } else if (result == WAIT_OBJECT_0 + 1) {
-            if (pop_frame(q_frame, &frame_entry) == RET_VAL_ERROR) {
+            if (pop_frame(queue_frame, &frame_entry) == RET_VAL_ERROR) {
                 fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from frame queue RET_VAL_ERROR\n");
                 continue;
             }
@@ -640,53 +614,59 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
             continue;
         }
 
-        cli = NULL;
+        Client *client = NULL;
         time_t now = time(NULL);
 
-        if(recv_frame_type == FRAME_TYPE_CONNECT_REQUEST && recv_session_id == DEFAULT_CONNECT_REQUEST_SID){
-            cli = add_client(cli_list, frame, srv->socket, src_addr);
-            if (cli == NULL) {
+        if(recv_frame_type == FRAME_TYPE_CONNECT_REQUEST && 
+                                recv_session_id == DEFAULT_CONNECT_REQUEST_SID &&
+                                recv_seq_num == DEFAULT_CONNECT_REQUEST_SEQ){
+            client = add_client(frame, src_addr);
+            if (client == NULL) {
                 fprintf(stderr, "Failed to add new client from %s:%d. Max clients reached or server error.\n", src_ip, src_port);
                 continue;
             }
-            EnterCriticalSection(&cli->lock);
-            cli->last_activity_time = now;
-            LeaveCriticalSection(&cli->lock);            
-            send_connect_response(recv_seq_num, 
-                                    cli->sid, 
-                                    srv->session_timeout, 
-                                    srv->server_status, 
-                                    srv->name, 
-                                    srv->socket, 
-                                    &cli->client_addr,
-                                    send_pool
+            EnterCriticalSection(&client->lock);
+            client->last_activity_time = now;
+            LeaveCriticalSection(&client->lock);            
+            send_connect_response(DEFAULT_CONNECT_REQUEST_SEQ, 
+                                    client->sid, 
+                                    server->session_timeout, 
+                                    server->server_status, 
+                                    server->name, 
+                                    server->socket, 
+                                    &client->client_addr,
+                                    pool_iocp_send_context
                                 );
-            fprintf(stdout, "Client %s:%d Requested connection. Responding to connect request with Session ID: %u\n", cli->ip, cli->port, cli->sid);
+            fprintf(stdout, "Client %s:%d Requested connection. Responding to connect request with Session ID: %u\n", 
+                                                    client->ip, client->port, client->sid);
             continue;
 
-        } else if (recv_frame_type == FRAME_TYPE_CONNECT_REQUEST && recv_session_id != DEFAULT_CONNECT_REQUEST_SID) {
-            cli = find_client(cli_list, recv_session_id);
-            if(cli == NULL){
+        } else if (recv_frame_type == FRAME_TYPE_CONNECT_REQUEST && 
+                        (recv_session_id != DEFAULT_CONNECT_REQUEST_SID || recv_seq_num != DEFAULT_CONNECT_REQUEST_SEQ)) {
+            // fprintf(stdout, "DEBUG: received connect request. SID: %lx; seq: %llx\n", recv_session_id, recv_seq_num);
+            client = find_client(recv_session_id);
+            if(client == NULL){
                 fprintf(stderr, "Unknown client tried to re-connect\n");
                 continue;
             }
-            EnterCriticalSection(&cli->lock);
-            cli->last_activity_time = now;
-            LeaveCriticalSection(&cli->lock);
-            send_connect_response(recv_seq_num, 
-                                    cli->sid, 
-                                    srv->session_timeout, 
-                                    srv->server_status, 
-                                    srv->name, 
-                                    srv->socket, 
-                                    &cli->client_addr,
-                                    send_pool
+            EnterCriticalSection(&client->lock);
+            client->last_activity_time = now;
+            LeaveCriticalSection(&client->lock);
+            send_connect_response(DEFAULT_CONNECT_REQUEST_SEQ, 
+                                    client->sid, 
+                                    server->session_timeout, 
+                                    server->server_status, 
+                                    server->name, 
+                                    server->socket, 
+                                    &client->client_addr,
+                                    pool_iocp_send_context
                                 );
-            fprintf(stdout, "Client %s:%d Requested re-connection. Responding to re-connect request with Session ID: %u\n", cli->ip, cli->port, cli->sid);
+            fprintf(stdout, "Client %s:%d Requested re-connection. Responding to re-connect request with Session ID: %u\n", 
+                                                    client->ip, client->port, client->sid);
             continue;
         } else {
-            cli = find_client(cli_list, recv_session_id);
-            if(cli == NULL){
+            client = find_client(recv_session_id);
+            if(client == NULL){
                 //fprintf(stderr, "Received frame from unknown client\n");
                 continue;
             }
@@ -695,9 +675,9 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
         switch (recv_frame_type) {
 
             case FRAME_TYPE_ACK:
-                EnterCriticalSection(&cli->lock);
-                cli->last_activity_time = now;
-                LeaveCriticalSection(&cli->lock);
+                EnterCriticalSection(&client->lock);
+                client->last_activity_time = now;
+                LeaveCriticalSection(&client->lock);
                 // TODO: Implement the full ACK processing logic here. This typically involves:
                 //   - Removing acknowledged packets from the sender's retransmission queue.
                 //   - Updating window sizes for flow and congestion control.
@@ -705,36 +685,36 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
                 break;
 
             case FRAME_TYPE_KEEP_ALIVE:
-                EnterCriticalSection(&cli->lock);
-                cli->last_activity_time = now;
-                LeaveCriticalSection(&cli->lock);
+                EnterCriticalSection(&client->lock);
+                client->last_activity_time = now;
+                LeaveCriticalSection(&client->lock);
 
-                new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_KEEP_ALIVE, srv->socket, &cli->client_addr);
-                push_ack(q_prio_ack, &ack_entry);
+                new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_KEEP_ALIVE, server->socket, &client->client_addr);
+                push_ack(queue_priority_ack, &ack_entry);
 
                 break;
 
             case FRAME_TYPE_FILE_METADATA:
-                handle_file_metadata(cli, frame, buff);
+                handle_file_metadata(client, frame);
                 break;
 
             case FRAME_TYPE_FILE_FRAGMENT:
-                handle_file_fragment(cli, frame, buff);
+                handle_file_fragment(client, frame);
                 break;
 
             case FRAME_TYPE_FILE_END:
-                handle_file_end(cli, frame, buff);
+                handle_file_end(client, frame);
                 break;
 
             case FRAME_TYPE_LONG_TEXT_MESSAGE:
-                handle_message_fragment(cli, frame, buff);
+                handle_message_fragment(client, frame);
                 break;
 
             case FRAME_TYPE_DISCONNECT:
-                fprintf(stdout, "Client %s:%d with session ID: %d requested disconnect...\n", cli->ip, cli->port, cli->sid);
-                new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_DISCONNECT, srv->socket, &cli->client_addr);
-                push_ack(q_prio_ack, &ack_entry);
-                remove_client(cli_list, buff, cli->slot);
+                fprintf(stdout, "Client %s:%d with session ID: %d requested disconnect...\n", client->ip, client->port, client->sid);
+                new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_DISCONNECT, server->socket, &client->client_addr);
+                push_ack(queue_priority_ack, &ack_entry);
+                remove_client(client->slot);
                 break;
 
             default:
@@ -749,87 +729,88 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
 // --- Ack Thread functions ---
 DWORD WINAPI thread_proc_send_priority_ack(LPVOID lpParam){
 
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
     QueueAckEntry ack_entry;
 
-    while (server.server_status == STATUS_READY) {
+    while (server->server_status == STATUS_READY) {
         // DWORD result = WaitForMultipleObjects(3, events, FALSE, INFINITE);
-        DWORD result = WaitForSingleObject(buffers.queue_priority_ack.push_semaphore, INFINITE);
+        DWORD result = WaitForSingleObject(queue_priority_ack->push_semaphore, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            if (pop_ack(&buffers.queue_priority_ack, &ack_entry) == RET_VAL_ERROR) {
-                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from ack priority queue RET_VAL_ERROR\n");
+            if (pop_ack(queue_priority_ack, &ack_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "CRITICAL ERROR: Popping from ack priority queue RET_VAL_ERROR\n");
                 continue;
             }
         } else {
-            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore priority ack queues: %lu\n", result);
+            fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore priority ack queues: %lu\n", result);
             continue;
         }
-        send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr, &buffers.pool_iocp_send_context);
+        send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr, pool_iocp_send_context);
     }
     _endthreadex(0);
     return 0;
 }
 DWORD WINAPI thread_proc_send_message_ack(LPVOID lpParam){
 
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
     QueueAckEntry ack_entry;
 
-    while (server.server_status == STATUS_READY) {
-        DWORD result = WaitForSingleObject(buffers.mqueue_ack.push_semaphore, INFINITE);
+    while (server->server_status == STATUS_READY) {
+        DWORD result = WaitForSingleObject(mqueue_ack->push_semaphore, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            if (pop_ack(&buffers.mqueue_ack, &ack_entry) == RET_VAL_ERROR) {
-                fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Popping from message ack queue RET_VAL_ERROR\n");
+            if (pop_ack(mqueue_ack, &ack_entry) == RET_VAL_ERROR) {
+                fprintf(stderr, "CRITICAL ERROR: Popping from message ack queue RET_VAL_ERROR\n");
                 continue;
             }
         } else {
-            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore message ack queues: %lu\n", result);
+            fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore message ack queues: %lu\n", result);
             continue;
         }
-        send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr, &buffers.pool_iocp_send_context);
+        send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr, pool_iocp_send_context);
     }
     _endthreadex(0);
     return 0;
 }
-
-
 DWORD WINAPI thread_proc_send_file_ack_frame(LPVOID lpParam){
 
-    QueueEntryAckUdpFrame *ack_entry;
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
-    while (server.server_status == STATUS_READY) {
-        DWORD result = WaitForSingleObject(buffers.queue_ack_udp_frame.push_semaphore, INFINITE);
+    while (server->server_status == STATUS_READY) {
+        DWORD result = WaitForSingleObject(queue_ack_udp_frame->push_semaphore, INFINITE);
+        PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pop_ack_frame(queue_ack_udp_frame);
         if (result == WAIT_OBJECT_0) {
-            ack_entry = (QueueEntryAckUdpFrame*)pop_ack_frame(&buffers.queue_ack_udp_frame);
+            if(!entry){
+                fprintf(stderr,"CRITICAL ERROR: pop_ack_frame() null pointer from queue ack frame");
+                continue;
+            }
+            send_pool_ack_frame(entry, pool_iocp_send_context);
+            pool_free(pool_queue_ack_udp_frame, entry);
         } else {
-            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore file ack queues: %lu\n", result);
+            fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore queue ack frame: %lu\n", result);
             continue;
         }
-        send_ack_frame(&ack_entry->frame, server.socket, &ack_entry->addr, &buffers.pool_iocp_send_context);
-        pool_free(&buffers.pool_queue_ack_udp_frame, ack_entry);
-        // send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr, &buffers.pool_iocp_send_context);
     }
     _endthreadex(0);
     return 0;
 }
-
-
 // --- Client timeout thread function ---
 DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
 
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
     time_t time_now;
-    ClientList *client_list = (ClientList*)lpParam; // Cast the parameter to ClientList.
-    while(server.server_status == STATUS_READY) {
+    while(server->server_status == STATUS_READY) {
         time_now = time(NULL);
-        for(int i = 0; i < MAX_CLIENTS; i++){
-            if(client_list->client[i].slot_status == SLOT_FREE){
+        for(int slot = 0; slot < MAX_CLIENTS; slot++){
+            if(client_list->client[slot].slot_status == SLOT_FREE){
                 continue; // Skip to the next client slot.
             }
-
-            if(time_now - (time_t)client_list->client[i].last_activity_time < (time_t)server.session_timeout){
+            if(time_now - (time_t)client_list->client[slot].last_activity_time < (time_t)server->session_timeout){
                 continue; // Skip to the next client slot.
             }
-
-            fprintf(stdout, "\nClient with Session ID: %d disconnected due to timeout\n", client_list->client[i].sid);
-            send_disconnect(client_list->client[i].sid, server.socket, &client_list->client[i].client_addr, &buffers.pool_iocp_send_context);
-            remove_client(client_list, &buffers, i);
+            fprintf(stdout, "\nClient with Session ID: %d disconnected due to timeout\n", client_list->client[slot].sid);
+            remove_client(slot);
         }
         Sleep(1000);
     }
@@ -841,27 +822,26 @@ DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
 // --- Thread for writing file streams to disk ---
 DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
 
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
     SHA256_CTX sha256_ctx;
 
-    while (server.server_status == STATUS_READY) { 
+    while (server->server_status == STATUS_READY) { 
         ServerFileStream *fstream = NULL;
-        DWORD result = WaitForSingleObject(buffers.queue_fstream.push_semaphore, INFINITE);
+        DWORD result = WaitForSingleObject(queue_fstream->push_semaphore, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            fstream = (ServerFileStream*)pop_fstream(&buffers.queue_fstream);
+            fstream = (ServerFileStream*)pop_fstream(queue_fstream);
         } else {
-            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Unexpected result wait semaphore fstream queue: %lu\n", result);
+            fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore fstream queue: %lu\n", result);
             continue;
         }        
-
         if(!fstream){
-            fprintf(stderr, "ERROR SHOULD NOT HAPPEN: Received null pointer from fstream queue!\n");
+            fprintf(stderr, "CRITICAL ERROR: Received null pointer from fstream queue!\n");
             continue;
         }
 
         sha256_init(&sha256_ctx);                              
         while(fstream->fstream_busy){
-        // while(1){
-        // WaitForSingleObject(buffers.test_semaphore, INFINITE);
             EnterCriticalSection(&fstream->lock);
             // Iterate through all bitmap entries (chunks) for the current file stream.
             for(long long k = 0; k < fstream->bitmap_entries_count; k++){
@@ -922,12 +902,12 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
                 fstream->flag[k] |= CHUNK_WRITTEN; // Update the chunk's flag to reflect it has been written.
 
                 // Return the memory buffer for this chunk back to the pre-allocated pool.
-                pool_free(&buffers.pool_file_chunk, fstream->pool_block_file_chunk[k]);
+                pool_free(pool_file_chunk, fstream->pool_block_file_chunk[k]);
                 fstream->pool_block_file_chunk[k] = NULL;
             }
 
             if(fstream->fstream_err != STREAM_ERR_NONE){
-                close_file_stream(fstream, &buffers); // Clean up the entire file stream.
+                close_file_stream(fstream); // Clean up the entire file stream.
                 LeaveCriticalSection(&fstream->lock);
                 break;
             }
@@ -974,7 +954,7 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
             }
 
             if(fstream->fstream_err != STREAM_ERR_NONE){
-                close_file_stream(fstream, &buffers); // Clean up the entire file stream.
+                close_file_stream(fstream); // Clean up the entire file stream.
                 LeaveCriticalSection(&fstream->lock);
                 break;
             }
@@ -997,7 +977,7 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
                 if(!fstream->file_hash_validated){
                     fprintf(stderr, "STREAM ERROR: sha256 mismatch!\n");
                     fstream->fstream_err = STREAM_ERR_SHA256_MISMATCH; // Set a specific error code.                        
-                    close_file_stream(fstream, &buffers);
+                    close_file_stream(fstream);
                     LeaveCriticalSection(&fstream->lock);
                     break;  //exit the while loop
                 }                                                    
@@ -1014,14 +994,14 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
             // If the file is now completely received and written:
             if(fstream->file_complete){           
                 
-                ht_update_id_status(&buffers.ht_fid, fstream->sid, fstream->fid, ID_RECV_COMPLETE);
+                ht_update_id_status(ht_fid, fstream->sid, fstream->fid, ID_RECV_COMPLETE);
                 // fprintf(stdout, "Receved file: '%s'\n", fstream->fname);
 
                 QueueAckEntry ack_entry;
-                new_ack_entry(&ack_entry, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, server.socket, &fstream->client_addr);
-                push_ack(&buffers.queue_priority_ack, &ack_entry);
+                new_ack_entry(&ack_entry, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, server->socket, &fstream->client_addr);
+                push_ack(queue_priority_ack, &ack_entry);
 
-                close_file_stream(fstream, &buffers);
+                close_file_stream(fstream);
                 LeaveCriticalSection(&fstream->lock);
                 break; //exit the while loop
             }
@@ -1038,8 +1018,8 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
 DWORD WINAPI thread_proc_server_command(LPVOID lpParam){
     
     char cmd;
-    
-    while (server.server_status == STATUS_READY){
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+    while (server->server_status == STATUS_READY){
 
         fprintf(stdout,"Waiting for command...\n");
         cmd = getchar();
@@ -1047,12 +1027,12 @@ DWORD WINAPI thread_proc_server_command(LPVOID lpParam){
             case 's':
             case 'S':
             //check what file streams are still open
-                check_open_file_stream(&buffers);
+                check_open_file_stream();
                 break;
 
             case 'l':
             case 'L':
-                refill_recv_iocp_pool(server.socket, &buffers.pool_iocp_recv_context);
+                refill_recv_iocp_pool(server->socket, pool_iocp_recv_context);
                 break;
 
             default:
@@ -1066,7 +1046,9 @@ DWORD WINAPI thread_proc_server_command(LPVOID lpParam){
 }
 
 // Clean up the file stream resources after a file transfer is completed or aborted.
-void close_file_stream(ServerFileStream *fstream, ServerBuffers* buffers){
+void close_file_stream(ServerFileStream *fstream){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     if(fstream == NULL){
         fprintf(stderr, "ERROR: Trying to clean a NULL pointer file stream\n");
@@ -1102,14 +1084,14 @@ void close_file_stream(ServerFileStream *fstream, ServerBuffers* buffers){
     }    
     for(long long k = 0; k < fstream->bitmap_entries_count; k++){
         if(fstream->pool_block_file_chunk[k] != NULL){
-            pool_free(&buffers->pool_file_chunk, fstream->pool_block_file_chunk[k]);
+            pool_free(pool_file_chunk, fstream->pool_block_file_chunk[k]);
         }
         fstream->pool_block_file_chunk[k] = NULL;
     }
 
-    fstream->sid;                                   // Session ID associated with this file stream.
-    fstream->fid;                                   // File ID, unique identifier for the file associated with this file stream.
-    fstream->fsize;                                 // Total size of the file being transferred.
+    fstream->sid = 0;                                   // Session ID associated with this file stream.
+    fstream->fid = 0;                                   // File ID, unique identifier for the file associated with this file stream.
+    fstream->fsize = 0;                                 // Total size of the file being transferred.
     fstream->trailing_chunk = FALSE;                // True if the last bitmap entry represents a partial chunk (less than 64 fragments).
     fstream->trailing_chunk_complete = FALSE;       // True if all bytes for the last, potentially partial, chunk have been received.
     fstream->trailing_chunk_size = 0;               // The actual size of the last chunk (if partial).
@@ -1142,7 +1124,9 @@ void close_file_stream(ServerFileStream *fstream, ServerBuffers* buffers){
     return;
 }
 // Clean up the message stream resources after a file transfer is completed or aborted.
-void close_message_stream(MessageStream *mstream, ServerBuffers* buffers){
+void close_message_stream(MessageStream *mstream){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     if(mstream == NULL){
         fprintf(stderr, "ERROR: Trying to clean a NULL pointer message stream\n");
@@ -1169,90 +1153,6 @@ void close_message_stream(MessageStream *mstream, ServerBuffers* buffers){
 
 }
 // Clean client resources
-void cleanup_client(Client *client, ServerBuffers* buffers){
-    
-    if(client == NULL){
-        fprintf(stdout, "Error: Tried to remove null pointer client!\n");
-        return;
-    }
-    EnterCriticalSection(&client->lock);
-
-    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        ServerFileStream *fstream = &buffers->fstream[i];
-        if(fstream->sid ==  client->sid){
-            close_file_stream(fstream, buffers);
-        }
-    }
-
-    ht_remove_all_sid(&buffers->ht_fid, client->sid);
-
-    for(int i = 0; i < MAX_SERVER_ACTIVE_MSTREAMS; i++){
-        // Acquire the critical section lock for the current message stream.
-        EnterCriticalSection(&client->mstream[i].lock);
-        // Call the dedicated cleanup function for the current message stream.
-        // This function will free memory, close files, and reset the message stream's state.
-        close_message_stream(&client->mstream[i], buffers);
-        // Release the critical section lock for the current message stream.
-        LeaveCriticalSection(&client->mstream[i].lock);
-    }
-
-    // Reset the client's network address structure by filling it with zeros.
-    memset(&client->client_addr, 0, sizeof(struct sockaddr_in));
-    // Reset the client's IP address string by filling it with zeros.
-    memset(&client->ip, 0, INET_ADDRSTRLEN);
-    // Reset the client's port number to zero.
-    client->port = 0;
-    // Reset the client's unique identifier to zero.
-    client->cid = 0;
-    // Reset the client's name buffer by filling it with zeros.
-    memset(&client->name, 0, MAX_NAME_SIZE);
-    // Reset any client-specific flags to zero.
-    client->flags = 0;
-    // Set the client's connection status to disconnected.
-    client->connection_status = CLIENT_DISCONNECTED;
-    // Update the last activity time to the current time. This can be useful for
-    // tracking when the client slot became free or was last active.
-    client->last_activity_time = time(NULL);
-    // Reset the client's assigned slot number to zero.
-    client->slot = 0;
-    // Mark the client slot as free, indicating it's available for a new connection.
-    client->slot_status = SLOT_FREE;
-    LeaveCriticalSection(&client->lock);
-    return;
-}
-// Compare received hash with calculated hash
-BOOL validate_file_hash(ServerFileStream *fstream){
-
-    // fprintf(stdout, "File hash received: ");
-    // for(int i = 0; i < 32; i++){
-    //     fprintf(stdout, "%02x", (uint8_t)fstream->received_sha256[i]);
-    // }
-    // fprintf(stdout, "\n");
-    // fprintf(stdout, "File hash calculated: ");
-    // for(int i = 0; i < 32; i++){
-    //     fprintf(stdout, "%02x", (uint8_t)fstream->calculated_sha256[i]);
-    // }
-    // fprintf(stdout, "\n");
-
-    for(int i = 0; i < 32; i++){
-        if((uint8_t)fstream->calculated_sha256[i] != (uint8_t)fstream->received_sha256[i]){
-            fprintf(stdout, "ERROR: SHA256 MISSMATCH\n");
-            return FALSE;
-        }
-    }
-
-    return TRUE;
-}
-// Check for any open file streams across all clients.
-void check_open_file_stream(ServerBuffers *buffers){
-    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        if(buffers->fstream[i].fstream_busy == TRUE){
-            fprintf(stdout, "File stream still open: %d\n", i);
-        }
-    }
-    fprintf(stdout, "Completed checking opened file streams\n");
-    return;
-}
 
 int main() {
     //get_network_config();
@@ -1260,17 +1160,18 @@ int main() {
     init_server_config();
     init_server_buffers();
     start_threads();
+    init_server_statistics_gui();
     // Main server loop for general management, timeouts, and state updates
-    while (server.server_status == STATUS_READY) {
+    while (Server.server_status == STATUS_READY) {
 
         Sleep(250); // Prevent busy-waiting
    
-         fprintf(stdout, "\r\033[2K-- Pending: %d; FreeSend: %llu; FreeRecv: %llu; FreeAckFrame: %llu", 
-                            buffers.queue_fstream.pending,
-                            buffers.pool_iocp_send_context.free_blocks,
-                            buffers.pool_iocp_recv_context.free_blocks,
-                            buffers.pool_queue_ack_udp_frame.free_blocks
-                            );
+        // fprintf(stdout, "\r\033[2K-- Pending: %d; FreeSend: %llu; FreeRecv: %llu; FreeAckFrame: %llu", 
+        //                     buffers.queue_fstream.pending,
+        //                     buffers.pool_iocp_send_context.free_blocks,
+        //                     buffers.pool_iocp_recv_context.free_blocks,
+        //                     buffers.pool_queue_ack_udp_frame.free_blocks
+        //                     );
 
     }
     // --- Server Shutdown Sequence ---

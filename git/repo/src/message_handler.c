@@ -33,7 +33,9 @@ static int msg_match_fragment(Client *client, UdpFrame *frame){
     }
     return RET_VAL_ERROR;
 }
-static int msg_validate_fragment(Client *client, const int index, UdpFrame *frame, ServerBuffers* buffers) {
+static int msg_validate_fragment(Client *client, const int index, UdpFrame *frame) {
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     MessageStream *mstream = &client->mstream[index];
 
@@ -76,7 +78,7 @@ static int msg_validate_fragment(Client *client, const int index, UdpFrame *fram
 
 exit_err:
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->mqueue_ack, &ack_entry);
+    push_ack(mqueue_ack, &ack_entry);
     LeaveCriticalSection(&mstream->lock);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
@@ -154,8 +156,10 @@ static void msg_attach_fragment(MessageStream *mstream, char *fragment_buffer, c
     mark_fragment_received(mstream->bitmap, fragment_offset, TEXT_FRAGMENT_SIZE);
     LeaveCriticalSection(&mstream->lock);
 }
-static int msg_check_completion_and_record(MessageStream *mstream, ServerBuffers* buffers) {
+static int msg_check_completion_and_record(MessageStream *mstream) {
     // Check if the message is fully received by verifying total bytes and the fragment bitmap.
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
     EnterCriticalSection(&mstream->lock);
 
     BOOL message_is_complete = (mstream->chars_received == mstream->mlen) && check_bitmap(mstream->bitmap, mstream->fragment_count);
@@ -171,9 +175,9 @@ static int msg_check_completion_and_record(MessageStream *mstream, ServerBuffers
     // Attempt to write the in-memory buffer to a file on disk.
     int msg_creation_status = create_output_file(mstream->buffer, mstream->chars_received, mstream->fnm);
     
-    ht_update_id_status(&buffers->ht_mid, mstream->sid, mstream->mid, ID_RECV_COMPLETE);
+    ht_update_id_status(ht_mid, mstream->sid, mstream->mid, ID_RECV_COMPLETE);
     
-    close_message_stream(mstream, buffers);
+    close_message_stream(mstream);
  
     if (msg_creation_status != RET_VAL_SUCCESS) {
         // If file creation failed, return an error.
@@ -188,7 +192,9 @@ static int msg_check_completion_and_record(MessageStream *mstream, ServerBuffers
 }
 
 // HANDLE received message fragment frame
-int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buffers){
+int handle_message_fragment(Client *client, UdpFrame *frame){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     int slot;
     if(client == NULL){
@@ -210,7 +216,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
 
-    if(ht_search_id(&buffers->ht_mid, recv_session_id, recv_message_id, ID_RECV_COMPLETE) == TRUE){
+    if(ht_search_id(ht_mid, recv_session_id, recv_message_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received file end frame for completed file Seq: %llu; sID: %u; mID: %u;\n", recv_seq_num, recv_session_id, recv_message_id);
         op_code = ERR_EXISTING_MESSAGE;
         goto exit_err;
@@ -218,20 +224,20 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
 
     slot = msg_match_fragment(client, frame);
     if (slot != RET_VAL_ERROR) {
-        if (msg_validate_fragment(client, slot, frame, buffers) == RET_VAL_ERROR) {
+        if (msg_validate_fragment(client, slot, frame) == RET_VAL_ERROR) {
             LeaveCriticalSection(&client->lock);
             return RET_VAL_ERROR;
         }
         msg_attach_fragment(&client->mstream[slot], frame->payload.text_fragment.chars, recv_fragment_offset, recv_fragment_len);
         
-        if (msg_check_completion_and_record(&client->mstream[slot], buffers) == RET_VAL_ERROR){
+        if (msg_check_completion_and_record(&client->mstream[slot]) == RET_VAL_ERROR){
             fprintf(stderr, "Final check of the message failed\n");
             op_code = ERR_MESSAGE_FINAL_CHECK;
             goto exit_err;
         }
 
         new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->mqueue_ack, &ack_entry);
+        push_ack(mqueue_ack, &ack_entry);
         
         LeaveCriticalSection(&client->lock);
         return RET_VAL_SUCCESS;
@@ -243,7 +249,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
             op_code = ERR_RESOURCE_LIMIT;
             goto exit_err;
         }
-        if (msg_validate_fragment(client, slot, frame, buffers) == RET_VAL_ERROR){
+        if (msg_validate_fragment(client, slot, frame) == RET_VAL_ERROR){
             LeaveCriticalSection(&client->lock);
             return RET_VAL_ERROR;
         }
@@ -257,27 +263,27 @@ int handle_message_fragment(Client *client, UdpFrame *frame, ServerBuffers* buff
 
         msg_attach_fragment(&client->mstream[slot], frame->payload.text_fragment.chars, recv_fragment_offset, recv_fragment_len);       
 
-        if(ht_insert_id(&buffers->ht_mid, recv_session_id, recv_message_id, ID_WAITING_FRAGMENTS) == RET_VAL_ERROR){
+        if(ht_insert_id(ht_mid, recv_session_id, recv_message_id, ID_WAITING_FRAGMENTS) == RET_VAL_ERROR){
             fprintf(stderr, "Failed to allocate memory for message ID in hash table\n");
             op_code = ERR_MEMORY_ALLOCATION;
             goto exit_err;
         }
 
-        if (msg_check_completion_and_record(&client->mstream[slot], buffers) == RET_VAL_ERROR){
+        if (msg_check_completion_and_record(&client->mstream[slot]) == RET_VAL_ERROR){
             fprintf(stderr, "Final check of the message failed\n");
             op_code = ERR_MESSAGE_FINAL_CHECK;
             goto exit_err;
         }
 
         new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, client->srv_socket, &client->client_addr);
-        push_ack(&buffers->mqueue_ack, &ack_entry);
+        push_ack(mqueue_ack, &ack_entry);
 
         LeaveCriticalSection(&client->lock);
         return RET_VAL_SUCCESS;
     }
 exit_err:
     new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(&buffers->mqueue_ack, &ack_entry);
+    push_ack(mqueue_ack, &ack_entry);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }
