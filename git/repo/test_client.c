@@ -601,7 +601,7 @@ DWORD WINAPI fthread_process_frame(LPVOID lpParam) {
 
                 if(recv_seq_num == DEFAULT_DISCONNECT_REQUEST_SEQ && recv_op_code == STS_CONFIRM_DISCONNECT){
                     SetEvent(client->hevent_connection_closed);
-                    fprintf(stdout, "Received disconnect ACK code: %lu; for seq num: %llx\n", frame->payload.ack.op_code, recv_seq_num);
+                    fprintf(stdout, "DEBUG: Received ack STS_CONFIRM_DISCONNECT - code: %lu; seq num: %llx\n", recv_op_code, recv_seq_num);
                     break;
                 }
 
@@ -638,9 +638,8 @@ DWORD WINAPI fthread_process_frame(LPVOID lpParam) {
                     s_pool_free(pool_send_frame, (void*)entry);
                 }
 
-                if(recv_op_code == STS_CONFIRM_DISCONNECT || 
-                        (recv_seq_num == DEFAULT_KEEP_ALIVE_SEQ && recv_op_code == STS_KEEP_ALIVE)){
-                    // TODO: Any logic needed?
+                if(recv_seq_num == DEFAULT_KEEP_ALIVE_SEQ && recv_op_code == STS_KEEP_ALIVE){
+                    fprintf(stdout, "DEBUG: Received ack STS_KEEP_ALIVE - code: %lu; seq num: %llx\n", recv_op_code, recv_seq_num);
                     break;
                 }
                 break;
@@ -720,7 +719,7 @@ DWORD WINAPI fthread_keep_alive(LPVOID lpParam){
 
             now_keep_alive = time(NULL);
             if(now_keep_alive - last_keep_alive > keep_alive_clock_sec){
-                PoolEntrySendFrame *pool_send_entry = s_pool_alloc(pool_send_frame);
+                PoolEntrySendFrame *pool_send_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
                 if(!pool_send_entry){
                     fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for keep alive frame. Should never do since it has semaphore to block when full");
                     Sleep(1000);
@@ -904,7 +903,7 @@ DWORD WINAPI fthread_process_fstream(LPVOID lpParam){
 
         fstream->pending_metadata_seq_num = get_new_seq_num();
         
-        pool_send_entry = s_pool_alloc(pool_send_frame);
+        pool_send_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
         if(!pool_send_entry){
             fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for metadata frame. Should never do since it has semaphore to block when full");
             goto clean;
@@ -969,7 +968,7 @@ DWORD WINAPI fthread_process_fstream(LPVOID lpParam){
                     memset(buffer + frame_fragment_size, 0, FILE_FRAGMENT_SIZE - frame_fragment_size);
                 }
                 
-                pool_send_entry = s_pool_alloc(pool_send_frame);
+                pool_send_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
                 if(!pool_send_entry){
                     fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for file fragment frame. Should never do since it has semaphore to block when full");
                     goto clean;
@@ -998,7 +997,7 @@ DWORD WINAPI fthread_process_fstream(LPVOID lpParam){
 
         sha256_final(&sha256_ctx, (uint8_t *)&fstream->fhash.sha256);
 
-        pool_send_entry = s_pool_alloc(pool_send_frame);
+        pool_send_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
         if(!pool_send_entry){
             fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for end frame. Should never do since it has semaphore to block when full");
             goto clean;

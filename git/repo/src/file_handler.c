@@ -208,7 +208,7 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame) {
     fstream->bitmap = calloc(fstream->bitmap_entries_count, sizeof(uint64_t));
     if(fstream->bitmap == NULL){
         fstream->fstream_err = STREAM_ERR_BITMAP_MALLOC;
-        fprintf(stderr, "Memory allocation fail for file bitmap mem!!!\n");
+        fprintf(stderr, "ERROR: init_file_stream - Memory allocation fail for file bitmap mem!!!\n");
         goto exit_error;
     }
 
@@ -216,7 +216,7 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame) {
     fstream->flag = calloc(fstream->bitmap_entries_count, sizeof(uint8_t));
     if(fstream->flag == NULL){
         fstream->fstream_err = STREAM_ERR_FLAG_MALLOC;
-        fprintf(stderr, "Memory allocation fail for file entry flag!!!\n");
+        fprintf(stderr, "ERROR: init_file_stream - Memory allocation fail for file entry flag!!!\n");
         goto exit_error;
     }
 
@@ -224,13 +224,13 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame) {
     fstream->pool_block_file_chunk = calloc(fstream->bitmap_entries_count, sizeof(char*));
     if(fstream->pool_block_file_chunk == NULL){
         fstream->fstream_err = STREAM_ERR_CHUNK_PTR_MALLOC;
-        fprintf(stderr, "Memory allocation fail for chunk mem blocks!!!\n");
+        fprintf(stderr, "ERROR: init_file_stream - Memory allocation fail for chunk mem blocks!!!\n");
         goto exit_error;
     }
 
 
     if(!DriveExists(SERVER_PARTITION_DRIVE)){
-        fprintf(stderr, "Drive Partition \"%s\" doesn't exit\n", SERVER_PARTITION_DRIVE);
+        fprintf(stderr, "ERROR: init_file_stream - Drive Partition \"%s\" doesn't exit\n", SERVER_PARTITION_DRIVE);
         fstream->fstream_err = STREAM_ERR_DRIVE_PARTITION;
         goto exit_error;
     }
@@ -240,21 +240,21 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame) {
     snprintf(rootFolder, MAX_PATH, "%s""SessionID_%d", SERVER_ROOT_FOLDER, fstream->sid);
 
     if (CreateAbsoluteFolderRecursive(rootFolder) == FALSE) {
-        fprintf(stderr, "Failed to create recursive path for root folder: \"%s\". Error code: %lu\n", rootFolder, GetLastError());
+        fprintf(stderr, "ERROR: init_file_stream - Failed to create recursive path for root folder: \"%s\". Error code: %lu\n", rootFolder, GetLastError());
         goto exit_error;
     }
 
-    fprintf(stdout,"RECEIVED RPATH: %s", fstream->rpath);
+    // fprintf(stdout,"RECEIVED RPATH: %s", fstream->rpath);
 
     if (CreateRelativeFolderRecursive(rootFolder, fstream->rpath) == FALSE) {
-        fprintf(stderr, "Failed to create recursive path for root folder: \"%s\", relative path \"%s\". Error code: %lu\n", rootFolder, fstream->rpath, GetLastError());
+        fprintf(stderr, "ERROR: init_file_stream - Failed to create recursive path for root folder: \"%s\", relative path \"%s\". Error code: %lu\n", rootFolder, fstream->rpath, GetLastError());
         goto exit_error;
     }
 
     snprintf(fstream->fpath, MAX_PATH, "%s%s%s", rootFolder, fstream->rpath, fstream->fname);  
 
     if(FileExists(fstream->fpath)){
-        fprintf(stderr, "File \"%s\" already exits\n", fstream->fpath);
+        fprintf(stderr, "ERROR: init_file_stream - File \"%s\" already exits! Skipping...\n", fstream->fpath);
         fstream->fstream_err = STREAM_ERR_FILENAME_EXIST;
         goto exit_error;
     }
@@ -282,9 +282,7 @@ exit_error:
     close_file_stream(fstream);
     LeaveCriticalSection(&fstream->lock);
     return RET_VAL_ERROR;
-
 }
-
 
 // Process received file metadata frame
 int handle_file_metadata(Client *client, UdpFrame *frame) {
@@ -292,7 +290,7 @@ int handle_file_metadata(Client *client, UdpFrame *frame) {
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     if(client == NULL){
-        fprintf(stdout, "Received frame for non existing client context!\n");
+        fprintf(stdout, "ERROR: Received frame for non existing client context!\n");
         return RET_VAL_ERROR;
     }
 
@@ -307,6 +305,7 @@ int handle_file_metadata(Client *client, UdpFrame *frame) {
 
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
+    PoolEntryAckFrame *entry = NULL;
 
     if(ht_search_id(ht_fid, recv_session_id, recv_file_id, ID_WAITING_FRAGMENTS) == TRUE){
         fprintf(stderr, "Received duplicated metadata frame Seq: %llu for fID: %u sID %u\n", recv_seq_num, recv_file_id, recv_session_id);
@@ -322,7 +321,7 @@ int handle_file_metadata(Client *client, UdpFrame *frame) {
 
     ServerFileStream *fstream = get_free_file_stream();
     if(fstream == NULL){
-        fprintf(stderr, "All server file transfers streams are in use!\n");
+        // fprintf(stderr, "All server file transfers streams are in use!\n");
         op_code = ERR_RESOURCE_LIMIT;
         goto exit_err; 
     }
@@ -341,14 +340,29 @@ int handle_file_metadata(Client *client, UdpFrame *frame) {
         goto exit_err;
     }
 
-    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_METADATA, client->srv_socket, &client->client_addr);
-    push_ack(queue_priority_ack, &ack_entry);
+    entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+    if(!entry){
+        fprintf(stderr, "ERROR: Failed to allocate memory in the pool for metadata ack frame\n");
+        LeaveCriticalSection(&client->lock);
+        return RET_VAL_ERROR;
+    }
+    construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_METADATA, server->socket, &client->client_addr);
+    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
 
 exit_err:
-    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(queue_priority_ack, &ack_entry);
+
+    entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+    if(!entry){
+        fprintf(stderr, "ERROR: Failed to allocate memory in the pool for metadata ack error frame\n");
+        LeaveCriticalSection(&client->lock);
+        return RET_VAL_ERROR;
+    }
+    construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
+    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }
@@ -374,6 +388,7 @@ int handle_file_fragment(Client *client, UdpFrame *frame){
 
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
+    PoolEntryAckFrame *entry = NULL;
 
     if(ht_search_id(ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received fragment frame Seq: %llu; for old completed fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
@@ -422,23 +437,32 @@ int handle_file_fragment(Client *client, UdpFrame *frame){
 
     file_attach_fragment_to_chunk(fstream, frame->payload.file_fragment.bytes, recv_fragment_offset, recv_fragment_size);
 
-    PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+    entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
     if(!entry){
-        fprintf(stderr, "Failed to allocate memory in the pool for ack frame\n");
+        fprintf(stderr, "ERROR: Failed to allocate memory in the pool for file fragment ack frame\n");
         LeaveCriticalSection(&client->lock);
         return RET_VAL_ERROR;
     }
-
     construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
-    push_ack_frame(queue_ack_udp_frame, (uintptr_t)entry);
+    push_ack_frame(queue_file_ack_udp_frame, (uintptr_t)entry);
    
     LeaveCriticalSection(&client->lock);
 
     return RET_VAL_SUCCESS;
 
 exit_err:
-    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(queue_priority_ack, &ack_entry);
+
+    entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+    if(!entry){
+        fprintf(stderr, "ERROR: Failed to allocate memory in the pool for file fragment ack error frame\n");
+        LeaveCriticalSection(&client->lock);
+        return RET_VAL_ERROR;
+    }
+    construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
+    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+    
+    LeaveCriticalSection(&client->lock);
+    return RET_VAL_ERROR;
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }
@@ -457,11 +481,12 @@ int handle_file_end(Client *client, UdpFrame *frame){
     client->last_activity_time = time(NULL);
 
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
-    uint32_t recv_session_id = _ntohl(frame->header.session_id); // Session ID from frame header
-    uint32_t recv_file_id = _ntohl(frame->payload.file_fragment.file_id); // File ID from fragment payload
+    uint32_t recv_session_id = _ntohl(frame->header.session_id);
+    uint32_t recv_file_id = _ntohl(frame->payload.file_fragment.file_id);
 
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
+    PoolEntryAckFrame *entry = NULL;
 
     if(ht_search_id(ht_fid, recv_session_id, recv_file_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received file end frame for completed file Seq: %llu; sID: %u; fID: %u;\n", recv_seq_num, recv_session_id, recv_file_id);
@@ -481,18 +506,31 @@ int handle_file_end(Client *client, UdpFrame *frame){
     }
     fstream->file_hash_received = TRUE;
     fstream->file_end_frame_seq_num = recv_seq_num;
-
-    if(fstream->file_complete){
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_END, client->srv_socket, &client->client_addr);
-        push_ack(queue_priority_ack, &ack_entry);
-    }
  
+    if(fstream->file_complete){
+        entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+        if(!entry){
+            fprintf(stderr, "ERROR: Failed to allocate memory in the pool for file_end ack frame\n");
+            LeaveCriticalSection(&client->lock);
+            return RET_VAL_ERROR;
+        }
+        construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_END, server->socket, &client->client_addr);
+        push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+    }
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
 
 exit_err:
-    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(queue_priority_ack, &ack_entry);
+
+    entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+    if(!entry){
+        fprintf(stderr, "ERROR: Failed to allocate memory in the pool for file fragment ack error frame\n");
+        LeaveCriticalSection(&client->lock);
+        return RET_VAL_ERROR;
+    }
+    construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
+    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }

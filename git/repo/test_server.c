@@ -31,23 +31,33 @@ ClientListData ClientList;
 
 HANDLE hthread_recv_send_frame[SERVER_RECV_SEND_FRAME_WRK_THREADS];
 HANDLE hthread_process_frame[SERVER_PROCESS_FRAME_WRK_THREAS];
-HANDLE hthread_ack_frame;
-HANDLE hthread_send_priority_ack;
-HANDLE hthread_send_message_ack[SERVER_ACK_MESSAGE_FRAMES_THREADS];
-HANDLE hthread_send_file_ack[SERVER_ACK_FILE_FRAMES_THREADS];
+
 HANDLE hthread_send_file_ack_frame[SERVER_ACK_FILE_FRAMES_THREADS];
+HANDLE hthread_send_message_ack_frame[SERVER_ACK_MESSAGE_FRAMES_THREADS];
+HANDLE hthread_send_priority_ack_frame[SERVER_ACK_FILE_FRAMES_THREADS];
+
 HANDLE hthread_client_timeout;
 HANDLE hthread_file_stream[MAX_SERVER_ACTIVE_FSTREAMS];
 HANDLE hthread_server_command;
+
+HANDLE hthread_pop_send_frame;
+HANDLE hthread_pop_send_prio_frame;
+HANDLE hthread_pop_send_ctrl_frame;
 
 const char *server_ip = "10.10.10.1";
 
 // Thread functions
 DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam);
 DWORD WINAPI func_thread_process_frame(LPVOID lpParam);
-DWORD WINAPI thread_proc_send_priority_ack(LPVOID lpParam);
-DWORD WINAPI thread_proc_send_message_ack(LPVOID lpParam);
+
 DWORD WINAPI thread_proc_send_file_ack_frame(LPVOID lpParam);
+DWORD WINAPI thread_proc_send_message_ack_frame(LPVOID lpParam);
+DWORD WINAPI thread_proc_send_priority_ack_frame(LPVOID lpParam);
+
+DWORD WINAPI thread_proc_pop_send_frame(LPVOID lpParam);
+DWORD WINAPI thread_proc_pop_send_prio_frame(LPVOID lpParam);
+DWORD WINAPI thread_proc_pop_send_ctrl_frame(LPVOID lpParam);
+
 DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam);
 DWORD WINAPI thread_proc_file_stream(LPVOID lpParam);
 DWORD WINAPI thread_proc_server_command(LPVOID lpParam);
@@ -142,8 +152,7 @@ static int init_server_buffers(){
 
     init_queue_frame(queue_frame, SERVER_SIZE_QUEUE_FRAME);
     init_queue_frame(queue_priority_frame, SERVER_SIZE_QUEUE_PRIORITY_FRAME);
-    init_queue_ack(mqueue_ack, SERVER_SIZE_MQUEUE_ACK);
-    init_queue_ack(queue_priority_ack, SERVER_SIZE_QUEUE_PRIORITY_ACK);
+
     init_queue_fstream(queue_fstream, MAX_SERVER_ACTIVE_FSTREAMS);
     init_ht_id(ht_fid);
     init_ht_id(ht_mid);
@@ -152,7 +161,14 @@ static int init_server_buffers(){
     init_pool(pool_iocp_recv_context, sizeof(IOCP_CONTEXT), IOCP_RECV_MEM_POOL_BLOCKS);
 
     init_pool(pool_queue_ack_udp_frame, sizeof(PoolEntryAckFrame), 32768);
-    init_queue_ack_frame(queue_ack_udp_frame, 32768);
+    init_queue_ack_frame(queue_file_ack_udp_frame, 32768);
+    init_queue_ack_frame(queue_message_ack_udp_frame, 1024);
+    init_queue_ack_frame(queue_priority_ack_udp_frame, 256);
+
+    init_s_pool(pool_send_frame, sizeof(PoolEntrySendFrame), 128);
+    init_queue_send_frame(queue_send_frame, 128);
+    init_queue_send_frame(queue_send_prio_frame, 128);
+    init_queue_send_frame(queue_send_ctrl_frame, 128);
 
     for(int i = 0; i < MAX_CLIENTS; i++){
         InitializeCriticalSection(&client_list->client[i].lock);
@@ -207,25 +223,6 @@ static int start_threads() {
         }
     }
 
-    hthread_send_priority_ack = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_priority_ack, NULL, 0, NULL);
-    if (hthread_send_priority_ack == NULL) {
-        fprintf(stderr, "Failed to create send ack thread. Error: %d\n", GetLastError());
-        return RET_VAL_ERROR;
-    }
-    for(int i = 0; i < SERVER_ACK_MESSAGE_FRAMES_THREADS; i++){
-        hthread_send_message_ack[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_message_ack, NULL, 0, NULL);
-        if (hthread_send_message_ack[i] == NULL) {
-            fprintf(stderr, "Failed to create send ack thread. Error: %d\n", GetLastError());
-            return RET_VAL_ERROR;
-        }
-    }
-    // for(int i = 0; i < SERVER_ACK_FILE_FRAMES_THREADS; i++){
-    //     hthread_send_file_ack[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_file_ack, NULL, 0, NULL);
-    //     if (hthread_send_file_ack[i] == NULL) {
-    //         fprintf(stderr, "Failed to create send ack thread. Error: %d\n", GetLastError());
-    //         return RET_VAL_ERROR;
-    //     }
-    // }
     for(int i = 0; i < SERVER_ACK_FILE_FRAMES_THREADS; i++){
         hthread_send_file_ack_frame[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_file_ack_frame, NULL, 0, NULL);
         if (hthread_send_file_ack_frame[i] == NULL) {
@@ -233,6 +230,38 @@ static int start_threads() {
             return RET_VAL_ERROR;
         }
     }
+    for(int i = 0; i < SERVER_ACK_MESSAGE_FRAMES_THREADS; i++){
+        hthread_send_message_ack_frame[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_message_ack_frame, NULL, 0, NULL);
+        if (hthread_send_message_ack_frame[i] == NULL) {
+            fprintf(stderr, "Failed to create send message ack frame thread. Error: %d\n", GetLastError());
+            return RET_VAL_ERROR;
+        }
+    }
+    for(int i = 0; i < SERVER_ACK_FILE_FRAMES_THREADS; i++){
+        hthread_send_priority_ack_frame[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_send_priority_ack_frame, NULL, 0, NULL);
+        if (hthread_send_priority_ack_frame[i] == NULL) {
+            fprintf(stderr, "Failed to create send ack frame thread. Error: %d\n", GetLastError());
+            return RET_VAL_ERROR;
+        }
+    }
+
+    hthread_pop_send_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_pop_send_frame, &client_list, 0, NULL);
+    if (hthread_pop_send_frame == NULL) {
+        fprintf(stderr, "Failed to create hthread_pop_send_frame. Error: %d\n", GetLastError());
+        return RET_VAL_ERROR;
+    }
+    hthread_pop_send_prio_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_pop_send_prio_frame, &client_list, 0, NULL);
+    if (hthread_pop_send_prio_frame == NULL) {
+        fprintf(stderr, "Failed to create hthread_pop_send_frame. Error: %d\n", GetLastError());
+        return RET_VAL_ERROR;
+    }
+    hthread_pop_send_ctrl_frame = (HANDLE)_beginthreadex(NULL, 0, thread_proc_pop_send_ctrl_frame, &client_list, 0, NULL);
+    if (hthread_pop_send_ctrl_frame == NULL) {
+        fprintf(stderr, "Failed to create hthread_pop_send_frame. Error: %d\n", GetLastError());
+        return RET_VAL_ERROR;
+    }
+
+
 
 
     hthread_client_timeout = (HANDLE)_beginthreadex(NULL, 0, thread_proc_client_timeout, &client_list, 0, NULL);
@@ -240,6 +269,7 @@ static int start_threads() {
         fprintf(stderr, "Failed to create client timeout thread. Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
+
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         hthread_file_stream[i] = (HANDLE)_beginthreadex(NULL, 0, thread_proc_file_stream, NULL, 0, NULL);
         if (hthread_file_stream[i] == NULL) {
@@ -570,6 +600,10 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
     char src_ip[INET_ADDRSTRLEN];   // Buffer to store the human-readable string representation of the source IP address.
     uint16_t src_port;              // Stores the source port number.
 
+    PoolEntryAckFrame *entry = NULL;
+    PoolEntrySendFrame *pool_send_entry = NULL;
+    int res = RET_VAL_ERROR;
+
     HANDLE events[2] = {queue_priority_frame->push_semaphore,
                         queue_frame->push_semaphore,
                         };
@@ -628,15 +662,37 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
             EnterCriticalSection(&client->lock);
             client->last_activity_time = now;
             LeaveCriticalSection(&client->lock);            
-            send_connect_response(DEFAULT_CONNECT_REQUEST_SEQ, 
+            // send_connect_response(DEFAULT_CONNECT_REQUEST_SEQ, 
+            //                         client->sid, 
+            //                         server->session_timeout, 
+            //                         server->server_status, 
+            //                         server->name, 
+            //                         server->socket, 
+            //                         &client->client_addr,
+            //                         pool_iocp_send_context
+            //                     );
+
+            pool_send_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
+            if(!pool_send_entry){
+                fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for connect \
+                                        response frame frame. Should never do since it has semaphore to block when full");
+                continue;
+            }
+            res = construct_connect_response_frame(pool_send_entry,
+                                    DEFAULT_CONNECT_REQUEST_SEQ, 
                                     client->sid, 
                                     server->session_timeout, 
                                     server->server_status, 
                                     server->name, 
-                                    server->socket, 
-                                    &client->client_addr,
-                                    pool_iocp_send_context
-                                );
+                                    server->socket, &client->client_addr);
+
+            if(res == RET_VAL_ERROR){
+                fprintf(stderr, "CRITICAL ERROR: construct_file_metadata() returned RET_VAL_ERROR. \
+                                        Should not happen since inputs are validated before calling");
+                continue;
+            }
+            push_send_frame(queue_send_prio_frame, (uintptr_t)pool_send_entry);
+
             fprintf(stdout, "Client %s:%d Requested connection. Responding to connect request with Session ID: %u\n", 
                                                     client->ip, client->port, client->sid);
             continue;
@@ -652,15 +708,38 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
             EnterCriticalSection(&client->lock);
             client->last_activity_time = now;
             LeaveCriticalSection(&client->lock);
-            send_connect_response(DEFAULT_CONNECT_REQUEST_SEQ, 
+            // send_connect_response(DEFAULT_CONNECT_REQUEST_SEQ, 
+            //                         client->sid, 
+            //                         server->session_timeout, 
+            //                         server->server_status, 
+            //                         server->name, 
+            //                         server->socket, 
+            //                         &client->client_addr,
+            //                         pool_iocp_send_context
+            //                     );
+
+            pool_send_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
+            if(!pool_send_entry){
+                fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for connect \
+                                        response frame frame. Should never do since it has semaphore to block when full");
+                continue;
+            }
+            res = construct_connect_response_frame(pool_send_entry,
+                                    DEFAULT_CONNECT_REQUEST_SEQ, 
                                     client->sid, 
                                     server->session_timeout, 
                                     server->server_status, 
                                     server->name, 
-                                    server->socket, 
-                                    &client->client_addr,
-                                    pool_iocp_send_context
-                                );
+                                    server->socket, &client->client_addr);
+
+            if(res == RET_VAL_ERROR){
+                fprintf(stderr, "CRITICAL ERROR: construct_file_metadata() returned RET_VAL_ERROR. \
+                                        Should not happen since inputs are validated before calling");
+                continue;
+            }
+            push_send_frame(queue_send_prio_frame, (uintptr_t)pool_send_entry);
+
+
             fprintf(stdout, "Client %s:%d Requested re-connection. Responding to re-connect request with Session ID: %u\n", 
                                                     client->ip, client->port, client->sid);
             continue;
@@ -689,8 +768,14 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
                 client->last_activity_time = now;
                 LeaveCriticalSection(&client->lock);
 
-                new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_KEEP_ALIVE, server->socket, &client->client_addr);
-                push_ack(queue_priority_ack, &ack_entry);
+                entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+                if(!entry){
+                    fprintf(stderr, "ERROR: Failed to allocate memory in the pool for metadata ack frame\n");
+                    LeaveCriticalSection(&client->lock);
+                    return RET_VAL_ERROR;
+                }
+                construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_KEEP_ALIVE, server->socket, &client->client_addr);
+                push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
 
                 break;
 
@@ -712,8 +797,15 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
 
             case FRAME_TYPE_DISCONNECT:
                 fprintf(stdout, "Client %s:%d with session ID: %d requested disconnect...\n", client->ip, client->port, client->sid);
-                new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_DISCONNECT, server->socket, &client->client_addr);
-                push_ack(queue_priority_ack, &ack_entry);
+                
+                entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+                if(!entry){
+                    fprintf(stderr, "ERROR: Failed to allocate memory in the pool for metadata ack frame\n");
+                    LeaveCriticalSection(&client->lock);
+                    return RET_VAL_ERROR;
+                }
+                construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_DISCONNECT, server->socket, &client->client_addr);
+                push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
                 remove_client(client->slot);
                 break;
 
@@ -727,58 +819,14 @@ DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
     return 0;
 }
 // --- Ack Thread functions ---
-DWORD WINAPI thread_proc_send_priority_ack(LPVOID lpParam){
 
-    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
-
-    QueueAckEntry ack_entry;
-
-    while (server->server_status == STATUS_READY) {
-        // DWORD result = WaitForMultipleObjects(3, events, FALSE, INFINITE);
-        DWORD result = WaitForSingleObject(queue_priority_ack->push_semaphore, INFINITE);
-        if (result == WAIT_OBJECT_0) {
-            if (pop_ack(queue_priority_ack, &ack_entry) == RET_VAL_ERROR) {
-                fprintf(stderr, "CRITICAL ERROR: Popping from ack priority queue RET_VAL_ERROR\n");
-                continue;
-            }
-        } else {
-            fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore priority ack queues: %lu\n", result);
-            continue;
-        }
-        send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr, pool_iocp_send_context);
-    }
-    _endthreadex(0);
-    return 0;
-}
-DWORD WINAPI thread_proc_send_message_ack(LPVOID lpParam){
-
-    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
-
-    QueueAckEntry ack_entry;
-
-    while (server->server_status == STATUS_READY) {
-        DWORD result = WaitForSingleObject(mqueue_ack->push_semaphore, INFINITE);
-        if (result == WAIT_OBJECT_0) {
-            if (pop_ack(mqueue_ack, &ack_entry) == RET_VAL_ERROR) {
-                fprintf(stderr, "CRITICAL ERROR: Popping from message ack queue RET_VAL_ERROR\n");
-                continue;
-            }
-        } else {
-            fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore message ack queues: %lu\n", result);
-            continue;
-        }
-        send_ack(ack_entry.seq, ack_entry.sid, ack_entry.op_code, ack_entry.src_socket, &ack_entry.dest_addr, pool_iocp_send_context);
-    }
-    _endthreadex(0);
-    return 0;
-}
 DWORD WINAPI thread_proc_send_file_ack_frame(LPVOID lpParam){
 
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
     while (server->server_status == STATUS_READY) {
-        DWORD result = WaitForSingleObject(queue_ack_udp_frame->push_semaphore, INFINITE);
-        PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pop_ack_frame(queue_ack_udp_frame);
+        DWORD result = WaitForSingleObject(queue_file_ack_udp_frame->push_semaphore, INFINITE);
+        PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pop_ack_frame(queue_file_ack_udp_frame);
         if (result == WAIT_OBJECT_0) {
             if(!entry){
                 fprintf(stderr,"CRITICAL ERROR: pop_ack_frame() null pointer from queue ack frame");
@@ -794,6 +842,107 @@ DWORD WINAPI thread_proc_send_file_ack_frame(LPVOID lpParam){
     _endthreadex(0);
     return 0;
 }
+DWORD WINAPI thread_proc_send_message_ack_frame(LPVOID lpParam){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
+    while (server->server_status == STATUS_READY) {
+        DWORD result = WaitForSingleObject(queue_message_ack_udp_frame->push_semaphore, INFINITE);
+        PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pop_ack_frame(queue_message_ack_udp_frame);
+        if (result == WAIT_OBJECT_0) {
+            if(!entry){
+                fprintf(stderr,"CRITICAL ERROR: pop_ack_frame() null pointer from queue message ack frame");
+                continue;
+            }
+            send_pool_ack_frame(entry, pool_iocp_send_context);
+            pool_free(pool_queue_ack_udp_frame, entry);
+        } else {
+            fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore queue message ack frame: %lu\n", result);
+            continue;
+        }
+    }
+    _endthreadex(0);
+    return 0;
+}
+DWORD WINAPI thread_proc_send_priority_ack_frame(LPVOID lpParam){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
+    while (server->server_status == STATUS_READY) {
+        DWORD result = WaitForSingleObject(queue_priority_ack_udp_frame->push_semaphore, INFINITE);
+        PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pop_ack_frame(queue_priority_ack_udp_frame);
+        if (result == WAIT_OBJECT_0) {
+            if(!entry){
+                fprintf(stderr,"CRITICAL ERROR: pop_ack_frame() null pointer from queue priority ack frame");
+                continue;
+            }
+            send_pool_ack_frame(entry, pool_iocp_send_context);
+            pool_free(pool_queue_ack_udp_frame, entry);
+        } else {
+            fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore queue priority ack frame: %lu\n", result);
+            continue;
+        }
+    }
+    _endthreadex(0);
+    return 0;
+}
+
+
+DWORD WINAPI thread_proc_pop_send_frame(LPVOID lpParam){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
+    while (server->server_status == STATUS_READY) {
+        PoolEntrySendFrame *entry = (PoolEntrySendFrame*)pop_send_frame(queue_send_frame);
+        if(!entry){
+            fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from tx_frame?\n");
+            continue;
+        }
+        send_pool_frame(entry, pool_iocp_send_context);
+        s_pool_free(pool_send_frame, (void*)entry);
+   }
+    _endthreadex(0);    
+    return 0;
+}
+DWORD WINAPI thread_proc_pop_send_prio_frame(LPVOID lpParam){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
+    while (server->server_status == STATUS_READY) {
+        PoolEntrySendFrame *entry = (PoolEntrySendFrame*)pop_send_frame(queue_send_prio_frame);
+        if(!entry){
+            fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from tx_frame?\n");
+            continue;
+        }
+        send_pool_frame(entry, pool_iocp_send_context);
+        s_pool_free(pool_send_frame, (void*)entry);
+   }
+    _endthreadex(0);    
+    return 0;
+}
+DWORD WINAPI thread_proc_pop_send_ctrl_frame(LPVOID lpParam){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
+
+    while (server->server_status == STATUS_READY) {
+        PoolEntrySendFrame *entry = (PoolEntrySendFrame*)pop_send_frame(queue_send_ctrl_frame);
+        if(!entry){
+            fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from tx_frame?\n");
+            continue;
+        }
+        send_pool_frame(entry, pool_iocp_send_context);
+        s_pool_free(pool_send_frame, (void*)entry);
+   }
+    _endthreadex(0);    
+    return 0;
+}
+
+
+
+
+
+
+
 // --- Client timeout thread function ---
 DWORD WINAPI thread_proc_client_timeout(LPVOID lpParam){
 
@@ -995,11 +1144,16 @@ DWORD WINAPI thread_proc_file_stream(LPVOID lpParam) {
             if(fstream->file_complete){           
                 
                 ht_update_id_status(ht_fid, fstream->sid, fstream->fid, ID_RECV_COMPLETE);
-                // fprintf(stdout, "Receved file: '%s'\n", fstream->fname);
-
-                QueueAckEntry ack_entry;
-                new_ack_entry(&ack_entry, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, server->socket, &fstream->client_addr);
-                push_ack(queue_priority_ack, &ack_entry);
+ 
+                PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+                if(!entry){
+                    fprintf(stderr, "ERROR: Failed to allocate memory in the pool for file_end ack frame\n");
+                    close_file_stream(fstream);
+                    LeaveCriticalSection(&fstream->lock);
+                    break;
+                }
+                construct_ack_frame(entry, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, server->socket, &fstream->client_addr);
+                push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
 
                 close_file_stream(fstream);
                 LeaveCriticalSection(&fstream->lock);
@@ -1166,12 +1320,12 @@ int main() {
 
         Sleep(250); // Prevent busy-waiting
    
-        // fprintf(stdout, "\r\033[2K-- Pending: %d; FreeSend: %llu; FreeRecv: %llu; FreeAckFrame: %llu", 
-        //                     buffers.queue_fstream.pending,
-        //                     buffers.pool_iocp_send_context.free_blocks,
-        //                     buffers.pool_iocp_recv_context.free_blocks,
-        //                     buffers.pool_queue_ack_udp_frame.free_blocks
-        //                     );
+        fprintf(stdout, "\r\033[2K-- Pending: %d; FreeSend: %llu; FreeRecv: %llu; FreeAckFrame: %llu", 
+                            Buffers.queue_frame.pending,
+                            Buffers.pool_iocp_send_context.free_blocks,
+                            Buffers.pool_iocp_recv_context.free_blocks,
+                            Buffers.pool_queue_ack_udp_frame.free_blocks
+                            );
 
     }
     // --- Server Shutdown Sequence ---

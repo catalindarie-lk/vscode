@@ -21,13 +21,13 @@
 #endif
 
 #define MAX_SERVER_ACTIVE_FSTREAMS              10
-#define SERVER_ACK_FILE_FRAMES_THREADS          20
+#define SERVER_ACK_FILE_FRAMES_THREADS          10
 
 #define MAX_SERVER_ACTIVE_MSTREAMS              1
 #define SERVER_ACK_MESSAGE_FRAMES_THREADS       1
 
-#define SERVER_RECV_SEND_FRAME_WRK_THREADS      20
-#define SERVER_PROCESS_FRAME_WRK_THREAS         20
+#define SERVER_RECV_SEND_FRAME_WRK_THREADS      1
+#define SERVER_PROCESS_FRAME_WRK_THREAS         10
 
 // --- Constants 
 #define SERVER_NAME                             "lkdc UDP Text/File Transfer Server"
@@ -47,8 +47,8 @@
 #define BLOCK_SIZE_CHUNK                        ((uint64_t)(FILE_FRAGMENT_SIZE * 64))
 #define BLOCK_COUNT_CHUNK                       ((uint64_t)(1024))
 
-#define SERVER_SIZE_QUEUE_FRAME                 (8192 * MAX_CLIENTS)
-#define SERVER_SIZE_QUEUE_PRIORITY_FRAME        1024
+#define SERVER_SIZE_QUEUE_FRAME                 (1024 + 256 * MAX_SERVER_ACTIVE_FSTREAMS)
+#define SERVER_SIZE_QUEUE_PRIORITY_FRAME        256
 
 #define SERVER_SIZE_FQUEUE_ACK                  8192
 #define SERVER_SIZE_MQUEUE_ACK                  1024
@@ -73,15 +73,18 @@
     QueueFstream *queue_fstream = &((buffers_obj).queue_fstream); \
     HashTableIdentifierNode *ht_fid = &((buffers_obj).ht_fid); \
     HashTableIdentifierNode *ht_mid = &((buffers_obj).ht_mid); \
-    QueueAck *mqueue_ack = &((buffers_obj).mqueue_ack); \
-    QueueAck *queue_priority_ack = &((buffers_obj).queue_priority_ack); \
     MemPool *pool_queue_ack_udp_frame = &((buffers_obj).pool_queue_ack_udp_frame); \
-    QueueAckUpdFrame *queue_ack_udp_frame = &((buffers_obj).queue_ack_udp_frame); \
+    QueueAckUpdFrame *queue_file_ack_udp_frame = &((buffers_obj).queue_file_ack_udp_frame); \
+    QueueAckUpdFrame *queue_message_ack_udp_frame = &((buffers_obj).queue_message_ack_udp_frame); \
+    QueueAckUpdFrame *queue_priority_ack_udp_frame = &((buffers_obj).queue_priority_ack_udp_frame); \
+    s_MemPool *pool_send_frame = &((buffers_obj).pool_send_frame); \
+    QueueSendFrame *queue_send_frame = &((buffers_obj).queue_send_frame); \
+    QueueSendFrame *queue_send_prio_frame = &((buffers_obj).queue_send_prio_frame); \
+    QueueSendFrame *queue_send_ctrl_frame = &((buffers_obj).queue_send_ctrl_frame); \
 
 // end of #define PARSE_GLOBAL_DATA // End marker for the macro definition
 
-
-
+ 
 enum Status{
     STATUS_NONE = 0,
     STATUS_BUSY = 1,
@@ -256,19 +259,22 @@ typedef struct {
     QueueFrame queue_frame;
     QueueFrame queue_priority_frame;
 
-    QueueAck mqueue_ack;
-    // QueueAck fqueue_ack;
-    QueueAck queue_priority_ack;
+    // QueueAck mqueue_ack;
+    // QueueAck queue_priority_ack;
 
     QueueFstream queue_fstream;
 
     MemPool pool_queue_ack_udp_frame;
-    QueueAckUpdFrame queue_ack_udp_frame;
+    QueueAckUpdFrame queue_file_ack_udp_frame;
+    QueueAckUpdFrame queue_message_ack_udp_frame;
+    QueueAckUpdFrame queue_priority_ack_udp_frame;
 
+    s_MemPool pool_send_frame;
 
-    HANDLE test_semaphore;
+    QueueSendFrame queue_send_frame;
+    QueueSendFrame queue_send_prio_frame;
+    QueueSendFrame queue_send_ctrl_frame;
 
-    // HashTableFramePendingAck ht_frame;
     HashTableIdentifierNode ht_fid;
     HashTableIdentifierNode ht_mid;
 }ServerBuffers;

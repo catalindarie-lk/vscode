@@ -25,6 +25,11 @@ int construct_connect_request(PoolEntrySendFrame *entry,
                             const SOCKET src_socket, const struct sockaddr_in *dest_addr){
     
     UdpFrame *frame = &entry->frame;
+
+    if(!client_name){
+        fprintf(stderr, "CRITICAL ERROR: send_connect_request - Invalid client_name pointer (NULL).\n");
+        return RET_VAL_ERROR;
+    }
     
     frame->header.start_delimiter = _htons(FRAME_DELIMITER);
     frame->header.frame_type = FRAME_TYPE_CONNECT_REQUEST;
@@ -33,7 +38,7 @@ int construct_connect_request(PoolEntrySendFrame *entry,
     frame->payload.connection_request.client_id = _htonl(client_id);
     frame->payload.connection_request.flags = flags;
 
-    snprintf(frame->payload.connection_request.client_name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, client_name);
+    snprintf(frame->payload.connection_request.client_name, sizeof(frame->payload.connection_request.client_name), "%s", client_name);
 
     // Calculate the checksum for the frame
     frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(ConnectRequestPayload)));
@@ -190,23 +195,10 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
     frame->payload.file_metadata.file_id = _htonl(file_id);
     frame->payload.file_metadata.file_size = _htonll(file_size);
 
-    // --- Copy rpath to payload buffer ---
-    // At this point, we've validated:
-    // 1. rpath is not NULL.
-    // 2. rpath_len matches strlen(rpath).
-    // 3. rpath_len is strictly less than sizeof(buffer), so it will fit and be null-terminated.
-    // So, a direct copy with _snprintf_s is now safe and guaranteed not to truncate.
-    _snprintf_s(frame->payload.file_metadata.rpath, sizeof(frame->payload.file_metadata.rpath),
-                rpath_len, // Use rpath_len as the max count for _snprintf_s. This ensures we copy exactly rpath_len characters.
-                "%s", rpath);
-    frame->payload.file_metadata.rpath_len = _htonl(rpath_len); // Send the exact content length
-
-    // --- Copy fname to payload buffer ---
-    // Similar validations apply.
-    _snprintf_s(frame->payload.file_metadata.fname, sizeof(frame->payload.file_metadata.fname),
-                fname_len, // Use fname_len as the max count for _snprintf_s.
-                "%s", fname);
-    frame->payload.file_metadata.fname_len = _htonl(fname_len); // Send the exact content length
+    frame->payload.file_metadata.rpath_len = _htonl(rpath_len);
+    snprintf(frame->payload.file_metadata.rpath, sizeof(frame->payload.file_metadata.rpath), "%s", rpath);
+    frame->payload.file_metadata.fname_len = _htonl(fname_len);
+    snprintf(frame->payload.file_metadata.fname, sizeof(frame->payload.file_metadata.fname), "%s", fname);
 
     frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));
 

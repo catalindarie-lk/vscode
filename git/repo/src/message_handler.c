@@ -51,23 +51,24 @@ static int msg_validate_fragment(Client *client, const int index, UdpFrame *fram
 
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
+    PoolEntryAckFrame *entry = NULL;
 
     BOOL is_duplicate_fragment = mstream->bitmap && mstream->buffer &&
                                     check_fragment_received(mstream->bitmap, recv_fragment_offset, TEXT_FRAGMENT_SIZE);
 
     if (is_duplicate_fragment == TRUE) {
-        fprintf(stderr, "Received duplicate text message fragment - Session ID: %d, Message ID: %d, Offset: %d,\n", client->sid, recv_message_id, recv_fragment_offset);
+        fprintf(stderr, "ERROR: Received duplicate text message fragment - Session ID: %d, Message ID: %d, Offset: %d,\n", client->sid, recv_message_id, recv_fragment_offset);
         op_code = ERR_DUPLICATE_FRAME;
         goto exit_err;
 
     }
     if(recv_fragment_offset >= recv_message_len){
-        fprintf(stderr, "Fragment offset past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->sid, recv_message_id, recv_fragment_offset, recv_fragment_len);
+        fprintf(stderr, "ERROR: Fragment offset past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->sid, recv_message_id, recv_fragment_offset, recv_fragment_len);
         op_code = ERR_MALFORMED_FRAME;
         goto exit_err;
     }
     if ((recv_fragment_offset + recv_fragment_len) > recv_message_len || recv_fragment_len > TEXT_FRAGMENT_SIZE) {
-        fprintf(stderr, "Fragment len past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->sid, recv_message_id, recv_fragment_offset, recv_fragment_len);
+        fprintf(stderr, "ERROR: Fragment len past message bounds! - Session ID: %d, Message ID: %d, Offset: %d, Length: %d\n", client->sid, recv_message_id, recv_fragment_offset, recv_fragment_len);
         op_code = ERR_MALFORMED_FRAME;
         goto exit_err;
     }
@@ -77,8 +78,16 @@ static int msg_validate_fragment(Client *client, const int index, UdpFrame *fram
     return RET_VAL_SUCCESS;
 
 exit_err:
-    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(mqueue_ack, &ack_entry);
+
+    entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+    if(!entry){
+        fprintf(stderr, "ERROR: Failed to allocate memory in the pool for message fragment ack error frame\n");
+        LeaveCriticalSection(&client->lock);
+        return RET_VAL_ERROR;
+    }
+    construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
+    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+
     LeaveCriticalSection(&mstream->lock);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
@@ -113,7 +122,7 @@ static int msg_init_stream(MessageStream *mstream, const uint32_t session_id, co
 
     mstream->bitmap = malloc(mstream->bitmap_entries_count * sizeof(uint64_t));
     if(mstream->bitmap == NULL){
-        fprintf(stderr, "Memory allocation fail for file bitmap!!!\n");
+        fprintf(stderr, "ERROR: Memory allocation fail for file bitmap!!!\n");
         LeaveCriticalSection(&mstream->lock);
         return RET_VAL_ERROR;
     }
@@ -123,18 +132,17 @@ static int msg_init_stream(MessageStream *mstream, const uint32_t session_id, co
     mstream->mid = message_id;
     mstream->buffer = malloc(message_len);
     if(mstream->buffer == NULL){
-        fprintf(stderr, "Failed to allocate memory for message buffer - malloc(message_len)\n");
+        fprintf(stderr, "ERROR: Failed to allocate memory for message buffer - malloc(message_len)\n");
         LeaveCriticalSection(&mstream->lock);
         return RET_VAL_ERROR;
     }
     memset(mstream->buffer, 0, message_len);
 
-
     char messageFolder[MAX_PATH];
     snprintf(messageFolder, MAX_PATH, "%s", SERVER_MESSAGE_TEXT_FILES_FOLDER);
 
     if (CreateAbsoluteFolderRecursive(messageFolder) == FALSE) {
-        fprintf(stderr, "Failed to create recursive path for message folder: \"%s\". Error code: %lu\n", messageFolder, GetLastError());
+        fprintf(stderr, "ERROR: Failed to create recursive path for message folder: \"%s\". Error code: %lu\n", messageFolder, GetLastError());
         LeaveCriticalSection(&mstream->lock);
         return RET_VAL_ERROR;
     }
@@ -155,6 +163,7 @@ static void msg_attach_fragment(MessageStream *mstream, char *fragment_buffer, c
     mstream->chars_received += fragment_len;       
     mark_fragment_received(mstream->bitmap, fragment_offset, TEXT_FRAGMENT_SIZE);
     LeaveCriticalSection(&mstream->lock);
+    return;
 }
 static int msg_check_completion_and_record(MessageStream *mstream) {
     // Check if the message is fully received by verifying total bytes and the fragment bitmap.
@@ -181,7 +190,7 @@ static int msg_check_completion_and_record(MessageStream *mstream) {
  
     if (msg_creation_status != RET_VAL_SUCCESS) {
         // If file creation failed, return an error.
-        fprintf(stderr, "Error: Failed to create output message for file_id %d\n", mstream->mid);
+        fprintf(stderr, "ERROR: Failed to create output message for file_id %d\n", mstream->mid);
         remove(mstream->fnm);
         LeaveCriticalSection(&mstream->lock);
         return RET_VAL_ERROR;
@@ -215,6 +224,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
 
     QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
+    PoolEntryAckFrame *entry = NULL;
 
     if(ht_search_id(ht_mid, recv_session_id, recv_message_id, ID_RECV_COMPLETE) == TRUE){
         fprintf(stderr, "Received file end frame for completed file Seq: %llu; sID: %u; mID: %u;\n", recv_seq_num, recv_session_id, recv_message_id);
@@ -236,9 +246,15 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
             goto exit_err;
         }
 
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, client->srv_socket, &client->client_addr);
-        push_ack(mqueue_ack, &ack_entry);
-        
+        entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+        if(!entry){
+            fprintf(stderr, "ERROR: Failed to allocate memory in the pool for message fragment ack frame\n");
+            LeaveCriticalSection(&client->lock);
+            return RET_VAL_ERROR;
+        }
+        construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
+        push_ack_frame(queue_message_ack_udp_frame, (uintptr_t)entry);
+
         LeaveCriticalSection(&client->lock);
         return RET_VAL_SUCCESS;
 
@@ -275,15 +291,29 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
             goto exit_err;
         }
 
-        new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, client->srv_socket, &client->client_addr);
-        push_ack(mqueue_ack, &ack_entry);
+        entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+        if(!entry){
+            fprintf(stderr, "ERROR: Failed to allocate memory in the pool for message fragment ack frame\n");
+            LeaveCriticalSection(&client->lock);
+            return RET_VAL_ERROR;
+        }
+        construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
+        push_ack_frame(queue_message_ack_udp_frame, (uintptr_t)entry);
 
         LeaveCriticalSection(&client->lock);
         return RET_VAL_SUCCESS;
     }
 exit_err:
-    new_ack_entry(&ack_entry, recv_seq_num, recv_session_id, op_code, client->srv_socket, &client->client_addr);
-    push_ack(mqueue_ack, &ack_entry);
+
+    entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_udp_frame);
+    if(!entry){
+        fprintf(stderr, "ERROR: Failed to allocate memory in the pool for message fragment error ack frame\n");
+        LeaveCriticalSection(&client->lock);
+        return RET_VAL_ERROR;
+    }
+    construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
+    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }

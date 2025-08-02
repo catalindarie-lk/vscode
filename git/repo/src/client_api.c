@@ -68,13 +68,7 @@ void RequestDisconnect(){
         return;
     }
 
-    int res = construct_disconnect_request(send_pool_entry, 
-                                            client->sid,
-                                            client->socket, &client->server_addr);
-    if(res == RET_VAL_ERROR){
-        fprintf(stderr, "CRITICAL ERROR: construct_disconnect_request() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
-        return;
-    }
+    construct_disconnect_request(send_pool_entry, client->sid, client->socket, &client->server_addr);
     push_send_frame(queue_send_ctrl_frame, (uintptr_t)send_pool_entry);
  
     DWORD wait_connection_closed = WaitForSingleObject(client->hevent_connection_closed, DISCONNECT_REQUEST_TIMEOUT_MS);
