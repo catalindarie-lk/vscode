@@ -49,7 +49,6 @@ static int msg_validate_fragment(Client *client, const int index, UdpFrame *fram
     uint32_t recv_fragment_len = _ntohl(frame->payload.text_fragment.fragment_len);
     uint32_t recv_fragment_offset = _ntohl(frame->payload.text_fragment.fragment_offset);
 
-    QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
     PoolEntryAckFrame *entry = NULL;
 
@@ -86,8 +85,10 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
-
+    if(push_frame(queue_priority_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
+        pool_free(pool_queue_ack_udp_frame, entry);
+    }
     LeaveCriticalSection(&mstream->lock);
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
@@ -222,7 +223,6 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
     uint32_t recv_fragment_len = _ntohl(frame->payload.text_fragment.fragment_len);
     uint32_t recv_fragment_offset = _ntohl(frame->payload.text_fragment.fragment_offset);
 
-    QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
     PoolEntryAckFrame *entry = NULL;
 
@@ -253,8 +253,10 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
             return RET_VAL_ERROR;
         }
         construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
-        push_ack_frame(queue_message_ack_udp_frame, (uintptr_t)entry);
-
+        if(push_frame(queue_message_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+            fprintf(stderr, "ERROR: Failed to push to queue message ack.\n");
+            pool_free(pool_queue_ack_udp_frame, entry);
+        }
         LeaveCriticalSection(&client->lock);
         return RET_VAL_SUCCESS;
 
@@ -298,8 +300,10 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
             return RET_VAL_ERROR;
         }
         construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
-        push_ack_frame(queue_message_ack_udp_frame, (uintptr_t)entry);
-
+        if(push_frame(queue_message_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+            fprintf(stderr, "ERROR: Failed to push message ack to queue.\n");
+            pool_free(pool_queue_ack_udp_frame, entry);
+        }
         LeaveCriticalSection(&client->lock);
         return RET_VAL_SUCCESS;
     }
@@ -312,7 +316,10 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+    if(push_frame(queue_priority_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        fprintf(stderr, "ERROR: Failed to push message ack error to queue priority.\n");
+        pool_free(pool_queue_ack_udp_frame, entry);
+    }
 
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;

@@ -196,6 +196,14 @@ typedef struct{
 }PoolEntrySendFrame;
 
 typedef struct{
+    UdpFrame frame; // The UDP frame to be sent
+    // SOCKET src_socket;
+    struct sockaddr_in src_addr; // Destination address for the frame
+    uint32_t frame_size; // Size of the frame in bytes
+    time_t timestamp; // Timestamp when the frame was received
+}PoolEntryRecvFrame;
+
+typedef struct{
     AckUdpFrame frame; // The UDP frame to be sent
     SOCKET src_socket;
     struct sockaddr_in dest_addr; // Destination address for the frame

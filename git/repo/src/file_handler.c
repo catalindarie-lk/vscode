@@ -27,11 +27,14 @@ static ServerFileStream *get_free_file_stream(){
     EnterCriticalSection(&server->fstreams_lock);
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &server->fstream[i];
+        EnterCriticalSection(&fstream->lock);
         if(!fstream->fstream_busy){
             fstream->fstream_busy = TRUE;
+            LeaveCriticalSection(&fstream->lock);
             LeaveCriticalSection(&server->fstreams_lock);
             return fstream;
         }
+        LeaveCriticalSection(&fstream->lock);
     }
     LeaveCriticalSection(&server->fstreams_lock);
     return NULL;
@@ -43,13 +46,13 @@ static ServerFileStream *search_file_stream(const uint32_t session_id, const uin
     EnterCriticalSection(&server->fstreams_lock);
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &server->fstream[i];
-        // EnterCriticalSection(&fstream->lock);
+        EnterCriticalSection(&fstream->lock);
         if(fstream->fstream_busy == TRUE && fstream->sid == session_id && fstream->fid == file_id){
-            // LeaveCriticalSection(&fstream->lock);
+            LeaveCriticalSection(&fstream->lock);
             LeaveCriticalSection(&server->fstreams_lock);
             return fstream;
         }
-        // LeaveCriticalSection(&fstream->lock);
+        LeaveCriticalSection(&fstream->lock);
     }
     LeaveCriticalSection(&server->fstreams_lock);
     return NULL;
@@ -111,7 +114,7 @@ static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragm
     return;
 
 }
-static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame) {
+static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, const struct sockaddr_in *client_addr) {
 
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers) // this macro is defined in server header file (server.h)
 
@@ -181,6 +184,7 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame) {
     // --- End of string copy and validation ---
 
     fstream->fstream_err = STREAM_ERR_NONE;
+    memcpy(&fstream->client_addr, client_addr, sizeof(struct sockaddr_in));
 
     // Calculate total fragments
     fstream->fragment_count = (fstream->fsize + (uint64_t)FILE_FRAGMENT_SIZE - 1ULL) / (uint64_t)FILE_FRAGMENT_SIZE;
@@ -270,7 +274,7 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame) {
     // }
     // fprintf(stdout, "Received file: %s\n", fpath);
 
-    if(push_fstream(queue_fstream, (uintptr_t)fstream) == RET_VAL_ERROR){
+    if(push_fstream(queue_process_fstream, (uintptr_t)fstream) == RET_VAL_ERROR){
         goto exit_error;
     }
 
@@ -303,7 +307,6 @@ int handle_file_metadata(Client *client, UdpFrame *frame) {
     uint32_t recv_file_id = _ntohl(frame->payload.file_metadata.file_id);
     uint64_t recv_file_size = _ntohll(frame->payload.file_metadata.file_size);
 
-    QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
     PoolEntryAckFrame *entry = NULL;
 
@@ -326,9 +329,7 @@ int handle_file_metadata(Client *client, UdpFrame *frame) {
         goto exit_err; 
     }
 
-    memcpy(&fstream->client_addr, &client->client_addr, sizeof(struct sockaddr_in));
-
-    if(init_file_stream(fstream, frame) == RET_VAL_ERROR){
+    if(init_file_stream(fstream, frame, &client->client_addr) == RET_VAL_ERROR){
         fprintf(stderr, "Error initializing file stream\n");
         op_code = ERR_STREAM_INIT;
         goto exit_err;
@@ -347,7 +348,10 @@ int handle_file_metadata(Client *client, UdpFrame *frame) {
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_METADATA, server->socket, &client->client_addr);
-    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+    if(push_frame(queue_priority_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        fprintf(stderr, "ERROR: Failed to push file metadata ack frame to queue\n");
+        pool_free(pool_queue_ack_udp_frame, entry);
+    }
 
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
@@ -361,7 +365,10 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+    if(push_frame(queue_priority_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        fprintf(stderr, "ERROR: Failed to push file metadata ack error frame to queue\n");
+        pool_free(pool_queue_ack_udp_frame, entry);
+    }
 
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
@@ -386,7 +393,6 @@ int handle_file_fragment(Client *client, UdpFrame *frame){
     uint64_t recv_fragment_offset = _ntohll(frame->payload.file_fragment.offset);
     uint32_t recv_fragment_size = _ntohl(frame->payload.file_fragment.size);
 
-    QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
     PoolEntryAckFrame *entry = NULL;
 
@@ -429,7 +435,7 @@ int handle_file_fragment(Client *client, UdpFrame *frame){
         fstream->pool_block_file_chunk[i] = pool_alloc(pool_file_chunk);
         // Check if the memory chunk allocation was successful.
         if(fstream->pool_block_file_chunk[i] == NULL){
-            fprintf(stderr, "Error allocating memory chunk for sID: %u; fID: %u;\n", recv_session_id, recv_file_id);
+            fprintf(stderr, "ERROR: Failed to allocate memory chunk for sID: %u; fID: %u;\n", recv_session_id, recv_file_id);
             op_code = ERR_RESOURCE_LIMIT;
             goto exit_err;
         }
@@ -444,8 +450,11 @@ int handle_file_fragment(Client *client, UdpFrame *frame){
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
-    push_ack_frame(queue_file_ack_udp_frame, (uintptr_t)entry);
-   
+    if(push_frame(queue_file_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        fprintf(stderr, "ERROR: Failed to push file fragment ack frame to queue\n");
+        pool_free(pool_queue_ack_udp_frame, entry);
+    }
+
     LeaveCriticalSection(&client->lock);
 
     return RET_VAL_SUCCESS;
@@ -459,7 +468,10 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+    if(push_frame(queue_priority_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        fprintf(stderr, "ERROR: Failed to push file fragment ack error frame to queue\n");
+        pool_free(pool_queue_ack_udp_frame, entry);
+    }
     
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
@@ -484,7 +496,6 @@ int handle_file_end(Client *client, UdpFrame *frame){
     uint32_t recv_session_id = _ntohl(frame->header.session_id);
     uint32_t recv_file_id = _ntohl(frame->payload.file_fragment.file_id);
 
-    QueueAckEntry ack_entry = {0};
     uint8_t op_code = 0;
     PoolEntryAckFrame *entry = NULL;
 
@@ -515,7 +526,10 @@ int handle_file_end(Client *client, UdpFrame *frame){
             return RET_VAL_ERROR;
         }
         construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_END, server->socket, &client->client_addr);
-        push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
+        if(push_frame(queue_priority_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+            fprintf(stderr, "ERROR: Failed to push file end ack frame to queue\n");
+            pool_free(pool_queue_ack_udp_frame, entry);
+        }
     }
     LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
@@ -529,8 +543,10 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    push_ack_frame(queue_priority_ack_udp_frame, (uintptr_t)entry);
-
+    if(push_frame(queue_priority_ack_udp_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        fprintf(stderr, "ERROR: Failed to push file end ack error frame to queue\n");
+        pool_free(pool_queue_ack_udp_frame, entry);
+    }
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }

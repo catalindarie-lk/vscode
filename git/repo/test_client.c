@@ -146,6 +146,7 @@ static int init_client_buffers(){
     init_table_send_frame(table_send_frame, CLIENT_POOL_SIZE_SEND_FRAME, CLIENT_POOL_SIZE_SEND_FRAME * 16);
 
     init_pool(pool_recv_iocp_context, sizeof(IOCP_CONTEXT), CLIENT_POOL_SIZE_IOCP_RECV);
+    init_pool(pool_recv_frame, sizeof(PoolEntryRecvFrame), 4096);
     init_queue_frame(queue_recv_frame, CLIENT_QUEUE_SIZE_RECV_FRAME);
     init_queue_frame(queue_recv_prio_frame, CLIENT_QUEUE_SIZE_RECV_PRIO_FRAME);
         
@@ -154,7 +155,7 @@ static int init_client_buffers(){
    
     for(int i = 0; i < CLIENT_MAX_ACTIVE_FSTREAMS; i++){
         memset(&client->fstream[i], 0, sizeof(ClientFileStream));
-        client->fstream[i].chunk_buffer = malloc(FILE_CHUNK_SIZE);
+        client->fstream[i].chunk_buffer = _aligned_malloc(FILE_CHUNK_SIZE, 64);
         if(!client->fstream[i].chunk_buffer){
             fprintf(stderr, "CRITICAL ERROR: Failed to pre-allocate memory for fstream (chunk_buffer).\n");
             return RET_VAL_ERROR;
@@ -365,8 +366,6 @@ DWORD WINAPI fthread_recv_send_frame(LPVOID lpParam) {
     ULONG_PTR lpCompletitionKey;
     LPOVERLAPPED lpOverlapped;
     char ip_string_buffer[INET_ADDRSTRLEN];
-
-    QueueFrameEntry frame_entry;
     
     while(client->client_status == STATUS_READY){
         WaitForSingleObject(client->hevent_connection_pending, INFINITE);       
@@ -418,36 +417,33 @@ DWORD WINAPI fthread_recv_send_frame(LPVOID lpParam) {
                 case OP_RECV:
                     // Validate and dispatch frame
                     if (NrOfBytesTransferred > 0 && NrOfBytesTransferred <= sizeof(UdpFrame)) {
-                        memset(&frame_entry, 0, sizeof(QueueFrameEntry));
-                        memcpy(&frame_entry.frame, context->buffer, NrOfBytesTransferred);
-                        memcpy(&frame_entry.src_addr, &context->addr, sizeof(struct sockaddr_in));
-                        frame_entry.frame_size = NrOfBytesTransferred;
-            
-                        uint8_t frame_type = frame_entry.frame.header.frame_type;
-                        uint8_t op_code = 0;
-                        if(frame_type == FRAME_TYPE_ACK){
-                            op_code = frame_entry.frame.payload.ack.op_code;
-                        }                
-                        
-                        BOOL is_high_priority_frame = (frame_type == FRAME_TYPE_CONNECT_RESPONSE ||
-                                                        frame_type == FRAME_TYPE_DISCONNECT ||
-                                                        (frame_type == FRAME_TYPE_ACK && op_code == STS_KEEP_ALIVE) ||
-                                                        (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_DISCONNECT) ||
-                                                        (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_FILE_METADATA) ||
-                                                        (frame_type == FRAME_TYPE_ACK && op_code == STS_CONFIRM_FILE_END) ||
-                                                        (frame_type == FRAME_TYPE_ACK && op_code == ERR_DUPLICATE_FRAME) ||
-                                                        (frame_type == FRAME_TYPE_ACK && op_code == ERR_EXISTING_FILE) ||
-                                                        (frame_type == FRAME_TYPE_ACK && op_code == ERR_STREAM_INIT));
 
-                        if (is_high_priority_frame == TRUE) {
-                            if (push_frame(queue_recv_prio_frame, &frame_entry) == RET_VAL_ERROR) {
-                                Sleep(100);
-                                continue;
+                        PoolEntryRecvFrame *recv_frame_entry = (PoolEntryRecvFrame*)pool_alloc(pool_recv_frame);
+                        if (recv_frame_entry == NULL) {
+                            fprintf(stderr, "Critical: Failed to allocate memory for received frame entry.\n");
+                            break;
+                        }
+                        memset(recv_frame_entry, 0, sizeof(PoolEntryRecvFrame));
+                        memcpy(&recv_frame_entry->frame, context->buffer, NrOfBytesTransferred);
+                        memcpy(&recv_frame_entry->src_addr, &context->addr, sizeof(struct sockaddr_in));
+                        recv_frame_entry->frame_size = NrOfBytesTransferred;
+                        recv_frame_entry->timestamp = time(NULL);
+
+                        uint8_t frame_type = recv_frame_entry->frame.header.frame_type;
+                        BOOL is_high_priority_frame = (frame_type == FRAME_TYPE_KEEP_ALIVE ||
+                                                        frame_type == FRAME_TYPE_CONNECT_REQUEST ||
+                                                        frame_type == FRAME_TYPE_FILE_METADATA ||
+                                                        frame_type == FRAME_TYPE_DISCONNECT);
+    
+                        if (is_high_priority_frame) {
+                            if (push_frame(queue_recv_prio_frame, (uintptr_t)recv_frame_entry) == RET_VAL_ERROR) {
+                                fprintf(stderr, "CRITICAL ERROR: Dropping priority recv frame - Failed to push priority recv frame to queue.\n");
+                                pool_free(pool_recv_frame, recv_frame_entry); // Free the entry if it fails to push
                             }
                         } else {
-                            if (push_frame(queue_recv_frame, &frame_entry) == RET_VAL_ERROR) {
-                                Sleep(100);
-                                continue;
+                            if (push_frame(queue_recv_frame, (uintptr_t)recv_frame_entry) == RET_VAL_ERROR) {
+                                fprintf(stderr, "CRITICAL ERROR: Dropping recv frame - Failed to push recv frame to queue.\n");
+                                pool_free(pool_recv_frame, recv_frame_entry); // Free the entry if it fails to push
                             }
                         }
 
@@ -506,12 +502,13 @@ DWORD WINAPI fthread_process_frame(LPVOID lpParam) {
 
     PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
 
-    QueueFrameEntry frame_entry;
     UdpFrame *frame;
     struct sockaddr_in *src_addr;
     char src_ip[INET_ADDRSTRLEN];
     uint16_t src_port;
     
+    uint32_t frame_bytes_received = 0;
+
     uint16_t recv_delimiter = 0;
     uint8_t  recv_frame_type = 0;
     uint64_t recv_seq_num = 0;
@@ -522,27 +519,36 @@ DWORD WINAPI fthread_process_frame(LPVOID lpParam) {
 
     HANDLE events[2] = {queue_recv_prio_frame->push_semaphore, queue_recv_frame->push_semaphore};
 
+    PoolEntryRecvFrame recv_frame_entry;
+    PoolEntryRecvFrame *entry_recv_frame = NULL;
+
     while(client->client_status == STATUS_READY){
 
-        memset(&frame_entry, 0, sizeof(QueueFrameEntry));
         DWORD result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            if (pop_frame(queue_recv_prio_frame, &frame_entry) == RET_VAL_ERROR) {
-                fprintf(stderr, "CRITICAL ERROR: Popping from frame priority queue RET_VAL_ERROR\n");
+            entry_recv_frame = (PoolEntryRecvFrame*)pop_frame(queue_recv_prio_frame);
+            if(!entry_recv_frame){
+                fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from queue_recv_prio_frame?\n");
                 continue;
             }
+            memcpy(&recv_frame_entry, entry_recv_frame, sizeof(PoolEntryRecvFrame));
+            pool_free(pool_recv_frame, (void*)entry_recv_frame);
         } else if (result == WAIT_OBJECT_0 + 1) {
-            if (pop_frame(queue_recv_frame, &frame_entry) == RET_VAL_ERROR) {
-                fprintf(stderr, "CRITICAL ERROR: Popping from frame queue RET_VAL_ERROR\n");
+            entry_recv_frame = (PoolEntryRecvFrame*)pop_frame(queue_recv_frame);
+            if(!entry_recv_frame){
+                fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from queue_recv_frame?\n");
                 continue;
             }
+            memcpy(&recv_frame_entry, entry_recv_frame, sizeof(PoolEntryRecvFrame));
+            pool_free(pool_recv_frame, (void*)entry_recv_frame);
         } else {
             fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore frame queues: %lu\n", result);
             continue;
         }
 
-        frame = &frame_entry.frame;
-        src_addr = &frame_entry.src_addr;
+        frame = &recv_frame_entry.frame;
+        src_addr = &recv_frame_entry.src_addr;
+        frame_bytes_received = recv_frame_entry.frame_size;
 
         // Extract header fields   
         recv_delimiter = _ntohs(frame->header.start_delimiter);
@@ -557,7 +563,7 @@ DWORD WINAPI fthread_process_frame(LPVOID lpParam) {
             fprintf(stderr, "Received frame from %s:%d with invalid delimiter: 0x%X. Discarding.\n", src_ip, src_port, recv_delimiter);
             continue;
         }        
-        if (!is_checksum_valid(frame, frame_entry.frame_size)) {
+        if (!is_checksum_valid(frame, frame_bytes_received)) {
             fprintf(stderr, "Received frame from %s:%d with checksum mismatch. Discarding.\n", src_ip, src_port);
             // Optionally send ACK for checksum mismatch if this is part of a reliable stream
             // For individual datagrams, retransmission is often handled by higher layers or ignored.

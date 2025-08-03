@@ -30,8 +30,8 @@
 #define CONNECT_REQUEST_TIMEOUT_MS              2500                  // Timeout for a connection request in milliseconds
 #define DISCONNECT_REQUEST_TIMEOUT_MS           2500                  // Timeout for a disconnect request in milliseconds
 
-#define TEXT_CHUNK_SIZE                         (TEXT_FRAGMENT_SIZE * 128) // Size of a text data chunk (derived from protocol_frames.h)
-#define FILE_CHUNK_SIZE                         (FILE_FRAGMENT_SIZE * 128) // Size of a file data chunk (derived from protocol_frames.h)
+#define TEXT_CHUNK_SIZE                         (TEXT_FRAGMENT_SIZE * 64) // Size of a text data chunk (derived from protocol_frames.h)
+#define FILE_CHUNK_SIZE                         (FILE_FRAGMENT_SIZE * 512) // Size of a file data chunk (derived from protocol_frames.h)
 
 #define RESEND_TIMEOUT_SEC                      3                     // Seconds before a pending frame is considered for retransmission
 #define MAX_MESSAGE_SIZE_BYTES                  (4 * 1024 * 1024)     // Maximum size for a single large text message (4 MB)
@@ -41,28 +41,28 @@
 #define CLIENT_MAX_ACTIVE_MSTREAMS              1                     // Maximum number of concurrent message streams (e.g., long text messages)
 
 // --- Client Worker Thread Configuration ---
-#define CLIENT_MAX_THREADS_RECV_SEND_FRAME      2                     // Number of threads dedicated to receiving and sending frames
-#define CLIENT_MAX_TREADS_PROCESS_FRAME         2                     // Number of threads dedicated to processing received frames
-#define CLIENT_MAX_THREADS_POP_SEND_FRAME       1                     // Number of threads for popping normal send frames from queue
+#define CLIENT_MAX_THREADS_RECV_SEND_FRAME      5                     // Number of threads dedicated to receiving and sending frames
+#define CLIENT_MAX_TREADS_PROCESS_FRAME         5                     // Number of threads dedicated to processing received frames
+#define CLIENT_MAX_THREADS_POP_SEND_FRAME       5                     // Number of threads for popping normal send frames from queue
 #define CLIENT_MAX_THREADS_POP_SEND_PRIO_FRAME  1                    // Number of threads for popping priority send frames from queue
 #define CLIENT_MAX_THREADS_POP_SEND_CTRL_FRAME  1                    // Number of threads for popping control frames from queue
 
+// --- Client RECV Buffer Sizes ---
+#define CLIENT_QUEUE_SIZE_SEND_FRAME            1024
+#define CLIENT_QUEUE_SIZE_SEND_PRIO_FRAME       128
+#define CLIENT_QUEUE_SIZE_SEND_CTRL_FRAME       8
 // --- Client Memory Pool Sizes ---
-#define CLIENT_POOL_SIZE_IOCP_SEND              1024 // Total size for IOCP send contexts
-#define CLIENT_POOL_SIZE_IOCP_RECV              1024                  // Size for IOCP receive contexts
-
 #define CLIENT_POOL_SIZE_SEND_FRAME             (CLIENT_QUEUE_SIZE_SEND_FRAME + \
                                                 CLIENT_QUEUE_SIZE_SEND_PRIO_FRAME + \
-                                                CLIENT_QUEUE_SIZE_SEND_CTRL_FRAME) \
+                                                CLIENT_QUEUE_SIZE_SEND_CTRL_FRAME)
+#define CLIENT_POOL_SIZE_IOCP_SEND              CLIENT_POOL_SIZE_SEND_FRAME // Total size for IOCP send contexts
 
-// --- Client Queue Buffer Sizes ---
-#define CLIENT_QUEUE_SIZE_SEND_FRAME            256
-#define CLIENT_QUEUE_SIZE_SEND_PRIO_FRAME       32
-#define CLIENT_QUEUE_SIZE_SEND_CTRL_FRAME       8
+// --- Client SEND Buffer Sizes ---
+#define CLIENT_QUEUE_SIZE_RECV_FRAME            (1024 + (512 * CLIENT_MAX_ACTIVE_FSTREAMS)) // Size of the queue for received frames
+#define CLIENT_QUEUE_SIZE_RECV_PRIO_FRAME       128                  // Size of the queue for received priority frames
+#define CLIENT_POOL_SIZE_IOCP_RECV              CLIENT_QUEUE_SIZE_RECV_FRAME                  // Size for IOCP receive contexts
 
 
-#define CLIENT_QUEUE_SIZE_RECV_FRAME            (4096 + (512 * CLIENT_MAX_ACTIVE_FSTREAMS)) // Size of the queue for received frames
-#define CLIENT_QUEUE_SIZE_RECV_PRIO_FRAME       1024                  // Size of the queue for received priority frames
 
 #define CLIENT_QUEUE_SIZE_FSTREAM_COMMANDS      1024                  // Size of the queue for file stream commands
 #define CLIENT_QUEUE_SIZE_MSTREAM_COMMANDS      1024                  // Size of the queue for message stream commands
@@ -76,8 +76,9 @@
     ClientThreads *threads = &(threads_obj); /* Pointer to threads struct queue */ \
     MemPool *pool_send_iocp_context = &((buffers_obj).pool_send_iocp_context); /* Pointer to IOCP send context memory pool */ \
     MemPool *pool_recv_iocp_context = &((buffers_obj).pool_recv_iocp_context); /* Pointer to IOCP recv context memory pool */ \
-    QueueFrame *queue_recv_frame = &((buffers_obj).queue_recv_frame); /* Pointer to received frame queue */ \
-    QueueFrame *queue_recv_prio_frame = &((buffers_obj).queue_recv_prio_frame);/* Pointer to received priority frame queue */\
+    MemPool *pool_recv_frame = &((buffers_obj).pool_recv_frame); \
+    QueueAckUpdFrame *queue_recv_frame = &((buffers_obj).queue_recv_frame); \
+    QueueAckUpdFrame *queue_recv_prio_frame = &((buffers_obj).queue_recv_prio_frame); \
     s_MemPool *pool_send_frame = &((buffers_obj).pool_send_frame); /* Pointer to send frame memory pool */ \
     QueueSendFrame *queue_send_frame = &((buffers_obj).queue_send_frame); /* Pointer to send queue for normal frames */ \
     QueueSendFrame *queue_send_prio_frame = &((buffers_obj).queue_send_prio_frame); /* Pointer to send queue for priority frames */ \
@@ -212,8 +213,9 @@ typedef struct {
     MemPool pool_send_iocp_context;             // Memory pool for IOCP send contexts
     MemPool pool_recv_iocp_context;             // Memory pool for IOCP receive contexts
 
-    QueueFrame queue_recv_frame;                // Queue for incoming received frames
-    QueueFrame queue_recv_prio_frame;           // Queue for incoming priority received frames
+    MemPool pool_recv_frame;                    // Memory pool for received frames
+    QueueAckUpdFrame queue_recv_frame;
+    QueueAckUpdFrame queue_recv_prio_frame;
 
     s_MemPool pool_send_frame;                  // Memory pool for normal frames to be sent
     // s_MemPool pool_send_ctrl_frame;             // Memory pool for control frames to be sent

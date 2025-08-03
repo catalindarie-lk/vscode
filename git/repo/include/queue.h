@@ -13,53 +13,6 @@
 #define RET_VAL_ERROR -1
 #endif
 
-//----------------------------------------------------------------------------------------------------------------
-__declspec(align(64)) typedef struct{
-    UdpFrame frame; // The UDP frame to be sent
-    struct sockaddr_in src_addr; // Destination address for the frame
-    uint32_t frame_size; // Number of bytes received for this frame
-}QueueFrameEntry;
-
-typedef struct {
-    size_t size; 
-    QueueFrameEntry *entry;
-    volatile uint32_t head;          
-    volatile uint32_t tail;
-    volatile uint32_t pending;
-    CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
-    HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
-    HANDLE pop_semaphore;       // not used
-}QueueFrame;
-
-void init_queue_frame(QueueFrame *queue, const size_t size);
-int push_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
-int pop_frame(QueueFrame *queue, QueueFrameEntry *frame_entry);
-
-//----------------------------------------------------------------------------------------------------------------
-__declspec(align(64)) typedef struct{
-    uint64_t seq;       // The sequence number of the frame that require ack/nak
-    uint8_t op_code;
-    uint32_t sid;    // Session ID of the frame (used to identify the connected client)
-    SOCKET src_socket;
-    struct sockaddr_in dest_addr; // Address of the sender
-}QueueAckEntry;
-
-typedef struct {
-    size_t size;
-    QueueAckEntry *entry;
-    volatile uint32_t head;          
-    volatile uint32_t tail;
-    volatile uint32_t pending;
-    CRITICAL_SECTION lock; // Mutex for thread-safe access to frame_buffer
-    HANDLE push_semaphore;
-}QueueAck;
-
-
-void new_ack_entry(QueueAckEntry *entry, const uint64_t seq, const uint32_t sid, 
-                        const uint8_t op_code, const SOCKET src_socket, const struct sockaddr_in *dest_addr);
-void init_queue_ack(QueueAck *queue, const size_t size);
-int push_ack(QueueAck *queue, QueueAckEntry *entry);
-int pop_ack(QueueAck *queue, QueueAckEntry *entry);
 
 //----------------------------------------------------------------------------------------------------------------
 #define MAX_ENTRY_SIZE (MAX_PATH + MAX_PATH + 32)
@@ -134,17 +87,17 @@ uintptr_t pop_fstream(QueueFstream *queue);
 __declspec(align(64))typedef struct {
     size_t size; 
     uintptr_t *entry;
-    volatile uint32_t head;          
-    volatile uint32_t tail;
-    volatile uint32_t pending;
+    volatile size_t head;          
+    volatile size_t tail;
+    volatile size_t pending;
     CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
     HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
-    HANDLE pop_semaphore;       // not used
+    HANDLE pop_semaphore;       
 }QueueAckUpdFrame;
 
-int init_queue_ack_frame(QueueAckUpdFrame *queue, const size_t size);
-int push_ack_frame(QueueAckUpdFrame *queue,  const uintptr_t entry);
-uintptr_t pop_ack_frame(QueueAckUpdFrame *queue);
+int init_queue_frame(QueueAckUpdFrame *queue, const size_t size);
+int push_frame(QueueAckUpdFrame *queue,  const uintptr_t entry);
+uintptr_t pop_frame(QueueAckUpdFrame *queue);
 
 
 //----------------------------------------------------------------------------------------------------------------
@@ -157,7 +110,7 @@ __declspec(align(64))typedef struct {
     volatile size_t pending;
     CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
     HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
-    HANDLE pop_semaphore;       // not used
+    HANDLE pop_semaphore;       
 }QueueSendFrame;
 
 int init_queue_send_frame(QueueSendFrame *queue, const size_t size);

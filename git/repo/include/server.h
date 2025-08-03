@@ -17,7 +17,7 @@
 
 
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
-#define DEFAULT_SESSION_TIMEOUT_SEC             120
+#define DEFAULT_SESSION_TIMEOUT_SEC             30
 #endif
 
 #define MAX_SERVER_ACTIVE_FSTREAMS              10
@@ -26,7 +26,7 @@
 #define MAX_SERVER_ACTIVE_MSTREAMS              1
 #define SERVER_ACK_MESSAGE_FRAMES_THREADS       1
 
-#define SERVER_RECV_SEND_FRAME_WRK_THREADS      1
+#define SERVER_RECV_SEND_FRAME_WRK_THREADS      5
 #define SERVER_PROCESS_FRAME_WRK_THREAS         10
 
 // --- Constants 
@@ -44,8 +44,8 @@
 #define CHUNK_WRITTEN                           (1u << 0) // 0b00000001
 #define CHUNK_NONE                              (0)       // 0b00000000
 
-#define BLOCK_SIZE_CHUNK                        ((uint64_t)(FILE_FRAGMENT_SIZE * 64))
-#define BLOCK_COUNT_CHUNK                       ((uint64_t)(1024))
+#define BLOCK_SIZE_CHUNK                        (FILE_FRAGMENT_SIZE * 64)
+#define BLOCK_COUNT_CHUNK                       (256 + 64 * MAX_SERVER_ACTIVE_FSTREAMS)
 
 #define SERVER_SIZE_QUEUE_FRAME                 (1024 + 256 * MAX_SERVER_ACTIVE_FSTREAMS)
 #define SERVER_SIZE_QUEUE_PRIORITY_FRAME        256
@@ -68,16 +68,17 @@
     MemPool *pool_file_chunk = &((buffers_obj).pool_file_chunk); \
     MemPool *pool_iocp_send_context = &((buffers_obj).pool_iocp_send_context); \
     MemPool *pool_iocp_recv_context = &((buffers_obj).pool_iocp_recv_context); \
-    QueueFrame *queue_frame = &((buffers_obj).queue_frame); \
-    QueueFrame *queue_priority_frame = &((buffers_obj).queue_priority_frame); \
-    QueueFstream *queue_fstream = &((buffers_obj).queue_fstream); \
+    MemPool *pool_recv_frame = &((buffers_obj).pool_recv_frame); \
+    QueueAckUpdFrame *queue_recv_frame = &((buffers_obj).queue_recv_frame); \
+    QueueAckUpdFrame *queue_recv_prio_frame = &((buffers_obj).queue_recv_prio_frame); \
+    QueueFstream *queue_process_fstream = &((buffers_obj).queue_process_fstream); \
     HashTableIdentifierNode *ht_fid = &((buffers_obj).ht_fid); \
     HashTableIdentifierNode *ht_mid = &((buffers_obj).ht_mid); \
     MemPool *pool_queue_ack_udp_frame = &((buffers_obj).pool_queue_ack_udp_frame); \
     QueueAckUpdFrame *queue_file_ack_udp_frame = &((buffers_obj).queue_file_ack_udp_frame); \
     QueueAckUpdFrame *queue_message_ack_udp_frame = &((buffers_obj).queue_message_ack_udp_frame); \
     QueueAckUpdFrame *queue_priority_ack_udp_frame = &((buffers_obj).queue_priority_ack_udp_frame); \
-    s_MemPool *pool_send_frame = &((buffers_obj).pool_send_frame); \
+    MemPool *pool_send_frame = &((buffers_obj).pool_send_frame); \
     QueueSendFrame *queue_send_frame = &((buffers_obj).queue_send_frame); \
     QueueSendFrame *queue_send_prio_frame = &((buffers_obj).queue_send_prio_frame); \
     QueueSendFrame *queue_send_ctrl_frame = &((buffers_obj).queue_send_ctrl_frame); \
@@ -203,9 +204,6 @@ typedef struct{
 
     CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
 
-    // HANDLE hevent_recv_file;
-    // HANDLE htread_recv_file;
-    // HANDLE hevent_close_stream;
 }ServerFileStream;
 
 typedef struct {
@@ -256,20 +254,21 @@ typedef struct {
     MemPool pool_iocp_send_context;
     MemPool pool_iocp_recv_context;
 
-    QueueFrame queue_frame;
-    QueueFrame queue_priority_frame;
+    MemPool pool_recv_frame;
+    QueueAckUpdFrame queue_recv_frame;
+    QueueAckUpdFrame queue_recv_prio_frame;
 
-    // QueueAck mqueue_ack;
-    // QueueAck queue_priority_ack;
+    // QueueFrame queue_frame;
+    // QueueFrame queue_priority_frame;
 
-    QueueFstream queue_fstream;
+    QueueFstream queue_process_fstream;
 
     MemPool pool_queue_ack_udp_frame;
     QueueAckUpdFrame queue_file_ack_udp_frame;
     QueueAckUpdFrame queue_message_ack_udp_frame;
     QueueAckUpdFrame queue_priority_ack_udp_frame;
 
-    s_MemPool pool_send_frame;
+    MemPool pool_send_frame;
 
     QueueSendFrame queue_send_frame;
     QueueSendFrame queue_send_prio_frame;
