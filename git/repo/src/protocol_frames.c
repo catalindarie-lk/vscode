@@ -124,53 +124,6 @@ void refill_recv_iocp_pool(const SOCKET src_socket, MemPool *mem_pool){
     return;
 }
 
-int send_frame(const UdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool){
-    // Determine the actual size to send based on frame type if payloads are variable
-    size_t frame_size = 0;
-    switch (frame->header.frame_type) {
-        case FRAME_TYPE_FILE_METADATA:
-            frame_size = sizeof(FrameHeader) + sizeof(FileMetadataPayload);
-            break;
-        case FRAME_TYPE_FILE_METADATA_RESPONSE:
-            frame_size = sizeof(FrameHeader) + sizeof(FileMetadataResponsePayload);
-            break;
-        case FRAME_TYPE_FILE_FRAGMENT:
-            frame_size = sizeof(FrameHeader) + sizeof(FileFragmentPayload); // Or header + payload_len + related metadata
-            break;
-        case FRAME_TYPE_FILE_END:
-            frame_size = sizeof(FrameHeader) + sizeof(FileEndPayload); // Or header + payload_len + related metadata
-            break;
-        case FRAME_TYPE_FILE_COMPLETE:
-            frame_size = sizeof(FrameHeader) + sizeof(FileCompletePayload); // Or header + payload_len + related metadata
-            break;
-        case FRAME_TYPE_LONG_TEXT_MESSAGE:
-            frame_size = sizeof(FrameHeader) + sizeof(LongTextPayload); // Or header + payload_len + related metadata
-            break;
-        case FRAME_TYPE_ACK:
-            frame_size = sizeof(FrameHeader) + sizeof(AckPayload); // Acknowledgment frame
-            break;
-        case FRAME_TYPE_CONNECT_REQUEST:
-            frame_size = sizeof(FrameHeader) + sizeof(ConnectRequestPayload);
-            break;
-        case FRAME_TYPE_CONNECT_RESPONSE:
-            frame_size = sizeof(FrameHeader) + sizeof(ConnectResponsePayload);
-            break;
-        case FRAME_TYPE_DISCONNECT:
-            frame_size = sizeof(FrameHeader);
-            break;
-        case FRAME_TYPE_KEEP_ALIVE:
-            frame_size = sizeof(FrameHeader);
-            break;
-        default:
-            frame_size = sizeof(UdpFrame); // Fallback to max size
-            break;
-    }
-
-    return udp_send_to((const char*)frame, frame_size, src_socket, dest_addr, mem_pool);
-
-}
-
-
 int send_pool_frame(PoolEntrySendFrame *pool_entry, MemPool *mem_pool){
     
     UdpFrame *frame = &pool_entry->frame;
@@ -194,11 +147,14 @@ int send_pool_frame(PoolEntrySendFrame *pool_entry, MemPool *mem_pool){
         case FRAME_TYPE_FILE_COMPLETE:
             frame_size = sizeof(FrameHeader) + sizeof(FileCompletePayload); // Or header + payload_len + related metadata
             break;
-        case FRAME_TYPE_LONG_TEXT_MESSAGE:
-            frame_size = sizeof(FrameHeader) + sizeof(LongTextPayload); // Or header + payload_len + related metadata
+        case FRAME_TYPE_TEXT_MESSAGE:
+            frame_size = sizeof(FrameHeader) + sizeof(TextPayload); // Or header + payload_len + related metadata
             break;
         case FRAME_TYPE_ACK:
             frame_size = sizeof(FrameHeader) + sizeof(AckPayload); // Acknowledgment frame
+            break;
+        case FRAME_TYPE_SACK:
+            frame_size = sizeof(FrameHeader) + sizeof(SAckPayload); // Selective Acknowledgment frame
             break;
         case FRAME_TYPE_CONNECT_REQUEST:
             frame_size = sizeof(FrameHeader) + sizeof(ConnectRequestPayload);
@@ -216,11 +172,8 @@ int send_pool_frame(PoolEntrySendFrame *pool_entry, MemPool *mem_pool){
             frame_size = sizeof(UdpFrame); // Fallback to max size
             break;
     }
-
     return udp_send_to((const char*)frame, frame_size, src_socket, dest_addr, mem_pool);
-
 }
-
 
 int send_pool_ack_frame(PoolEntryAckFrame *pool_ack_entry, MemPool *mem_pool){
     

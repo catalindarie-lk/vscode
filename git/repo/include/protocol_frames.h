@@ -20,23 +20,28 @@
 #define MAX_PATH                            (260)
 #endif
 
-#define SERVER_PORT                         (53567)               // Port the server listens on
-#define MAX_PAYLOAD_SIZE                    (1400)                // Max size of data within a frame payload (adjust as needed)
-#define FRAME_DELIMITER                     (0xAABB)              // A magic number to identify valid frames
+#define SERVER_PORT                         53567               // Port the server listens on
+#define MAX_FRAME_SIZE                      1500
+#define FRAME_DELIMITER                     0xAABB             // A magic number to identify valid frames
 
+
+
+#define MAX_PAYLOAD_SIZE                    (MAX_FRAME_SIZE - sizeof(FrameHeader))
 #define TEXT_FRAGMENT_SIZE                  (MAX_PAYLOAD_SIZE - sizeof(uint32_t) * 4)
 #define FILE_FRAGMENT_SIZE                  (MAX_PAYLOAD_SIZE - (sizeof(uint32_t) * 2) - sizeof(uint64_t))
 
-#define MAX_NAME_SIZE                       (255)                 // Maximum size for client/server names
+#define MAX_SACK_COUNT                      ((MAX_PAYLOAD_SIZE - sizeof(uint8_t)) / sizeof(uint64_t)) // Maximum number of sequence numbers in a SACK frame                      
+#define MAX_NAME_SIZE                       255                 // Maximum size for client/server names
 
 #define DEFAULT_DISCONNECT_REQUEST_SEQ      (UINT64_MAX - 1)
 #define DEFAULT_CONNECT_REQUEST_SEQ         (UINT64_MAX - 2)
 #define DEFAULT_KEEP_ALIVE_SEQ              (UINT64_MAX - 3)
+#define DEFAULT_SACK_SEQ                    (UINT64_MAX - 4)
 
 #define DEFAULT_CONNECT_REQUEST_SID         (UINT32_MAX - 1)
 
-#define WSARECV_TIMEOUT_MS                  (100)         // Timeout in milliseconds in the receive frame thread
-#define GETQCOMPL_TIMEOUT                   (258L)
+#define WSARECV_TIMEOUT_MS                  100         // Timeout in milliseconds in the receive frame thread
+#define GETQCOMPL_TIMEOUT                   258L
 
 // --- Frame Types ---
 typedef uint8_t FrameType;
@@ -47,6 +52,7 @@ enum FrameType{
     FRAME_TYPE_DISCONNECT = 3,                 // Client requests to disconnect
 
     FRAME_TYPE_ACK = 4,                         // Acknowledgment for a received frame
+    FRAME_TYPE_SACK = 5,                        // Selective Acknowledgment for multiple frames
     FRAME_TYPE_KEEP_ALIVE = 6,
 
     FRAME_TYPE_FILE_METADATA = 20,       // Client requests to send a file (includes filename, size, hash)
@@ -54,7 +60,7 @@ enum FrameType{
     FRAME_TYPE_FILE_FRAGMENT = 22,                   // File data fragment
     FRAME_TYPE_FILE_END = 23,
     FRAME_TYPE_FILE_COMPLETE = 24,
-    FRAME_TYPE_LONG_TEXT_MESSAGE = 30      // Fragment of a long text message
+    FRAME_TYPE_TEXT_MESSAGE = 30      // Fragment of a long text message
 };
 
 typedef uint8_t AckErrorCode;
@@ -110,6 +116,12 @@ typedef struct {
     uint8_t op_code;
 } AckPayload;
 
+typedef struct {                                 // Session ID for which this SACK is valid
+    uint8_t ack_count;
+    uint64_t seq_num[MAX_SACK_COUNT];
+} SAckPayload;
+
+
 typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
     uint64_t file_size;                                     // Total size of the file being transferred
@@ -148,7 +160,7 @@ typedef struct {
     uint32_t fragment_len;                                  // Length of actual text data in 'fragment_data'
     uint32_t fragment_offset;                               // Offset of this fragment within the long message
     char     chars[TEXT_FRAGMENT_SIZE];             // Adjusted size
-} LongTextPayload;
+} TextPayload;
 
 // Main UDP Frame Structure
 typedef struct {
@@ -157,12 +169,13 @@ typedef struct {
         ConnectRequestPayload connection_request;                      // Client's connect request
         ConnectResponsePayload connection_response;                    // Server's response to client connect
         AckPayload ack;
+        SAckPayload sack;
         FileMetadataPayload file_metadata;                  // File metadata request/response
         FileMetadataResponsePayload file_metadata_response;                  // File metadata request/response
         FileFragmentPayload file_fragment;                  // File data fragment
         FileEndPayload file_end;
         FileCompletePayload file_complete;
-        LongTextPayload text_fragment;                      // Fragment of a long text message
+        TextPayload text_fragment;                      // Fragment of a long text message
         uint8_t raw_payload[MAX_PAYLOAD_SIZE];              // For generic access or padding
     } payload;
 } UdpFrame;
@@ -188,7 +201,7 @@ typedef struct {
     int addr_len;
     OPERATION_TYPE type;      // To distinguish between send and receive operations
 } IOCP_CONTEXT;
-
+//--------------------------------------------------------------------------------------------------------------------------
 typedef struct{
     UdpFrame frame; // The UDP frame to be sent
     SOCKET src_socket;
@@ -209,16 +222,18 @@ typedef struct{
     struct sockaddr_in dest_addr; // Destination address for the frame
 }PoolEntryAckFrame;
 
-
+typedef struct {
+    char log_message[256];
+    unsigned long long timestamp_64bit; // 64-bit timestamp
+} PoolErrorLogEntry;
+//--------------------------------------------------------------------------------------------------------------------------
 void init_iocp_context(IOCP_CONTEXT *iocp_context, OPERATION_TYPE type);
 int udp_recv_from(const SOCKET src_socket, IOCP_CONTEXT *iocp_context);
 int udp_send_to(const char *data, size_t data_len, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
 
 void refill_recv_iocp_pool(const SOCKET src_socket, MemPool *mem_pool);
 
-int send_frame(const UdpFrame *frame, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
 int send_pool_frame(PoolEntrySendFrame *entry, MemPool *mem_pool);
 int send_pool_ack_frame(PoolEntryAckFrame *pool_ack_entry, MemPool *mem_pool);
-
 
 #endif 

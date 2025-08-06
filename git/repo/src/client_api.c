@@ -10,22 +10,32 @@
 #include "include/client.h"
 #include "include/client_frames.h"
 #include "include/client_api.h"
+#include "include/netendians.h"         // For network byte order conversions
 
-void RequestConnect(){
+int RequestConnect(const char *server_ip) {
 
     PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+
+    // Define server address
+    memset(&client->server_addr, 0, sizeof(client->server_addr));
+    client->server_addr.sin_family = AF_INET;
+    client->server_addr.sin_port = _htons(SERVER_PORT);
+    if (inet_pton(AF_INET, server_ip, &client->server_addr.sin_addr) <= 0){
+        fprintf(stderr, "Invalid address or address not supported.\n");
+        return RET_VAL_ERROR;
+    };
 
     ResetEvent(client->hevent_connection_closed);
     ResetEvent(client->hevent_connection_established);
     SetEvent(client->hevent_connection_pending);
 
-    PoolEntrySendFrame *send_pool_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
-    if(!send_pool_entry){
+    PoolEntrySendFrame *entry_send = (PoolEntrySendFrame*)s_pool_alloc(pool_send_udp_frame);
+    if(!entry_send){
         fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for connect request. Should never do since it has semaphore to block when full");
-        return;
+        return RET_VAL_ERROR;
     }
 
-    int res = construct_connect_request(send_pool_entry,
+    int res = construct_connect_request(entry_send,
                                         client->sid, 
                                         client->cid, 
                                         client->flags, 
@@ -33,9 +43,13 @@ void RequestConnect(){
                                         client->socket, &client->server_addr);
     if(res == RET_VAL_ERROR){
         fprintf(stderr, "CRITICAL ERROR: construct_connect_request() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
-        return;
+        return RET_VAL_ERROR;
     }
-    push_send_frame(queue_send_ctrl_frame, (uintptr_t)send_pool_entry);
+    if(s_push_frame(queue_send_ctrl_udp_frame, (uintptr_t)entry_send) == RET_VAL_ERROR){
+        fprintf(stderr, "CRITICAL ERROR: Failed to push connect request frame to queue_send_ctrl_frame. Should never happen since queue is blocking on push/pop semaphores\n");
+        s_pool_free(pool_send_udp_frame, (void*)entry_send);
+        return RET_VAL_ERROR;
+    }
 
     DWORD wait_connection_established = WaitForSingleObject(client->hevent_connection_established, CONNECT_REQUEST_TIMEOUT_MS);
     if (wait_connection_established == WAIT_OBJECT_0) {
@@ -44,11 +58,13 @@ void RequestConnect(){
     } else if (wait_connection_established == WAIT_TIMEOUT) {
         reset_client_session();
         fprintf(stderr, "Connection closed...\n");
+        return RET_VAL_ERROR;
     } else {
         reset_client_session();
         fprintf(stderr, "Unexpected error for established event: %lu\n", wait_connection_established);
+        return RET_VAL_ERROR;
     }
-    return;
+    return RET_VAL_SUCCESS;
 }
 
 void RequestDisconnect(){
@@ -62,14 +78,18 @@ void RequestDisconnect(){
     // send disconnect frame
     ResetEvent(client->hevent_connection_established);
 
-    PoolEntrySendFrame *send_pool_entry = (PoolEntrySendFrame*)s_pool_alloc(pool_send_frame);
-    if(!send_pool_entry){
+    PoolEntrySendFrame *entry_send = (PoolEntrySendFrame*)s_pool_alloc(pool_send_udp_frame);
+    if(!entry_send){
         fprintf(stderr, "CRITICAL ERROR: s_pool_alloc() returned null pointer when allocating for disconnect request. Should never do since it has semaphore to block when full");
         return;
     }
 
-    construct_disconnect_request(send_pool_entry, client->sid, client->socket, &client->server_addr);
-    push_send_frame(queue_send_ctrl_frame, (uintptr_t)send_pool_entry);
+    construct_disconnect_request(entry_send, client->sid, client->socket, &client->server_addr);
+    if(s_push_frame(queue_send_ctrl_udp_frame, (uintptr_t)entry_send) == RET_VAL_ERROR){
+        fprintf(stderr, "CRITICAL ERROR: Failed to push disconnect request frame to queue_send_ctrl_frame. Should never happen since queue is blocking on push/pop semaphores\n");
+        s_pool_free(pool_send_udp_frame, (void*)entry_send);
+    }
+
  
     DWORD wait_connection_closed = WaitForSingleObject(client->hevent_connection_closed, DISCONNECT_REQUEST_TIMEOUT_MS);
 
@@ -113,7 +133,9 @@ void SendTextMessage(const char *buffer, const size_t len) {
     memcpy(entry.command.send_message.message_buffer, buffer, len);
     entry.command.send_message.message_buffer[len] = '\0';
 
-    push_command(queue_mstream, &entry);
+    if(s_push_command(queue_process_mstream, &entry) == RET_VAL_ERROR){
+        fprintf(stderr, "CRITICAL ERROR: Failed to push command to queue_process_mstream. Should never happen since queue is blocking on push/pop semaphores\n");
+    }
     return;
 }
 
@@ -285,7 +307,10 @@ static void stream_file(const char *fpath, const size_t fpath_len,
     entry.command.send_file.fname_len = (uint32_t)fname_len;
 
     // Push the command to the queue
-    push_command(queue_fstream, &entry); // Use the mock queue
+    if(s_push_command(queue_process_fstream, &entry) == RET_VAL_ERROR){
+        fprintf(stderr, "CRITICAL ERROR: Failed to push command to queue_process_fstream. Should never happen since queue is blocking on push/pop semaphores\n");
+    }
+                    
     return;
 }
 
@@ -446,7 +471,7 @@ void SendAllFilesInFolder(const char *fd_path, size_t len) {
     if (hFind == INVALID_HANDLE_VALUE) {
         DWORD lastError = GetLastError();
         if (lastError == ERROR_FILE_NOT_FOUND || lastError == ERROR_PATH_NOT_FOUND) {
-            printf("Folder '%.*s' not found.\n", (int)len, fd_path);
+            fprintf(stderr, "ERROR: SendAllFilesInFolder - Folder '%.*s' not found.\n", (int)len, fd_path);
         } else {
             fprintf(stderr, "ERROR: SendAllFilesInFolder - Could not open folder '%.*s'. System Error Code: %lu\n", (int)len, fd_path, lastError);
         }
@@ -588,7 +613,9 @@ static void send_all_files_in_folder_recursive(const char *root_path_to_replace,
 
     if (hFind == INVALID_HANDLE_VALUE) {
         DWORD lastError = GetLastError();
-        if (lastError != ERROR_FILE_NOT_FOUND && lastError != ERROR_PATH_NOT_FOUND) {
+        if (lastError == ERROR_FILE_NOT_FOUND || lastError == ERROR_PATH_NOT_FOUND) {
+            fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Folder '%.*s' not found.\n", (int)current_len, current_fd_path);
+        } else {
             fprintf(stderr, "ERROR: send_all_files_in_folder_recursive - Could not open folder '%.*s'. System Error Code: %lu\n", (int)current_len, current_fd_path, lastError);
         }
         return;
@@ -733,8 +760,8 @@ static void send_all_files_in_folder_recursive(const char *root_path_to_replace,
                         fileNameOnly, found_filename_len);
 
             // Print confirmation with all paths for clarity
-            printf("Sent: Abs Dir: %s; Rel Dir: %s; File Name: %s;\n",
-                   absoluteDirectoryPath, relativeDirectoryPath, fileNameOnly);
+            // fprintf(stdout, "Sent: Abs Dir: %s; Rel Dir: %s; File Name: %s;\n",
+            //        absoluteDirectoryPath, relativeDirectoryPath, fileNameOnly);
         }
     } while (FindNextFile(hFind, &findFileData) != 0);
 

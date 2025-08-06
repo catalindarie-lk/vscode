@@ -15,6 +15,7 @@
 
 
 long long get_file_size(const char *filepath);
+int create_output_file(const char *buffer, const uint64_t size, const char *path);
 // Writes large buffer to file in chunks. Returns total bytes written.
 size_t safe_fwrite(FILE *fp, const void *buffer, size_t total_size);
 // Reads large data from file into buffer in chunks. Returns total bytes read.

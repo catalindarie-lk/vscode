@@ -23,11 +23,13 @@ int construct_connect_request(PoolEntrySendFrame *entry,
                             const uint32_t flags, 
                             const char *client_name,
                             const SOCKET src_socket, const struct sockaddr_in *dest_addr){
-    
+    char log_message[256];
     UdpFrame *frame = &entry->frame;
 
     if(!client_name){
-        fprintf(stderr, "CRITICAL ERROR: send_connect_request - Invalid client_name pointer (NULL).\n");
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_connect_request - Invalid client_name pointer (NULL).");
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
     
@@ -41,7 +43,7 @@ int construct_connect_request(PoolEntrySendFrame *entry,
     snprintf(frame->payload.connection_request.client_name, sizeof(frame->payload.connection_request.client_name), "%s", client_name);
 
     // Calculate the checksum for the frame
-    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(ConnectRequestPayload)));
+    frame->header.checksum = _htonl(calculate_crc32(frame, sizeof(FrameHeader) + sizeof(ConnectRequestPayload)));
 
     entry->src_socket = src_socket;
     memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
@@ -60,7 +62,7 @@ int construct_disconnect_request(PoolEntrySendFrame *entry,
     frame->header.seq_num = _htonll(DEFAULT_DISCONNECT_REQUEST_SEQ);
     frame->header.session_id = _htonl(session_id);
 
-    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader)));
+    frame->header.checksum = _htonl(calculate_crc32(frame, sizeof(FrameHeader)));
 
     entry->src_socket = src_socket;
     memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
@@ -80,7 +82,7 @@ int construct_keep_alive(PoolEntrySendFrame *entry,
     frame->header.seq_num = _htonll(DEFAULT_KEEP_ALIVE_SEQ);
     frame->header.session_id = _htonl(session_id); // Use the session ID provided  
     // Calculate CRC32 for the frame
-    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader)));
+    frame->header.checksum = _htonl(calculate_crc32(frame, sizeof(FrameHeader)));
 
     entry->src_socket = src_socket;
     memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
@@ -110,7 +112,7 @@ int construct_file_fragment(PoolEntrySendFrame *entry,
     frame->payload.file_fragment.offset = _htonll(fragment_offset);
     memcpy(frame->payload.file_fragment.bytes, fragment_buffer, fragment_size);
     
-    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(FileFragmentPayload)));
+    frame->header.checksum = _htonl(calculate_crc32(frame, sizeof(FrameHeader) + sizeof(FileFragmentPayload)));
 
     entry->src_socket = src_socket;
     memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
@@ -129,22 +131,28 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
                             const uint32_t fname_len,
                             const uint32_t file_fragment_size,
                             const SOCKET src_socket, const struct sockaddr_in *dest_addr){
-   
+    char log_message[256];
     UdpFrame *frame = &entry->frame;
     
     // --- Validate rpath ---
     if(rpath == NULL){
-        fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Invalid relative file path pointer (NULL).\n");
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Invalid relative file path pointer (NULL).");
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
 
     // NEW: rpath must be at least 1 character (for '\')
     if(rpath_len == 0){ // If declared length is 0
-        fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Relative file path has a declared length of 0. Minimum is 1 (for '\\').\n");
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Relative file path has a declared length of 0. Minimum is 1 (for '\\').");
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
     if (strlen(rpath) == 0) { // If actual string content is empty
-        fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Relative file path content is empty. Minimum is 1 character (for '\\').\n");
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Relative file path content is empty. Minimum is 1 character (for '\\').");
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
 
@@ -152,37 +160,49 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
     // rpath_len is *content* length, and receiver expects `content_len < MAX_PATH`.
     // So, `rpath_len >= sizeof(frame.payload.file_metadata.rpath)` means it won't fit WITH a null terminator.
     if(rpath_len >= sizeof(frame->payload.file_metadata.rpath)){
-        fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Relative file path content (length %u) is too long for payload buffer (max %zu chars).\n",
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Relative file path content (length %u) is too long for payload buffer (max %zu chars).",
                 rpath_len, sizeof(frame->payload.file_metadata.rpath) - 1);
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
     // Consistency check: declared length vs. actual string length
     if (rpath_len != strlen(rpath)) {
-        fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Declared rpath_len (%u) does not match actual strlen(rpath) (%zu).\n",
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Declared rpath_len (%u) does not match actual strlen(rpath) (%zu).",
                 rpath_len, strlen(rpath));
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
 
     // --- Validate fname ---
     if(fname == NULL){
-        fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Invalid filename pointer (NULL).\n");
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Invalid filename pointer (NULL).");
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
     // Filename should typically never be 0 length
     if(fname_len == 0){
-        fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Filename has a declared length of 0.\n");
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Filename has a declared length of 0.");
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
 
     if(fname_len >= sizeof(frame->payload.file_metadata.fname)){
-        fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Filename content (length %u) is too long for payload buffer (max %zu chars).\n",
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Filename content (length %u) is too long for payload buffer (max %zu chars).",
                 fname_len, sizeof(frame->payload.file_metadata.fname) - 1);
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
     // Consistency check: declared length vs. actual string length
     if (fname_len != strlen(fname)) {
-        fprintf(stderr, "CRITICAL ERROR: send_file_metadata - Declared fname_len (%u) does not match actual strlen(fname) (%zu).\n",
+        snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Declared fname_len (%u) does not match actual strlen(fname) (%zu).\n",
                 fname_len, strlen(fname));
+        error_log(log_message);
+        fprintf(stderr, "%s\n", log_message);        
         return RET_VAL_ERROR;
     }
 
@@ -200,7 +220,7 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
     frame->payload.file_metadata.fname_len = _htonl(fname_len);
     snprintf(frame->payload.file_metadata.fname, sizeof(frame->payload.file_metadata.fname), "%s", fname);
 
-    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));
+    frame->header.checksum = _htonl(calculate_crc32(frame, sizeof(FrameHeader) + sizeof(FileMetadataPayload)));
 
     entry->src_socket = src_socket;
     memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
@@ -230,7 +250,7 @@ int construct_file_end(PoolEntrySendFrame *entry,
     memcpy(frame->payload.file_end.file_hash, file_hash, 32);
            
     // Calculate the checksum for the frame
-    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(FileEndPayload)));
+    frame->header.checksum = _htonl(calculate_crc32(frame, sizeof(FrameHeader) + sizeof(FileEndPayload)));
     
     entry->src_socket = src_socket;
     memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));
@@ -253,7 +273,7 @@ int construct_text_fragment(PoolEntrySendFrame *entry,
     UdpFrame *frame = &entry->frame;
     
     frame->header.start_delimiter = _htons(FRAME_DELIMITER);
-    frame->header.frame_type = FRAME_TYPE_LONG_TEXT_MESSAGE;
+    frame->header.frame_type = FRAME_TYPE_TEXT_MESSAGE;
     frame->header.seq_num = _htonll(seq_num);
     frame->header.session_id = _htonl(session_id);
     // Set the payload fields
@@ -265,7 +285,7 @@ int construct_text_fragment(PoolEntrySendFrame *entry,
     memcpy(frame->payload.text_fragment.chars, fragment_buffer, fragment_len);
    
     // Calculate the checksum for the frame
-    frame->header.checksum = _htonl(calculate_crc32_table(frame, sizeof(FrameHeader) + sizeof(LongTextPayload)));
+    frame->header.checksum = _htonl(calculate_crc32(frame, sizeof(FrameHeader) + sizeof(TextPayload)));
 
     entry->src_socket = src_socket;
     memcpy(&entry->dest_addr, dest_addr, sizeof(struct sockaddr_in));

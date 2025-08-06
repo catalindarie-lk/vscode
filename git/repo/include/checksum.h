@@ -13,13 +13,16 @@
 #define RET_VAL_ERROR -1
 #endif
 
-// ----- Function implementations -----
-// CRC32 calculation
-int calculate_crc32(const void *data, size_t len);
-// CRC32 calculation
-uint32_t calculate_crc32_table(const void *data, size_t len);
-// Checksum validation
-BOOL is_checksum_valid(const UdpFrame *frame, int bytes_received);
+
+extern uint32_t crc32_table[256];
+typedef uint32_t (*crc32_func_t)(const void* data, size_t len);
+static BOOL cpu_supports_sse42();
+
+static uint32_t calculate_crc32_table(const void* data, size_t len); // Your original
+static uint32_t calculate_crc32_sse(const void* data, size_t len);   // SIMD version
+
+uint32_t calculate_crc32(const void* data, size_t len);
+BOOL is_checksum_valid(const UdpFrame* frame, int bytes_received);
 
 
 #endif // CHECKSUM_H

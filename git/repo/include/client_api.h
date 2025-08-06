@@ -2,7 +2,7 @@
 #define CLIENT_API_H
 
 
-void RequestConnect();
+int RequestConnect(const char *server_ip);
 void RequestDisconnect();
 void SendTextMessage(const char *buffer, const size_t len);
 int SendTextInFile(const char *fpath, size_t fpath_len);

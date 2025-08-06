@@ -15,29 +15,7 @@
 #endif
 
 //--------------------------------------------------------------------------------------------------------------------------
-typedef struct FramePendingAck{
-    UdpFrame frame;
-    time_t time;
-    uint16_t sent_count;
-    struct FramePendingAck *next;
-}FramePendingAck;
-
-typedef struct{
-    uint32_t size;
-    FramePendingAck **entry;
-    CRITICAL_SECTION mutex;
-    uint32_t count;
-    MemPool pool;
-}HashTableFramePendingAck;
-
-void init_ht_frame(HashTableFramePendingAck *ht, const uint32_t size);
-uint64_t ht_get_hash_frame(const uint64_t seq_num, const uint32_t size);
-int ht_insert_frame(HashTableFramePendingAck *ht, UdpFrame *frame);
-void ht_remove_frame(HashTableFramePendingAck *ht, const uint64_t seq_num);
-void ht_clean(HashTableFramePendingAck *ht);
-
-//--------------------------------------------------------------------------------------------------------------------------
-#define HASH_SIZE_ID                  (65536)
+#define HASH_SIZE_ID                  (1024)
 
 typedef uint8_t HashTableStatus;
 enum HashTableStatus{
@@ -54,13 +32,16 @@ typedef struct IdentifierNode{
 }IdentifierNode;
 
 typedef struct{
-    IdentifierNode *entry[HASH_SIZE_ID];
+    IdentifierNode **entry;
     CRITICAL_SECTION mutex;
-    uint32_t count;
+    size_t size;
+    size_t count;
+    MemPool pool_nodes;                     // memory pool of nodes; when new node is inserted into table, memory is allocated
+                                            // from this pre-allocated mem pool;
 }HashTableIdentifierNode;
 
-void init_ht_id(HashTableIdentifierNode *ht);
-uint64_t ht_get_hash_id(uint32_t id);
+void init_table_id(HashTableIdentifierNode *ht, size_t size, const size_t max_nodes);
+uint64_t ht_get_hash_id(uint32_t id, const size_t size);
 int ht_insert_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
 void ht_remove_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id);
 void ht_remove_all_sid(HashTableIdentifierNode *ht, const uint32_t sid);
@@ -70,26 +51,23 @@ void ht_clean_id(HashTableIdentifierNode *ht);
 void ht_print_id(HashTableIdentifierNode *ht);
 
 
-
-
-
-
-
 //--------------------------------------------------------------------------------------------------------------------------
 
 __declspec(align(64))typedef struct TableNodeSendFrame{
-    uintptr_t entry;
-    time_t sent_time;
-    uint16_t count;
-    struct TableNodeSendFrame *next;
+    uintptr_t entry;                        // pointer to mem pool with entry (frame + extras)
+    time_t sent_time;                       // timestamp of the last time when frame was sent
+    uint16_t sent_count;                    // nr of times the frame was sent
+    struct TableNodeSendFrame *next;        // next node in linked list
 }TableNodeSendFrame;
 
 __declspec(align(64))typedef struct{
-    size_t size;
-    TableNodeSendFrame **head;  // array of pointers to TableNodeSendFrame
-    CRITICAL_SECTION mutex;
-    size_t count;
-    MemPool pool_nodes;
+    size_t size;                            // size of the hash table base array. each index in array is a pointer to a linked list 
+                                            // of nodes which have overlapping hash for the sequence number
+    TableNodeSendFrame **node;              // array of pointers to TableNodeSendFrame
+    CRITICAL_SECTION mutex;                 // mutex for shared data access
+    size_t count;                           // nr of inserted frmes in the table
+    MemPool pool_nodes;                     // memory pool of nodes; when new node is inserted into table, memory is allocated
+                                            // from this pre-allocated mem pool;
 }TableSendFrame;
 
 void init_table_send_frame(TableSendFrame *table, const size_t size, const size_t max_nodes);
@@ -97,11 +75,6 @@ uint64_t get_hash_table_send_frame(const uint64_t seq_num, const size_t size);
 int insert_table_send_frame(TableSendFrame *table, const uintptr_t entry);
 uintptr_t remove_table_send_frame(TableSendFrame *table, const uint64_t seq_num);
 uintptr_t search_table_send_frame(TableSendFrame *table, const uint64_t seq_num);
-
-// void ht_txframe_clean(HTableTXFrame *htable);
-
-
-
 
  
 #endif // FRAMES_HASH_H

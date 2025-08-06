@@ -55,5 +55,6 @@ void* s_pool_alloc(s_MemPool* pool);
 void s_pool_free(s_MemPool* pool, void* ptr);
 void s_pool_destroy(s_MemPool* pool);
 
+//--------------------------------------------------------------------------------------------------------------------------
 
 #endif // MEM_POOL_H

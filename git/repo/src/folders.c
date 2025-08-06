@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <errno.h>   // For errno, ERANGE
 
 #include "include/folders.h"
 #include "include/protocol_frames.h"
@@ -255,3 +257,67 @@ FILE* FopenRename(const char* in_fpath, char* out_fpath, size_t fpath_max_size, 
     return fp;
 }
 
+
+
+// Function to list folders in a root path and extract session IDs
+void ReadSessionIDsInRoot(const char *rootPath, const char *sidFolder) {
+    WIN32_FIND_DATA findData;
+    HANDLE hFind;
+    char searchPath[MAX_PATH];
+
+    // Add wildcard to the root path
+    // Ensure searchPath has enough space, MAX_PATH is usually sufficient
+    snprintf(searchPath, MAX_PATH, "%s\\*", rootPath);
+
+    hFind = FindFirstFile(searchPath, &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "Error: Could not open directory: %s (Error Code: %lu)\n", rootPath, GetLastError());
+        return;
+    }
+
+    #define MAX_SID_STR_LEN 11 // Max 10 digits for uint32_t + 1 for null terminator
+    char sid_str[MAX_SID_STR_LEN];
+    uint32_t sid;
+    char *endptr; // Corrected declaration
+
+    do {
+        // Check if it's a directory and not "." or ".."
+        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            strcmp(findData.cFileName, ".") != 0 &&
+            strcmp(findData.cFileName, "..") != 0) {
+
+            // Check if the folder name starts with the sidFolder prefix
+            size_t sidFolderLen = strlen(sidFolder);
+            if (strncmp(sidFolder, findData.cFileName, sidFolderLen) == 0) {
+                fprintf(stdout, "Found potential Session ID folder: %s\n", findData.cFileName);
+
+                // Copy the numerical part of the session ID
+                // Ensure null-termination
+                strncpy(sid_str, findData.cFileName + sidFolderLen, MAX_SID_STR_LEN - 1);
+                sid_str[MAX_SID_STR_LEN - 1] = '\0'; // Explicitly null-terminate
+
+                errno = 0; // Clear errno before calling strtol
+                sid = (uint32_t)strtol(sid_str, &endptr, 10);
+
+                // Check for conversion errors
+                if (endptr == sid_str || *endptr != '\0') { // No digits found OR non-numeric chars after digits
+                    fprintf(stderr, "Warning: Could not fully parse session ID from '%s'. Invalid format or non-numeric characters.\n", findData.cFileName);
+                    continue; // Skip to the next folder
+                }
+
+                if (errno == ERANGE) { // Check for overflow/underflow
+                    fprintf(stderr, "Warning: Session ID '%s' is out of range for uint32_t.\n", sid_str);
+                    continue; // Skip to the next folder
+                }
+
+                // If sid is successfully parsed and not zero (or handle zero if it's a valid ID)
+                if (sid != 0) { // Assuming 0 is not a valid session ID
+                    fprintf(stdout, "Extracted Session ID number: %u\n", sid);
+                    // Here you would typically store `sid` in a list or array
+                }
+            }
+        }
+    } while (FindNextFile(hFind, &findData));
+
+    FindClose(hFind);
+}

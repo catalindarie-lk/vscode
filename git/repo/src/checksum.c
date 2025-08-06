@@ -2,7 +2,6 @@
 #include <stdio.h>              // For fprintf, NULL checks, etc.
 #include <stdint.h>             // For uint64_t and uint8_t types
 #include <string.h>             // For memset, memcpy
-//#include <winsock2.h>           // Primary Winsock header
 #include <ws2tcpip.h>
 #include <windows.h>
 
@@ -11,8 +10,10 @@
 #include "include/protocol_frames.h"
 
 
+#include <nmmintrin.h> // SSE4.2 intrinsics
+#include <intrin.h>
 
-static uint32_t crc32_table[256] = {
+uint32_t crc32_table[256] = {
     0x00000000,    0x77073096,    0xEE0E612C,    0x990951BA,    0x076DC419,    0x706AF48F,    0xE963A535,    0x9E6495A3,
     0x0EDB8832,    0x79DCB8A4,    0xE0D5E91E,    0x97D2D988,    0x09B64C2B,    0x7EB17CBD,    0xE7B82D07,    0x90BF1D91,
     0x1DB71064,    0x6AB020F2,    0xF3B97148,    0x84BE41DE,    0x1ADAD47D,    0x6DDDE4EB,    0xF4D4B551,    0x83D385C7,
@@ -47,46 +48,89 @@ static uint32_t crc32_table[256] = {
     0xB3667A2E,    0xC4614AB8,    0x5D681B02,    0x2A6F2B94,    0xB40BBE37,    0xC30C8EA1,    0x5A05DF1B,    0x2D02EF8D
 };
 
-
-// CRC32 calculation
-// int calculate_crc32(const void *data, size_t len){
-//     uint32_t crc = 0xFFFFFFFF; // Initial value
-//     const uint8_t *byte_data = (const uint8_t *)data;
-//     uint32_t polynomial = 0xEDB88320; // IEEE 802.3 polynomial (reversed)
-//     fprintf(stdout, "Nr of bytes CRC: %llu\n", len);
-//     for (size_t i = 0; i < len; i++) {
-//         crc ^= byte_data[i];
-//         for (int j = 0; j < 8; j++) {
-//             if (crc & 1) {
-//                 crc = (crc >> 1) ^ polynomial;
-//             } else {
-//                 crc >>= 1;
-//             }
-//         }
-//     }
-//     return ~crc; // Final XOR (sometimes not used depending on CRC variant)
-// }
 //calculate crc32 with table
-uint32_t calculate_crc32_table(const void *data, size_t len) {
+
+static uint32_t calculate_crc32_table(const void* data, size_t len) {
     uint32_t crc = 0xFFFFFFFF;
-    uint8_t *byte_data = (uint8_t*)data;
+    const uint8_t *bytes = (const uint8_t*)data;
     for (size_t i = 0; i < len; i++) {
-        uint8_t index = (uint8_t)((crc ^ byte_data[i]) & 0xFF);
+        uint8_t index = (uint8_t)((crc ^ bytes[i]) & 0xFF);
         crc = (crc >> 8) ^ crc32_table[index];
     }
     return crc ^ 0xFFFFFFFF;
 }
-// Checksum validation
-BOOL is_checksum_valid(const UdpFrame *frame, int bytes_received){
-    // Create a temporary frame to calculate checksum without its own checksum field
-    UdpFrame temp_frame_for_checksum;
-    // Copy only the header and the part of the payload that was actually sent.
-    // This is crucial if payloads are variable length or smaller than MAX_PAYLOAD_SIZE.
-    // For simplicity, we assume fixed size for now (sizeof(UdpFrame)).
-    // In a real scenario, you'd use header.payload_len or similar.
-    memcpy(&temp_frame_for_checksum, frame, bytes_received);
-    temp_frame_for_checksum.header.checksum = 0; // Zero out checksum field for calculation
 
-    uint32_t calculated_checksum = calculate_crc32_table(&temp_frame_for_checksum, bytes_received);
-    return (_ntohl(frame->header.checksum) == calculated_checksum); // Use _ntohl for 32-bit checksum
+static uint32_t calculate_crc32_sse(const void* data, size_t len) {
+    const uint8_t* bytes = (const uint8_t*)data;
+    uint32_t crc = 0xFFFFFFFF;
+
+    // Process 8 bytes at a time if possible
+    while (len >= sizeof(uint64_t)) {
+        crc = _mm_crc32_u64(crc, *(uint64_t*)bytes);
+        bytes += sizeof(uint64_t);
+        len -= sizeof(uint64_t);
+    }
+
+    // Process remaining 4 bytes
+    if (len >= sizeof(uint32_t)) {
+        crc = _mm_crc32_u32(crc, *(uint32_t*)bytes);
+        bytes += sizeof(uint32_t);
+        len -= sizeof(uint32_t);
+    }
+
+    // Process remaining 2 bytes
+    if (len >= sizeof(uint16_t)) {
+        crc = _mm_crc32_u16(crc, *(uint16_t*)bytes);
+        bytes += sizeof(uint16_t);
+        len -= sizeof(uint16_t);
+    }
+
+    // Process remaining 1 byte
+    if (len >= sizeof(uint8_t)) {
+        crc = _mm_crc32_u8(crc, *bytes);
+    }
+
+    return crc ^ 0xFFFFFFFF;
 }
+
+
+// Runtime SSE4.2 check
+static BOOL cpu_supports_sse42() {
+    int cpu_info[4] = {0};
+    __cpuid(cpu_info, 0);
+    if (cpu_info[0] < 1) return FALSE;
+    __cpuid(cpu_info, 1);
+    return (cpu_info[2] & (1 << 20)) != 0;
+}
+
+// Auto-selecting wrapper
+uint32_t calculate_crc32(const void* data, size_t len) {
+    // static crc32_func_t crc32_func = NULL;
+
+    // Lazy initialization
+    // if (!crc32_func) {
+    //     crc32_func = cpu_supports_sse42() ? calculate_crc32_sse : calculate_crc32_table;
+    // }
+
+    return calculate_crc32_sse(data, len);
+}
+
+
+BOOL is_checksum_valid(const UdpFrame* frame, int bytes_received) {
+    // static crc32_func_t crc32_func = NULL;
+
+    // Lazy initialization — only runs once
+    // if (!crc32_func) {
+    //     crc32_func = cpu_supports_sse42() ? calculate_crc32_sse : calculate_crc32_table;
+    // }
+
+    UdpFrame temp_frame_for_checksum;
+    memcpy(&temp_frame_for_checksum, frame, bytes_received);
+    temp_frame_for_checksum.header.checksum = 0;
+
+    // uint32_t calculated_checksum = crc32_func(&temp_frame_for_checksum, bytes_received);
+    uint32_t calculated_checksum = calculate_crc32_sse(&temp_frame_for_checksum, bytes_received);
+    return (_ntohl(frame->header.checksum) == calculated_checksum);
+}
+
+

@@ -32,6 +32,24 @@ long long get_file_size(const char *_FileName){
     return(size);
 }
 
+// Create output file
+int create_output_file(const char *buffer, const uint64_t size, const char *path){
+    FILE *fp = fopen(path, "wb");           
+    if(fp == NULL){
+        fprintf(stderr, "Error creating output file!!!\n");
+        return RET_VAL_ERROR;
+    }
+    size_t written = safe_fwrite(fp, buffer, size);
+    if (written != size) {
+        fprintf(stderr, "Incomplete bytes written to file. Expected: %llu, Written: %zu\n", size, written);
+        fclose(fp);
+        return RET_VAL_ERROR;
+    }
+    fclose(fp);
+    fprintf(stderr, "Creating output file: %s\n", path);
+    return RET_VAL_SUCCESS;
+}
+
 size_t safe_fwrite(FILE *fp, const void *buffer, size_t total_size) {
     const size_t max_chunk = 1UL << 30; // 1 GB
     const uint8_t *ptr = (const uint8_t *)buffer;

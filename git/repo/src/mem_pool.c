@@ -51,6 +51,7 @@ void init_pool(MemPool* pool, const uint64_t block_size, const uint64_t block_co
     pool->next[pool->block_count - 1] = POOL_END;        // Use POOL_END to indicate end of list
     pool->used[pool->block_count - 1] = FREE;           // Last block is also unused
     pool->free_blocks = pool->block_count;
+    VirtualLock(pool->memory, pool->block_size * pool->block_count);
     // Initialize the critical section for thread safety
     InitializeCriticalSection(&pool->mutex);
     return;

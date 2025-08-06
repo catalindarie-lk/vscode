@@ -9,83 +9,108 @@
 #include "include/sha256.h"
 
 #ifndef RET_VAL_SUCCESS
-#define RET_VAL_SUCCESS                         0
+#define RET_VAL_SUCCESS                             0
 #endif
 #ifndef RET_VAL_ERROR
-#define RET_VAL_ERROR                           -1
+#define RET_VAL_ERROR                               -1
 #endif
-
+////////////////////////////////////////////////////
 
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
-#define DEFAULT_SESSION_TIMEOUT_SEC             30
+#define DEFAULT_SESSION_TIMEOUT_SEC                 30
 #endif
 
-#define MAX_SERVER_ACTIVE_FSTREAMS              10
-#define SERVER_ACK_FILE_FRAMES_THREADS          10
-
-#define MAX_SERVER_ACTIVE_MSTREAMS              1
-#define SERVER_ACK_MESSAGE_FRAMES_THREADS       1
-
-#define SERVER_RECV_SEND_FRAME_WRK_THREADS      5
-#define SERVER_PROCESS_FRAME_WRK_THREAS         10
-
 // --- Constants 
-#define SERVER_NAME                             "lkdc UDP Text/File Transfer Server"
-#define MAX_CLIENTS                             10
+#define SERVER_NAME                                 "lkdc UDP Text/File Transfer Server"
+#define MAX_CLIENTS                                 10
+#define SACK_READY_FRAME_TIMEOUT_MS                 100
 
-#define SERVER_PARTITION_DRIVE                  "H:\\"
-#define SERVER_ROOT_FOLDER                      "H:\\_test\\server_root\\"
-#define SERVER_MESSAGE_TEXT_FILES_FOLDER        "H:\\_test\\messages_root\\"
+#define SERVER_PARTITION_DRIVE                      "D:\\"
+#define SERVER_ROOT_FOLDER                          "D:\\_test\\server_root\\"
+#define SERVER_MESSAGE_TEXT_FILES_FOLDER            "D:\\_test\\messages_root\\"
+#define SERVER_SID_FOLDER_NAME_FOR_CLIENT           "SID_"
 
-#define FRAGMENTS_PER_CHUNK                     (64ULL)
-#define CHUNK_TRAILING                          (1u << 7) // 0b10000000
-#define CHUNK_BODY                              (1u << 6) // 0b01000000
-#define CHUNK_HASHED                            (1u << 5) // 0b00100000
-#define CHUNK_WRITTEN                           (1u << 0) // 0b00000001
-#define CHUNK_NONE                              (0)       // 0b00000000
+#define FRAGMENTS_PER_CHUNK                         (64ULL)
+#define CHUNK_TRAILING                              (1u << 7) // 0b10000000
+#define CHUNK_BODY                                  (1u << 6) // 0b01000000
+#define CHUNK_HASHED                                (1u << 5) // 0b00100000
+#define CHUNK_WRITTEN                               (1u << 0) // 0b00000001
+#define CHUNK_NONE                                  (0)       // 0b00000000
 
-#define BLOCK_SIZE_CHUNK                        (FILE_FRAGMENT_SIZE * 64)
-#define BLOCK_COUNT_CHUNK                       (256 + 64 * MAX_SERVER_ACTIVE_FSTREAMS)
+#define BLOCK_SIZE_CHUNK                            (FILE_FRAGMENT_SIZE * 64)
+#define BLOCK_COUNT_CHUNK                           (256 + 64 * MAX_SERVER_ACTIVE_FSTREAMS)
 
-#define SERVER_SIZE_QUEUE_FRAME                 (1024 + 256 * MAX_SERVER_ACTIVE_FSTREAMS)
-#define SERVER_SIZE_QUEUE_PRIORITY_FRAME        256
+//---------------------------------------------------------------------------------------------------------
+// --- Server Stream Configuration ---
+#define MAX_SERVER_ACTIVE_FSTREAMS                  10
+#define MAX_SERVER_ACTIVE_MSTREAMS                  1
 
-#define SERVER_SIZE_FQUEUE_ACK                  8192
-#define SERVER_SIZE_MQUEUE_ACK                  1024
-#define SERVER_SIZE_QUEUE_PRIORITY_ACK          1024
+// --- Server Worker Thread Configuration ---
+#define SERVER_MAX_THREADS_RECV_SEND_FRAME          2
+#define SERVER_MAX_THREADS_PROCESS_FRAME            4
 
-#define IOCP_RECV_MEM_POOL_BLOCKS               4096
-#define IOCP_SEND_MEM_POOL_BLOCKS               4096
+#define SERVER_MAX_THREADS_SEND_FILE_SACK_FRAMES    2
+#define SERVER_MAX_THREADS_SEND_MESSAGE_ACK_FRAMES  1
+
+
+
+//---------------------------------------------------------------------------------------------------------
+// --- Server SEND Buffer Sizes ---
+#define SERVER_QUEUE_SIZE_SEND_FRAME                (4096 + 256 * MAX_SERVER_ACTIVE_FSTREAMS)
+#define SERVER_QUEUE_SIZE_SEND_PRIO_FRAME           128
+#define SERVER_QUEUE_SIZE_SEND_CTRL_FRAME           16
+#define SERVER_QUEUE_SIZE_SEND_MESSAGE_ACK_FRAME    (1024 + 512 * MAX_SERVER_ACTIVE_FSTREAMS)
+#define SERVER_QUEUE_SIZE_SEND_PRIO_ACK_FRAME       128
+#define SERVER_QUEUE_SIZE_CLIENT_ACK_SEQ            (SERVER_QUEUE_SIZE_SEND_FRAME)
+#define SERVER_QUEUE_SIZE_CLIENT_SLOT               (SERVER_QUEUE_SIZE_CLIENT_ACK_SEQ * 2)
+// --- Server SEND Memory Pool Sizes ---
+#define SERVER_POOL_SIZE_SEND                       (SERVER_QUEUE_SIZE_SEND_FRAME + \
+                                                    SERVER_QUEUE_SIZE_SEND_PRIO_FRAME + \
+                                                    SERVER_QUEUE_SIZE_SEND_CTRL_FRAME)
+#define SERVER_POOL_SIZE_ACK_SEND                   (SERVER_QUEUE_SIZE_SEND_MESSAGE_ACK_FRAME + \
+                                                    SERVER_QUEUE_SIZE_SEND_PRIO_ACK_FRAME)
+#define SERVER_POOL_SIZE_IOCP_SEND                  (SERVER_POOL_SIZE_SEND + \
+                                                    SERVER_POOL_SIZE_ACK_SEND + 128) // Total size for IOCP send contexts
+// --- SERVER RECV Buffer Sizes ---
+#define SERVER_QUEUE_SIZE_RECV_FRAME                (4096 + 1024 * MAX_SERVER_ACTIVE_FSTREAMS)
+#define SERVER_QUEUE_SIZE_RECV_PRIO_FRAME           128
+// --- Server RECV Memory Pool Sizes ---
+#define SERVER_POOL_SIZE_RECV                       (SERVER_QUEUE_SIZE_RECV_FRAME + \
+                                                    SERVER_QUEUE_SIZE_RECV_PRIO_FRAME)
+#define SERVER_POOL_SIZE_IOCP_RECV                  SERVER_POOL_SIZE_RECV + 128
+
 
 
 // --- Macro to Parse Global Data to Threads ---
 // This macro simplifies passing pointers to global client data structures into thread functions.
 // It creates local pointers within the thread function's scope, pointing to the global instances.
-#define PARSE_SERVER_GLOBAL_DATA(server_obj, client_list_obj, buffers_obj) \
+#define PARSE_SERVER_GLOBAL_DATA(server_obj, client_list_obj, buffers_obj, threads_obj) \
     ServerData *server = &(server_obj); \
     ClientListData *client_list = &(client_list_obj); \
     ServerBuffers *buffers = &(buffers_obj); \
+    ServerThreads *threads = &(threads_obj); \
     MemPool *pool_file_chunk = &((buffers_obj).pool_file_chunk); \
     MemPool *pool_iocp_send_context = &((buffers_obj).pool_iocp_send_context); \
     MemPool *pool_iocp_recv_context = &((buffers_obj).pool_iocp_recv_context); \
-    MemPool *pool_recv_frame = &((buffers_obj).pool_recv_frame); \
-    QueueAckUpdFrame *queue_recv_frame = &((buffers_obj).queue_recv_frame); \
-    QueueAckUpdFrame *queue_recv_prio_frame = &((buffers_obj).queue_recv_prio_frame); \
+    MemPool *pool_recv_udp_frame = &((buffers_obj).pool_recv_udp_frame); \
+    QueueFrame *queue_recv_udp_frame = &((buffers_obj).queue_recv_udp_frame); \
+    QueueFrame *queue_recv_prio_udp_frame = &((buffers_obj).queue_recv_prio_udp_frame); \
     QueueFstream *queue_process_fstream = &((buffers_obj).queue_process_fstream); \
-    HashTableIdentifierNode *ht_fid = &((buffers_obj).ht_fid); \
-    HashTableIdentifierNode *ht_mid = &((buffers_obj).ht_mid); \
-    MemPool *pool_queue_ack_udp_frame = &((buffers_obj).pool_queue_ack_udp_frame); \
-    QueueAckUpdFrame *queue_file_ack_udp_frame = &((buffers_obj).queue_file_ack_udp_frame); \
-    QueueAckUpdFrame *queue_message_ack_udp_frame = &((buffers_obj).queue_message_ack_udp_frame); \
-    QueueAckUpdFrame *queue_priority_ack_udp_frame = &((buffers_obj).queue_priority_ack_udp_frame); \
-    MemPool *pool_send_frame = &((buffers_obj).pool_send_frame); \
-    QueueSendFrame *queue_send_frame = &((buffers_obj).queue_send_frame); \
-    QueueSendFrame *queue_send_prio_frame = &((buffers_obj).queue_send_prio_frame); \
-    QueueSendFrame *queue_send_ctrl_frame = &((buffers_obj).queue_send_ctrl_frame); \
+    HashTableIdentifierNode *table_file_id = &((buffers_obj).table_file_id); \
+    HashTableIdentifierNode *table_message_id = &((buffers_obj).table_message_id); \
+    MemPool *pool_queue_ack_frame = &((buffers_obj).pool_queue_ack_frame); \
+    QueueFrame *queue_message_ack_frame = &((buffers_obj).queue_message_ack_frame); \
+    QueueFrame *queue_prio_ack_frame = &((buffers_obj).queue_prio_ack_frame); \
+    MemPool *pool_send_udp_frame = &((buffers_obj).pool_send_udp_frame); \
+    QueueFrame *queue_send_udp_frame = &((buffers_obj).queue_send_udp_frame); \
+    QueueFrame *queue_send_prio_udp_frame = &((buffers_obj).queue_send_prio_udp_frame); \
+    QueueFrame *queue_send_ctrl_udp_frame = &((buffers_obj).queue_send_ctrl_udp_frame); \
+    QueueClientSlot *queue_client_slot = &((buffers_obj).queue_client_slot); \
 
 // end of #define PARSE_GLOBAL_DATA // End marker for the macro definition
 
- 
+
+
 enum Status{
     STATUS_NONE = 0,
     STATUS_BUSY = 1,
@@ -114,7 +139,7 @@ enum StreamChannelError{
     STREAM_ERR_CHUNK_PTR_MALLOC = 12,
 
     STREAM_ERR_MALFORMED_DATA = 13,
-    STREAM_ERR_INTERNAL_COPY  =14,
+    STREAM_ERR_INTERNAL_COPY  = 14,
 
     // STREAM_ERR_FILENAME = 20,
     STREAM_ERR_DRIVE_PARTITION = 20,
@@ -206,8 +231,16 @@ typedef struct{
 
 }ServerFileStream;
 
+typedef struct{
+    SAckPayload payload; // SACK payload for this client
+    uint32_t ack_pending;
+    uint64_t start_timestamp;
+    BOOL start_recorded;
+    CRITICAL_SECTION lock;
+}ClientSAckContext;
+
 typedef struct {
-    SOCKET srv_socket;
+
     struct sockaddr_in client_addr;            // Client's address
     char ip[INET_ADDRSTRLEN];
     uint16_t port;
@@ -225,11 +258,15 @@ typedef struct {
 
     MessageStream mstream[MAX_SERVER_ACTIVE_MSTREAMS];
     CRITICAL_SECTION mstreams_lock;
-     
+    
+    QueueSeq queue_file_ack_seq;
+
+    ClientSAckContext sack_ctx; // SACK context for this client
+ 
     CRITICAL_SECTION lock;
 } Client;
- 
-typedef struct{
+
+typedef struct {
     Client client[MAX_CLIENTS];     // Array of connected clients
     CRITICAL_SECTION lock;          // For thread-safe access to connected_clients
 }ClientListData;
@@ -254,37 +291,68 @@ typedef struct {
     MemPool pool_iocp_send_context;
     MemPool pool_iocp_recv_context;
 
-    MemPool pool_recv_frame;
-    QueueAckUpdFrame queue_recv_frame;
-    QueueAckUpdFrame queue_recv_prio_frame;
+    MemPool pool_recv_udp_frame;
+    QueueFrame queue_recv_udp_frame;
+    QueueFrame queue_recv_prio_udp_frame;
 
-    // QueueFrame queue_frame;
-    // QueueFrame queue_priority_frame;
+    MemPool pool_queue_ack_frame;
+    QueueFrame queue_message_ack_frame;
+    QueueFrame queue_prio_ack_frame;
+
+    MemPool pool_send_udp_frame;
+    QueueFrame queue_send_udp_frame;
+    QueueFrame queue_send_prio_udp_frame;
+    QueueFrame queue_send_ctrl_udp_frame;
 
     QueueFstream queue_process_fstream;
 
-    MemPool pool_queue_ack_udp_frame;
-    QueueAckUpdFrame queue_file_ack_udp_frame;
-    QueueAckUpdFrame queue_message_ack_udp_frame;
-    QueueAckUpdFrame queue_priority_ack_udp_frame;
+    QueueClientSlot queue_client_slot;
 
-    MemPool pool_send_frame;
-
-    QueueSendFrame queue_send_frame;
-    QueueSendFrame queue_send_prio_frame;
-    QueueSendFrame queue_send_ctrl_frame;
-
-    HashTableIdentifierNode ht_fid;
-    HashTableIdentifierNode ht_mid;
+    HashTableIdentifierNode table_file_id;
+    HashTableIdentifierNode table_message_id;
 }ServerBuffers;
+
+typedef struct {
+
+    HANDLE recv_send_frame[SERVER_MAX_THREADS_RECV_SEND_FRAME];
+    HANDLE process_frame[SERVER_MAX_THREADS_PROCESS_FRAME];
+
+    HANDLE send_file_sack_frame[SERVER_MAX_THREADS_SEND_FILE_SACK_FRAMES];
+    HANDLE send_message_ack_frame[SERVER_MAX_THREADS_SEND_MESSAGE_ACK_FRAMES];
+    HANDLE scan_for_trailing_sack;
+    HANDLE send_prio_ack_frame;
+
+    HANDLE send_frame;
+    HANDLE send_prio_frame;
+    HANDLE send_ctrl_frame;
+
+    HANDLE client_timeout;
+    HANDLE file_stream[MAX_SERVER_ACTIVE_FSTREAMS];
+    HANDLE server_command;
+} ServerThreads;
 
 extern ServerData Server;
 extern ServerBuffers Buffers;
 extern ClientListData ClientList;
+extern ServerThreads Threads;
 
-void close_file_stream(ServerFileStream *fstream);
-void close_message_stream(MessageStream *mstream);
+// Thread functions
+static DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam);
+static DWORD WINAPI func_thread_process_frame(LPVOID lpParam);
 
+static DWORD WINAPI fthread_send_file_sack_frame(LPVOID lpParam);
+static DWORD WINAPI fthread_scan_for_trailing_sack(LPVOID lpParam);
+
+static DWORD WINAPI fthread_send_message_ack_frame(LPVOID lpParam);
+static DWORD WINAPI fthread_send_prio_ack_frame(LPVOID lpParam);
+
+static DWORD WINAPI fthread_send_frame(LPVOID lpParam);
+static DWORD WINAPI fthread_send_prio_frame(LPVOID lpParam);
+static DWORD WINAPI fthread_send_ctrl_frame(LPVOID lpParam);
+
+static DWORD WINAPI fthread_client_timeout(LPVOID lpParam);
+static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam);
+static DWORD WINAPI fthread_server_command(LPVOID lpParam);
 
 // Client management functions
 static Client* find_client(const uint32_t session_id);
@@ -294,6 +362,9 @@ static int remove_client(const uint32_t slot);
 static void cleanup_client(Client *client);
 static BOOL validate_file_hash(ServerFileStream *fstream);
 static void check_open_file_stream();
+
+void close_file_stream(ServerFileStream *fstream);
+void close_message_stream(MessageStream *mstream);
 
 
 #endif
