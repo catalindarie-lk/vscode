@@ -144,7 +144,7 @@ void pool_destroy(MemPool* pool) {
 
 
 //--------------------------------------------------------------------------------------------------------------------------
-void init_s_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t block_count) {
+void s_init_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t block_count) {
 
     pool->block_size = block_size;
     pool->block_count = block_count;

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <ws2tcpip.h>
 #include "include/protocol_frames.h"
+#include "include/resources.h"
 #include "include/checksum.h"
 #include "include/netendians.h"         // For network byte order conversions
 #include "include/mem_pool.h"

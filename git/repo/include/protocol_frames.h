@@ -7,17 +7,15 @@
 #include <windows.h>                    // For Windows-specific functions like CreateThread, Sleep
 #include <mswsock.h>                    // Optional: For WSARecvFrom and advanced I/O
 #include <iphlpapi.h>                   // For IP Helper API functions
-#include "include/mem_pool.h"
-
 
 #ifndef RET_VAL_SUCCESS
-#define RET_VAL_SUCCESS                     (0)
+#define RET_VAL_SUCCESS                     0
 #endif
 #ifndef RET_VAL_ERROR
-#define RET_VAL_ERROR                       (-1)
+#define RET_VAL_ERROR                       -1
 #endif
 #ifndef MAX_PATH
-#define MAX_PATH                            (260)
+#define MAX_PATH                            260
 #endif
 
 #define SERVER_PORT                         53567               // Port the server listens on
@@ -37,6 +35,7 @@
 #define DEFAULT_CONNECT_REQUEST_SEQ         (UINT64_MAX - 2)
 #define DEFAULT_KEEP_ALIVE_SEQ              (UINT64_MAX - 3)
 #define DEFAULT_SACK_SEQ                    (UINT64_MAX - 4)
+#define DEFAULT_RTT_SEQ                     (UINT64_MAX - 5)
 
 #define DEFAULT_CONNECT_REQUEST_SID         (UINT32_MAX - 1)
 
@@ -65,11 +64,12 @@ enum FrameType{
 
 typedef uint8_t AckErrorCode;
 enum AckErrorCode {
-    STS_FRAME_DATA_ACK = 11,
+    // STS_FRAME_DATA_ACK = 11,
     STS_KEEP_ALIVE = 12,  
     STS_CONFIRM_FILE_METADATA = 21,
     STS_CONFIRM_FILE_END = 22,
     STS_CONFIRM_DISCONNECT = 23,
+    STS_CONFIRM_MESSAGE_FRAGMENT = 24,
 
     ERR_EXISTING_FILE = 100,       // Server has completed this transfer
     ERR_DUPLICATE_FRAME = 101,     // Frame was already received
@@ -121,6 +121,9 @@ typedef struct {                                 // Session ID for which this SA
     uint64_t seq_num[MAX_SACK_COUNT];
 } SAckPayload;
 
+typedef struct {
+    uint64_t timestamp;
+} RttPayload;
 
 typedef struct {
     uint32_t file_id;                                       // Unique identifier for the file transfer session
@@ -169,6 +172,7 @@ typedef struct {
         ConnectRequestPayload connection_request;                      // Client's connect request
         ConnectResponsePayload connection_response;                    // Server's response to client connect
         AckPayload ack;
+        RttPayload rtt;
         SAckPayload sack;
         FileMetadataPayload file_metadata;                  // File metadata request/response
         FileMetadataResponsePayload file_metadata_response;                  // File metadata request/response
@@ -186,54 +190,5 @@ typedef struct {
 } AckUdpFrame;
 
 #pragma pack(pop)
-
-// Enumeration for operation type within IOCP_CONTEXT
-typedef enum {
-    OP_RECV,
-    OP_SEND
-} OPERATION_TYPE;
-
-typedef struct {
-    OVERLAPPED overlapped; // Must be the first member for easy casting
-    WSABUF wsaBuf;
-    CHAR buffer[sizeof(UdpFrame)];
-    struct sockaddr_in addr;  // Source/Destination address
-    int addr_len;
-    OPERATION_TYPE type;      // To distinguish between send and receive operations
-} IOCP_CONTEXT;
-//--------------------------------------------------------------------------------------------------------------------------
-typedef struct{
-    UdpFrame frame; // The UDP frame to be sent
-    SOCKET src_socket;
-    struct sockaddr_in dest_addr; // Destination address for the frame
-}PoolEntrySendFrame;
-
-typedef struct{
-    UdpFrame frame; // The UDP frame to be sent
-    // SOCKET src_socket;
-    struct sockaddr_in src_addr; // Destination address for the frame
-    uint32_t frame_size; // Size of the frame in bytes
-    time_t timestamp; // Timestamp when the frame was received
-}PoolEntryRecvFrame;
-
-typedef struct{
-    AckUdpFrame frame; // The UDP frame to be sent
-    SOCKET src_socket;
-    struct sockaddr_in dest_addr; // Destination address for the frame
-}PoolEntryAckFrame;
-
-typedef struct {
-    char log_message[256];
-    unsigned long long timestamp_64bit; // 64-bit timestamp
-} PoolErrorLogEntry;
-//--------------------------------------------------------------------------------------------------------------------------
-void init_iocp_context(IOCP_CONTEXT *iocp_context, OPERATION_TYPE type);
-int udp_recv_from(const SOCKET src_socket, IOCP_CONTEXT *iocp_context);
-int udp_send_to(const char *data, size_t data_len, const SOCKET src_socket, const struct sockaddr_in *dest_addr, MemPool *mem_pool);
-
-void refill_recv_iocp_pool(const SOCKET src_socket, MemPool *mem_pool);
-
-int send_pool_frame(PoolEntrySendFrame *entry, MemPool *mem_pool);
-int send_pool_ack_frame(PoolEntryAckFrame *pool_ack_entry, MemPool *mem_pool);
 
 #endif 

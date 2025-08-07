@@ -340,7 +340,7 @@ DWORD WINAPI MainLogicThread(LPVOID lpParam) {
             g_clientStats.fstream_progress[i] = progress;
         }
 
-        g_clientStats.files_pending_for_streaming = Buffers.queue_process_fstream.pending;
+        g_clientStats.files_pending_for_streaming = Buffers.queue_send_file_command.pending;
 
         g_clientStats.queue_send_frames_pending = Buffers.queue_send_udp_frame.pending;
         g_clientStats.queue_send_prio_frames_pending = Buffers.queue_recv_prio_udp_frame.pending;

@@ -8,6 +8,7 @@
 
 #include "include/file_handler.h"
 #include "include/protocol_frames.h"
+#include "include/resources.h"
 #include "include/server.h"
 #include "include/server_frames.h"
 #include "include/netendians.h"
@@ -264,7 +265,6 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, const st
     }
     fstream->fp = fopen(fstream->fpath, "wb+"); // "wb+" allows writing and reading, creates or truncates
 
-    
     // char fpath[MAX_PATH] = {0};
     // fstream->fp = FopenRename(fstream->fpath, fpath, MAX_PATH, "wb+");
     // if(fstream->fp == NULL){
@@ -274,7 +274,7 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, const st
     // }
     // fprintf(stdout, "Received file: %s\n", fpath);
 
-    if(push_fstream(queue_process_fstream, (uintptr_t)fstream) == RET_VAL_ERROR){
+    if(push_ptr(queue_process_fstream, (uintptr_t)fstream) == RET_VAL_ERROR){
         goto exit_error;
     }
 
@@ -348,7 +348,7 @@ int handle_file_metadata(Client *client, UdpFrame *frame) {
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_METADATA, server->socket, &client->client_addr);
-    if(push_frame(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+    if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
         fprintf(stderr, "ERROR: Failed to push file metadata ack frame to queue\n");
         pool_free(pool_queue_ack_frame, entry);
     }
@@ -365,7 +365,7 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    if(push_frame(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+    if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
         fprintf(stderr, "ERROR: Failed to push file metadata ack error frame to queue\n");
         pool_free(pool_queue_ack_frame, entry);
     }
@@ -450,7 +450,7 @@ int handle_file_fragment(Client *client, UdpFrame *frame){
     //     return RET_VAL_ERROR;
     // }
     // construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
-    // if(push_frame(queue_file_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+    // if(push_ptr(queue_file_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
     //     fprintf(stderr, "ERROR: Failed to push file fragment ack frame to queue\n");
     //     pool_free(pool_queue_ack_frame, entry);
     //     LeaveCriticalSection(&client->lock);
@@ -481,7 +481,7 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    if(push_frame(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+    if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
         fprintf(stderr, "ERROR: Failed to push file fragment ack error frame to queue\n");
         pool_free(pool_queue_ack_frame, entry);
     }
@@ -539,7 +539,7 @@ int handle_file_end(Client *client, UdpFrame *frame){
             return RET_VAL_ERROR;
         }
         construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_END, server->socket, &client->client_addr);
-        if(push_frame(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
             fprintf(stderr, "ERROR: Failed to push file end ack frame to queue\n");
             pool_free(pool_queue_ack_frame, entry);
         }
@@ -556,7 +556,7 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    if(push_frame(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+    if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
         fprintf(stderr, "ERROR: Failed to push file end ack error frame to queue\n");
         pool_free(pool_queue_ack_frame, entry);
     }

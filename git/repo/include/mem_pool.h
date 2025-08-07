@@ -50,11 +50,14 @@ __declspec(align(64)) typedef struct {
 } s_MemPool;
 
 //--------------------------------------------------------------------------------------------------------------------------
-void init_s_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t block_count);
+void s_init_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t block_count);
 void* s_pool_alloc(s_MemPool* pool);
 void s_pool_free(s_MemPool* pool, void* ptr);
 void s_pool_destroy(s_MemPool* pool);
 
-//--------------------------------------------------------------------------------------------------------------------------
+
+
+
+
 
 #endif // MEM_POOL_H

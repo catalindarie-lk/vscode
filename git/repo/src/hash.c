@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "include/protocol_frames.h"
+#include "include/resources.h"
 #include "include/netendians.h"
 #include "include/mem_pool.h"
 #include "include/hash.h"

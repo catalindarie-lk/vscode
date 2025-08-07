@@ -12,6 +12,7 @@
 
 #include "include/server.h"             // For server data structures and definitions
 #include "include/protocol_frames.h"    // For protocol frame definitions
+#include "include/resources.h"
 #include "include/netendians.h"         // For network byte order conversions
 #include "include/checksum.h"           // For checksum validation
 #include "include/sha256.h"
@@ -30,7 +31,7 @@ ServerBuffers Buffers;
 ClientListData ClientList;
 ServerThreads Threads;
 
-const char *server_ip = "10.10.10.1";
+const char *server_ip = "192.168.100.2";
 
 
 static void get_network_config(){
@@ -63,7 +64,7 @@ static int init_server_session(){
 
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
-    memset(&client_list, 0, sizeof(ClientListData));
+    memset(client_list, 0, sizeof(ClientListData));
 
     server->server_status = STATUS_NONE;
     server->session_timeout = DEFAULT_SESSION_TIMEOUT_SEC;
@@ -121,11 +122,38 @@ static int init_server_buffers(){
 
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
-    init_pool(pool_recv_udp_frame, sizeof(PoolEntryRecvFrame), SERVER_POOL_SIZE_RECV);
-    init_queue_frame(queue_recv_udp_frame, SERVER_QUEUE_SIZE_RECV_FRAME);
-    init_queue_frame(queue_recv_prio_udp_frame, SERVER_QUEUE_SIZE_RECV_PRIO_FRAME);
+    for(int i = 0; i < MAX_CLIENTS; i++){
+        Client *client = &client_list->client[i];
+        memset(client, 0, sizeof(Client));
+        client->slot_status = SLOT_FREE;
+        client->connection_status = STATUS_NONE;
+        client->last_activity_time = time(NULL);
+    }
+    // Initialize mstreams lock
+    for(int i = 0; i < MAX_CLIENTS; i++){
+        for(int j = 0; j < MAX_SERVER_ACTIVE_MSTREAMS; j++){
+            InitializeCriticalSection(&client_list->client[i].mstream[j].lock);
+        }
+    }
+    // Initialilize fstreams locks
+    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
+        InitializeCriticalSection(&server->fstream[i].lock);
+    }
+    InitializeCriticalSection(&server->fstreams_lock);
+    // Initialize clients locks
+    for(int i = 0; i < MAX_CLIENTS; i++){
+        Client *client = &client_list->client[i];
+        InitializeCriticalSection(&client->sack_ctx.lock);
+        InitializeCriticalSection(&client->lock);
+    }
+    // Initialize client_list lock
+    InitializeCriticalSection(&client_list->lock);
 
-    init_queue_fstream(queue_process_fstream, MAX_SERVER_ACTIVE_FSTREAMS);
+    init_pool(pool_recv_udp_frame, sizeof(PoolEntryRecvFrame), SERVER_POOL_SIZE_RECV);
+    init_queue_ptr(queue_recv_udp_frame, SERVER_QUEUE_SIZE_RECV_FRAME);
+    init_queue_ptr(queue_recv_prio_udp_frame, SERVER_QUEUE_SIZE_RECV_PRIO_FRAME);
+
+    init_queue_ptr(queue_process_fstream, MAX_SERVER_ACTIVE_FSTREAMS);
     init_table_id(table_file_id, 1024, 32768);
     init_table_id(table_message_id, 1024, 32768);
     init_pool(pool_file_chunk, BLOCK_SIZE_CHUNK, BLOCK_COUNT_CHUNK);
@@ -133,42 +161,19 @@ static int init_server_buffers(){
     init_pool(pool_iocp_recv_context, sizeof(IOCP_CONTEXT), SERVER_POOL_SIZE_IOCP_RECV);
 
     init_pool(pool_queue_ack_frame, sizeof(PoolEntryAckFrame), SERVER_POOL_SIZE_ACK_SEND);
-    init_queue_frame(queue_message_ack_frame, SERVER_QUEUE_SIZE_SEND_MESSAGE_ACK_FRAME);
-    init_queue_frame(queue_prio_ack_frame, SERVER_QUEUE_SIZE_SEND_PRIO_ACK_FRAME);
+    init_queue_ptr(queue_message_ack_frame, SERVER_QUEUE_SIZE_SEND_MESSAGE_ACK_FRAME);
+    init_queue_ptr(queue_prio_ack_frame, SERVER_QUEUE_SIZE_SEND_PRIO_ACK_FRAME);
 
     init_queue_slot(queue_client_slot, SERVER_QUEUE_SIZE_CLIENT_SLOT);
-    fprintf(stdout, "DEBUG: Init queue_client_slot OK\n");
-    for(int i = 0; i < MAX_CLIENTS; i++){
-        Client *client = &client_list->client[i];
-        memset(client, 0, sizeof(Client));
-        client->slot_status = SLOT_FREE;
-        client->connection_status = STATUS_NONE;
-        client->last_activity_time = time(NULL);
-        InitializeCriticalSection(&client->sack_ctx.lock);
-        InitializeCriticalSection(&client->lock);
-        init_queue_seq(&client->queue_file_ack_seq, SERVER_QUEUE_SIZE_CLIENT_ACK_SEQ);
-    }
-    fprintf(stdout, "DEBUG: Init queues OK\n");
-
 
     init_pool(pool_send_udp_frame, sizeof(PoolEntrySendFrame), SERVER_POOL_SIZE_SEND);
-    init_queue_frame(queue_send_udp_frame, SERVER_QUEUE_SIZE_SEND_FRAME);
-    init_queue_frame(queue_send_prio_udp_frame, SERVER_QUEUE_SIZE_SEND_PRIO_FRAME);
-    init_queue_frame(queue_send_ctrl_udp_frame, SERVER_QUEUE_SIZE_SEND_CTRL_FRAME);
-
+    init_queue_ptr(queue_send_udp_frame, SERVER_QUEUE_SIZE_SEND_FRAME);
+    init_queue_ptr(queue_send_prio_udp_frame, SERVER_QUEUE_SIZE_SEND_PRIO_FRAME);
+    init_queue_ptr(queue_send_ctrl_udp_frame, SERVER_QUEUE_SIZE_SEND_CTRL_FRAME);
     for(int i = 0; i < MAX_CLIENTS; i++){
-        for(int j = 0; j < MAX_SERVER_ACTIVE_MSTREAMS; j++){
-            InitializeCriticalSection(&client_list->client[i].mstream[j].lock);
-        }
+        Client *client = &client_list->client[i];
+        init_queue_seq(&client->queue_file_ack_seq, SERVER_QUEUE_SIZE_CLIENT_ACK_SEQ);
     }
-    InitializeCriticalSection(&client_list->lock);
-
-    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        InitializeCriticalSection(&server->fstream[i].lock);
-    }
-    InitializeCriticalSection(&server->fstreams_lock);
-
-    server->server_status = STATUS_READY;
 
     for (int i = 0; i < SERVER_POOL_SIZE_IOCP_RECV; ++i) {
         IOCP_CONTEXT* recv_context = (IOCP_CONTEXT*)pool_alloc(pool_iocp_recv_context);
@@ -185,6 +190,7 @@ static int init_server_buffers(){
     }
     printf("Server: All initial receive operations posted.\n");
 
+    server->server_status = STATUS_READY;
     return RET_VAL_SUCCESS;
 
 }
@@ -522,12 +528,12 @@ static DWORD WINAPI func_thread_recv_send_frame(LPVOID lpParam) {
                                                     frame_type == FRAME_TYPE_DISCONNECT);
  
                     if (is_high_priority_frame) {
-                        if (push_frame(queue_recv_prio_udp_frame, (uintptr_t)recv_frame_entry) == RET_VAL_ERROR) {
+                        if (push_ptr(queue_recv_prio_udp_frame, (uintptr_t)recv_frame_entry) == RET_VAL_ERROR) {
                             fprintf(stderr, "CRITICAL ERROR: Dropping priority recv frame - Failed to push priority recv frame to queue.\n");
                             pool_free(pool_recv_udp_frame, recv_frame_entry);
                         }
                     } else {
-                        if (push_frame(queue_recv_udp_frame, (uintptr_t)recv_frame_entry) == RET_VAL_ERROR) {
+                        if (push_ptr(queue_recv_udp_frame, (uintptr_t)recv_frame_entry) == RET_VAL_ERROR) {
                             fprintf(stderr, "CRITICAL ERROR: Dropping recv frame - Failed to push recv frame to queue.\n");
                             pool_free(pool_recv_udp_frame, recv_frame_entry);
                         }
@@ -615,7 +621,7 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
     while(server->server_status == STATUS_READY) {
         DWORD result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            entry_recv_frame = (PoolEntryRecvFrame*)pop_frame(queue_recv_prio_udp_frame);
+            entry_recv_frame = (PoolEntryRecvFrame*)pop_ptr(queue_recv_prio_udp_frame);
             if(!entry_recv_frame){
                 fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from queue_recv_prio_frame?\n");
                 continue;
@@ -623,7 +629,7 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
             memcpy(&recv_frame_entry, entry_recv_frame, sizeof(PoolEntryRecvFrame));
             pool_free(pool_recv_udp_frame, (void*)entry_recv_frame);
         } else if (result == WAIT_OBJECT_0 + 1) {
-            entry_recv_frame = (PoolEntryRecvFrame*)pop_frame(queue_recv_udp_frame);
+            entry_recv_frame = (PoolEntryRecvFrame*)pop_ptr(queue_recv_udp_frame);
             if(!entry_recv_frame){
                 fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from queue_recv_frame?\n");
                 continue;
@@ -692,7 +698,7 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
                                         Should not happen since inputs are validated before calling");
                 continue;
             }
-            if(push_frame(queue_send_prio_udp_frame, (uintptr_t)pool_send_entry) == RET_VAL_ERROR) {
+            if(push_ptr(queue_send_prio_udp_frame, (uintptr_t)pool_send_entry) == RET_VAL_ERROR) {
                 fprintf(stderr, "ERROR: Failed to push connect response frame to queue.\n");
                 pool_free(pool_send_udp_frame, pool_send_entry);
             }
@@ -733,7 +739,7 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
                                         Should not happen since inputs are validated before calling");
                 continue;
             }
-            if(push_frame(queue_send_prio_udp_frame, (uintptr_t)pool_send_entry) == RET_VAL_ERROR) {
+            if(push_ptr(queue_send_prio_udp_frame, (uintptr_t)pool_send_entry) == RET_VAL_ERROR) {
                 fprintf(stderr, "ERROR: Failed to push connect response frame to queue.\n");
                 pool_free(pool_send_udp_frame, pool_send_entry);
             }
@@ -773,7 +779,7 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
                     return RET_VAL_ERROR;
                 }
                 construct_ack_frame(pool_ack_entry, recv_seq_num, recv_session_id, STS_KEEP_ALIVE, server->socket, &client->client_addr);
-                if (push_frame(queue_prio_ack_frame, (uintptr_t)pool_ack_entry) == RET_VAL_ERROR) {
+                if (push_ptr(queue_prio_ack_frame, (uintptr_t)pool_ack_entry) == RET_VAL_ERROR) {
                     fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
                     pool_free(pool_queue_ack_frame, pool_ack_entry);
                 }
@@ -805,7 +811,7 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
                     return RET_VAL_ERROR;
                 }
                 construct_ack_frame(pool_ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_DISCONNECT, server->socket, &client->client_addr);
-                if (push_frame(queue_prio_ack_frame, (uintptr_t)pool_ack_entry) == RET_VAL_ERROR) {
+                if (push_ptr(queue_prio_ack_frame, (uintptr_t)pool_ack_entry) == RET_VAL_ERROR) {
                     fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
                     pool_free(pool_queue_ack_frame, pool_ack_entry);
                 }
@@ -893,7 +899,7 @@ static DWORD WINAPI fthread_send_file_sack_frame(LPVOID lpParam){
             sack_entry = (PoolEntrySendFrame*)pool_alloc(pool_send_udp_frame);
             construct_sack_frame(sack_entry, client->sid, &client->sack_ctx.payload ,server->socket, &client->client_addr);           
 
-            if(push_frame(queue_send_udp_frame, (uintptr_t)sack_entry) == RET_VAL_ERROR) {
+            if(push_ptr(queue_send_udp_frame, (uintptr_t)sack_entry) == RET_VAL_ERROR) {
                 fprintf(stderr, "ERROR: Failed to push sack frame to queue.\n");
                 pool_free(pool_send_udp_frame, sack_entry);
             }
@@ -960,7 +966,7 @@ static DWORD WINAPI fthread_scan_for_trailing_sack(LPVOID lpParam){
                 sack_entry = (PoolEntrySendFrame*)pool_alloc(pool_send_udp_frame);
                 construct_sack_frame(sack_entry, client->sid, &client->sack_ctx.payload ,server->socket, &client->client_addr);           
 
-                if(push_frame(queue_send_udp_frame, (uintptr_t)sack_entry) == RET_VAL_ERROR) {
+                if(push_ptr(queue_send_udp_frame, (uintptr_t)sack_entry) == RET_VAL_ERROR) {
                     fprintf(stderr, "ERROR: Failed to push sack frame to queue.\n");
                     pool_free(pool_send_udp_frame, sack_entry);
                 }
@@ -981,10 +987,10 @@ static DWORD WINAPI fthread_send_message_ack_frame(LPVOID lpParam){
 
     while (server->server_status == STATUS_READY) {
         DWORD result = WaitForSingleObject(queue_message_ack_frame->push_semaphore, INFINITE);
-        PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pop_frame(queue_message_ack_frame);
+        PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pop_ptr(queue_message_ack_frame);
         if (result == WAIT_OBJECT_0) {
             if(!entry){
-                fprintf(stderr,"CRITICAL ERROR: pop_frame() null pointer from queue message ack frame");
+                fprintf(stderr,"CRITICAL ERROR: pop_ptr() null pointer from queue message ack frame");
                 continue;
             }
             send_pool_ack_frame(entry, pool_iocp_send_context);
@@ -1004,10 +1010,10 @@ static DWORD WINAPI fthread_send_prio_ack_frame(LPVOID lpParam){
 
     while (server->server_status == STATUS_READY) {
         DWORD result = WaitForSingleObject(queue_prio_ack_frame->push_semaphore, INFINITE);
-        PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pop_frame(queue_prio_ack_frame);
+        PoolEntryAckFrame *entry = (PoolEntryAckFrame*)pop_ptr(queue_prio_ack_frame);
         if (result == WAIT_OBJECT_0) {
             if(!entry){
-                fprintf(stderr,"CRITICAL ERROR: pop_frame() null pointer from queue priority ack frame");
+                fprintf(stderr,"CRITICAL ERROR: pop_ptr() null pointer from queue priority ack frame");
                 continue;
             }
             send_pool_ack_frame(entry, pool_iocp_send_context);
@@ -1028,7 +1034,7 @@ static DWORD WINAPI fthread_send_frame(LPVOID lpParam){
     while (server->server_status == STATUS_READY) {
         DWORD result = WaitForSingleObject(queue_send_udp_frame->push_semaphore, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            PoolEntrySendFrame *entry = (PoolEntrySendFrame*)pop_frame(queue_send_udp_frame);
+            PoolEntrySendFrame *entry = (PoolEntrySendFrame*)pop_ptr(queue_send_udp_frame);
             if(!entry){
                 fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from tx_frame?\n");
                 continue;
@@ -1050,7 +1056,7 @@ static DWORD WINAPI fthread_send_prio_frame(LPVOID lpParam){
     while (server->server_status == STATUS_READY) {
         DWORD result = WaitForSingleObject(queue_send_prio_udp_frame->push_semaphore, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            PoolEntrySendFrame *entry = (PoolEntrySendFrame*)pop_frame(queue_send_prio_udp_frame);
+            PoolEntrySendFrame *entry = (PoolEntrySendFrame*)pop_ptr(queue_send_prio_udp_frame);
             if(!entry){
                 fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from tx_frame?\n");
                 continue;
@@ -1072,7 +1078,7 @@ static DWORD WINAPI fthread_send_ctrl_frame(LPVOID lpParam){
     while (server->server_status == STATUS_READY) {
         DWORD result = WaitForSingleObject(queue_send_ctrl_udp_frame->push_semaphore, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            PoolEntrySendFrame *entry = (PoolEntrySendFrame*)pop_frame(queue_send_ctrl_udp_frame);
+            PoolEntrySendFrame *entry = (PoolEntrySendFrame*)pop_ptr(queue_send_ctrl_udp_frame);
             if(!entry){
                 fprintf(stderr,"CRITICAL ERROR: Poped empty pointer from tx_frame?\n");
                 continue;
@@ -1123,7 +1129,7 @@ static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam) {
         ServerFileStream *fstream = NULL;
         DWORD result = WaitForSingleObject(queue_process_fstream->push_semaphore, INFINITE);
         if (result == WAIT_OBJECT_0) {
-            fstream = (ServerFileStream*)pop_fstream(queue_process_fstream);
+            fstream = (ServerFileStream*)pop_ptr(queue_process_fstream);
         } else {
             fprintf(stderr, "CRITICAL ERROR: Unexpected result wait semaphore fstream queue: %lu\n", result);
             continue;
@@ -1301,7 +1307,7 @@ static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam) {
                     break;
                 }
                 construct_ack_frame(entry_ack_frame, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, server->socket, &fstream->client_addr);
-                if (push_frame(queue_prio_ack_frame, (uintptr_t)entry_ack_frame) == RET_VAL_ERROR) {
+                if (push_ptr(queue_prio_ack_frame, (uintptr_t)entry_ack_frame) == RET_VAL_ERROR) {
                     fprintf(stderr, "CRITICAL ERROR: Failed to push to queue priority.\n");
                     pool_free(pool_queue_ack_frame, entry_ack_frame); // Free the entry if it fails to push
                 }
@@ -1312,7 +1318,7 @@ static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam) {
             }
             
             LeaveCriticalSection(&fstream->lock);
-            Sleep(10);
+            Sleep(1);
         } // end of while(fstream->busy)
     }
     _endthreadex(0);
@@ -1457,6 +1463,7 @@ void close_message_stream(MessageStream *mstream){
     mstream->chars_received = 0; // Reset characters received counter.
     mstream->bitmap_entries_count = 0; // Reset bitmap entries count.
     memset(mstream->fnm, 0, MAX_NAME_SIZE); // Clear the file name buffer by filling it with zeros.
+
     return;
 
 }
@@ -1474,12 +1481,13 @@ int main() {
 
         Sleep(250); // Prevent busy-waiting
    
-        fprintf(stdout, "\r\033[2K-- Hash_fID_Count: %llu; FreeRecvFrame: %llu; FreeSendFrame: %llu; FreeAckFrame: %llu; PendingAck: %llu", 
+        fprintf(stdout, "\r\033[2K-- Hash_fID_Count: %llu; FreeRecvFrame: %llu; FreeSendFrame: %llu; FreeAckFrame: %llu; PendingAck: %llu; PoolFileChunk: %llu", 
                             Buffers.table_file_id.count,
                             Buffers.pool_recv_udp_frame.free_blocks,
                             Buffers.pool_send_udp_frame.free_blocks,
                             Buffers.pool_queue_ack_frame.free_blocks,
-                            ClientList.client[0].queue_file_ack_seq.pending
+                            ClientList.client[0].queue_file_ack_seq.pending,
+                            Buffers.pool_file_chunk.free_blocks
                             );
 
     }

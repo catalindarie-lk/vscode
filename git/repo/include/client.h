@@ -4,6 +4,7 @@
 #include <stdint.h>                                             // For fixed-width integer types like uint8_t, uint32_t, uint64_t
 #include <windows.h>                                            // For Windows-specific types like BOOL, HANDLE, CRITICAL_SECTION, SOCKET, MAX_PATH, etc.
 #include "include/protocol_frames.h"                            // Includes definitions related to network frame structures and types
+#include "include/resources.h"
 #include "include/queue.h"                                      // Includes definitions for queue data structures
 #include "include/mem_pool.h"                                   // Includes definitions for memory pool management
 #include "include/hash.h"                                       // Includes definitions for hash table structures
@@ -25,9 +26,11 @@
 #define CLIENT_NAME                                 "lkdc UDP Text/File Transfer Client"
 #define MIN_CONNECTION_TIMEOUT_SEC                  15                     // Minimum timeout for a connection in seconds
 
-#define CLIENT_ROOT_FOLDER                          "D:\\_test\\client_root\\"
-#define CLIENT_ERROR_LOG_FILE                       "D:\\_test\\client_error_log.txt" // Path to the client log file
-#define CLIENT_DEBUG_LOG_FILE                       "D:\\_test\\client_debug_log.txt" // Path to the client debug log file
+#define CLIENT_ROOT_FOLDER                          "H:\\_test\\client_root\\"
+#define CLIENT_ERROR_LOG_FILE                       "H:\\_test\\client_error_log.txt" // Path to the client log file
+#define CLIENT_DEBUG_LOG_FILE                       "H:\\_test\\client_debug_log.txt" // Path to the client debug log file
+
+#define CLIENT_LOG_MESSAGE_LEN                      256
 
 #define CONNECT_REQUEST_TIMEOUT_MS                  2500                  // Timeout for a connection request in milliseconds
 #define DISCONNECT_REQUEST_TIMEOUT_MS               2500                  // Timeout for a disconnect request in milliseconds
@@ -35,7 +38,7 @@
 #define TEXT_CHUNK_SIZE                             (TEXT_FRAGMENT_SIZE * 64) // Size of a text data chunk (derived from protocol_frames.h)
 #define FILE_CHUNK_SIZE                             (FILE_FRAGMENT_SIZE * 512) // Size of a file data chunk (derived from protocol_frames.h)
 
-#define RESEND_TIMEOUT_SEC                          3                     // Seconds before a pending frame is considered for retransmission
+#define RESEND_TIMEOUT_SEC                          5                     // Seconds before a pending frame is considered for retransmission
 #define RESEND_FILE_METADATA_TIMEOUT_SEC            1
 #define MAX_MESSAGE_SIZE_BYTES                      (4 * 1024 * 1024)     // Maximum size for a single large text message (4 MB)
 
@@ -46,7 +49,7 @@
 
 // --- Client Worker Thread Configuration ---
 #define CLIENT_MAX_THREADS_RECV_SEND_FRAME          1                     // Number of threads dedicated to receiving and sending frames
-#define CLIENT_MAX_TREADS_PROCESS_FRAME             2                     // Number of threads dedicated to processing received frames
+#define CLIENT_MAX_TREADS_PROCESS_FRAME             4                     // Number of threads dedicated to processing received frames
 #define CLIENT_MAX_THREADS_SEND_FRAME               1                     // Number of threads for popping normal send frames from queue
 //---------------------------------------------------------------------------------------------------------
 // --- Client SEND Buffer Sizes ---
@@ -65,33 +68,39 @@
 // --- Client RECV Memory Pool Sizes ---
 #define CLIENT_POOL_SIZE_RECV                       (CLIENT_QUEUE_SIZE_RECV_FRAME + \
                                                     CLIENT_QUEUE_SIZE_RECV_PRIO_FRAME)
-#define CLIENT_POOL_SIZE_IOCP_RECV                  CLIENT_POOL_SIZE_RECV + 128
+#define CLIENT_POOL_SIZE_IOCP_RECV                  (CLIENT_POOL_SIZE_RECV + 128)
 //---------------------------------------------------------------------------------------------------------
-#define CLIENT_QUEUE_SIZE_PROCESS_FSTREAMS          64                  // Size of the queue for file stream commands
-#define CLIENT_QUEUE_SIZE_PROCESS_MSTREAMS          64                  // Size of the queue for message stream commands
+#define CLIENT_QUEUE_SIZE_SEND_FILE                 4096                  // Size of the queue for file stream commands
+#define CLIENT_QUEUE_SIZE_SEND_MESSAGE              4096                  // Size of the queue for message stream commands
+#define CLIENT_POOL_SIZE_SEND_COMMAND               (CLIENT_QUEUE_SIZE_SEND_FILE + \
+                                                    CLIENT_QUEUE_SIZE_SEND_MESSAGE + 128)
+#define CLIENT_QUEUE_SIZE_LOG                       65536
+#define CLIENT_POOL_SIZE_LOG                        (CLIENT_QUEUE_SIZE_LOG + 128)
+//---------------------------------------------------------------------------------------------------------
 
 // --- Macro to Parse Global Data to Threads ---
 // This macro simplifies passing pointers to global client data structures into thread functions.
 // It creates local pointers within the thread function's scope, pointing to the global instances.
-#define PARSE_GLOBAL_DATA(client_obj, buffers_obj, threads_obj) \
+#define PARSE_CLIENT_GLOBAL_DATA(client_obj, buffers_obj, threads_obj) \
     ClientData *client = &(client_obj); /* Pointer to the global ClientData structure */ \
     ClientBuffers *buffers = &(buffers_obj); /* Pointer to the global ClientBuffers structure */ \
     ClientThreads *threads = &(threads_obj); /* Pointer to threads struct queue */ \
     MemPool *pool_send_iocp_context = &((buffers_obj).pool_send_iocp_context); /* Pointer to IOCP send context memory pool */ \
     MemPool *pool_recv_iocp_context = &((buffers_obj).pool_recv_iocp_context); /* Pointer to IOCP recv context memory pool */ \
     MemPool *pool_recv_udp_frame = &((buffers_obj).pool_recv_udp_frame); \
-    QueueFrame *queue_recv_udp_frame = &((buffers_obj).queue_recv_udp_frame); \
-    QueueFrame *queue_recv_prio_udp_frame = &((buffers_obj).queue_recv_prio_udp_frame); \
+    QueuePtr *queue_recv_udp_frame = &((buffers_obj).queue_recv_udp_frame); \
+    QueuePtr *queue_recv_prio_udp_frame = &((buffers_obj).queue_recv_prio_udp_frame); \
     s_MemPool *pool_send_udp_frame = &((buffers_obj).pool_send_udp_frame); /* Pointer to send frame memory pool */ \
-    s_QueueFrame *queue_send_udp_frame = &((buffers_obj).queue_send_udp_frame); /* Pointer to send queue for normal frames */ \
-    s_QueueFrame *queue_send_prio_udp_frame = &((buffers_obj).queue_send_prio_udp_frame); /* Pointer to send queue for priority frames */ \
-    s_QueueFrame *queue_send_ctrl_udp_frame = &((buffers_obj).queue_send_ctrl_udp_frame); /* Pointer to send queue for control frames */ \
+    s_QueuePtr *queue_send_udp_frame = &((buffers_obj).queue_send_udp_frame); /* Pointer to send queue for normal frames */ \
+    s_QueuePtr *queue_send_prio_udp_frame = &((buffers_obj).queue_send_prio_udp_frame); /* Pointer to send queue for priority frames */ \
+    s_QueuePtr *queue_send_ctrl_udp_frame = &((buffers_obj).queue_send_ctrl_udp_frame); /* Pointer to send queue for control frames */ \
     TableSendFrame *table_send_udp_frame = &((buffers_obj).table_send_udp_frame); /* Pointer to hash table for sent frames awaiting ACK */ \
-    QueueCommand *queue_process_fstream = &((buffers_obj).queue_process_fstream); /* Pointer to file stream command queue */ \
-    QueueCommand *queue_process_mstream = &((buffers_obj).queue_process_mstream); /* Pointer to message stream command queue */ \
-    QueuePtr *queue_error_log = &((buffers_obj).queue_error_log); /* Pointer to error log queue */ \
+    s_MemPool *pool_send_command = &((buffers_obj).pool_send_command); /* Pointer commands memory pool */ \
+    s_QueuePtr *queue_send_file_command = &((buffers_obj).queue_send_file_command); /* Pointer to file stream command queue */ \
+    s_QueuePtr *queue_send_message_command = &((buffers_obj).queue_send_message_command); /* Pointer to message stream command queue */ \
     MemPool *pool_error_log = &((buffers_obj).pool_error_log); /* Pointer to error log memory pool */ \
-    
+    QueuePtr *queue_error_log = &((buffers_obj).queue_error_log); /* Pointer to error log queue */ \
+
     // end of #define PARSE_GLOBAL_DATA // End marker for the macro definition
 
 
@@ -114,6 +123,11 @@ enum SessionStatus{
 };
 
 // --- Structure Definitions ---
+
+typedef struct {
+    char log_message[CLIENT_LOG_MESSAGE_LEN];
+    unsigned long long timestamp_64bit; // 64-bit timestamp
+} PoolErrorLogEntry;
 
 // Structure to hold a file's SHA256 hash
 typedef struct{
@@ -218,17 +232,18 @@ typedef struct {
     MemPool pool_recv_iocp_context;             // Memory pool for IOCP receive contexts
 
     MemPool pool_recv_udp_frame;                    // Memory pool for received frames
-    QueueFrame queue_recv_udp_frame;
-    QueueFrame queue_recv_prio_udp_frame;
+    QueuePtr queue_recv_udp_frame;
+    QueuePtr queue_recv_prio_udp_frame;
 
     s_MemPool pool_send_udp_frame;                  // Memory pool for normal frames to be sent
-    s_QueueFrame queue_send_udp_frame;            // Queue for normal frames awaiting transmission
-    s_QueueFrame queue_send_prio_udp_frame;       // Queue for priority frames awaiting transmission
-    s_QueueFrame queue_send_ctrl_udp_frame;       // Queue for control frames awaiting transmission
+    s_QueuePtr queue_send_udp_frame;            // Queue for normal frames awaiting transmission
+    s_QueuePtr queue_send_prio_udp_frame;       // Queue for priority frames awaiting transmission
+    s_QueuePtr queue_send_ctrl_udp_frame;       // Queue for control frames awaiting transmission
     TableSendFrame table_send_udp_frame;              // Hash table to track sent frames awaiting acknowledgment (ACK)
 
-    QueueCommand queue_process_fstream;         // Queue for file stream commands
-    QueueCommand queue_process_mstream;         // Queue for message stream commands
+    s_MemPool pool_send_command;
+    s_QueuePtr queue_send_file_command;         // Queue for file stream commands
+    s_QueuePtr queue_send_message_command;         // Queue for message stream commands
 
     MemPool pool_error_log;                     // Memory pool for error log entries    
     QueuePtr queue_error_log;                // Queue for normal frames to be sent
@@ -249,7 +264,7 @@ int reset_client_session();                     // Resets the client session to 
 void close_file_stream(ClientFileStream *fstream);          // Cleans up resources associated with a file stream
 void close_message_stream(ClientMessageStream *mstream);    // Cleans up resources associated with a message stream
 
-int error_log(const char* log_message);
+int log_to_file(const char* log_message);
 
 // Thread entry point functions
 static DWORD WINAPI fthread_recv_send_frame(LPVOID lpParam);       // Thread for receiving and dispatching frames

@@ -7,6 +7,7 @@
 
 #include "include/message_handler.h"
 #include "include/protocol_frames.h"
+#include "include/resources.h"
 #include "include/server.h"
 #include "include/netendians.h"
 #include "include/queue.h"
@@ -22,7 +23,7 @@ static int msg_match_fragment(Client *client, UdpFrame *frame){
 
     uint32_t session_id = _ntohl(frame->header.session_id);    
     uint32_t message_id = _ntohl(frame->payload.text_fragment.message_id);
-
+    
     for(int i = 0; i < MAX_SERVER_ACTIVE_MSTREAMS; i++){
         EnterCriticalSection(&client->mstream[i].lock);
         if(client->mstream[i].sid == session_id && client->mstream[i].mid == message_id){
@@ -85,7 +86,7 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    if(push_frame(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+    if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
         fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
         pool_free(pool_queue_ack_frame, entry);
     }
@@ -94,9 +95,10 @@ exit_err:
     return RET_VAL_ERROR;
 }
 static int msg_get_available_stream_channel(Client *client){
+
     for(int i = 0; i < MAX_SERVER_ACTIVE_MSTREAMS; i++){
         EnterCriticalSection(&client->mstream[i].lock);
-        if(client->mstream[i].busy == FALSE){
+        if(!client->mstream[i].busy){
             LeaveCriticalSection(&client->mstream[i].lock);
             return i;
         }
@@ -131,9 +133,9 @@ static int msg_init_stream(MessageStream *mstream, const uint32_t session_id, co
     
     //copy the received fragment text to the buffer            
     mstream->mid = message_id;
-    mstream->buffer = malloc(message_len);
+    mstream->buffer = malloc(message_len + 1);
     if(mstream->buffer == NULL){
-        fprintf(stderr, "ERROR: Failed to allocate memory for message buffer - malloc(message_len)\n");
+        fprintf(stderr, "ERROR: Failed to allocate memory for message buffer - malloc(message_len + 1)\n");
         LeaveCriticalSection(&mstream->lock);
         return RET_VAL_ERROR;
     }
@@ -150,6 +152,7 @@ static int msg_init_stream(MessageStream *mstream, const uint32_t session_id, co
 
     // Constructs a filename for storing the received message, incorporating session and message IDs for uniqueness.
     snprintf(mstream->fnm, MAX_PATH, SERVER_MESSAGE_TEXT_FILES_FOLDER"xmessage_SID_%d_ID%d.txt", session_id, message_id);
+    fprintf(stdout, "Nr of Bitmaps: %llu; Fragments: %llu\n", mstream->bitmap_entries_count, mstream->fragment_count);
 
     LeaveCriticalSection(&mstream->lock);
     return RET_VAL_SUCCESS;
@@ -161,7 +164,7 @@ static void msg_attach_fragment(MessageStream *mstream, char *fragment_buffer, c
     char *dest = mstream->buffer + fragment_offset;
     char *src = fragment_buffer;                                              
     memcpy(dest, src, fragment_len);
-    mstream->chars_received += fragment_len;       
+    mstream->chars_received += fragment_len;
     mark_fragment_received(mstream->bitmap, fragment_offset, TEXT_FRAGMENT_SIZE);
     LeaveCriticalSection(&mstream->lock);
     return;
@@ -183,12 +186,8 @@ static int msg_check_completion_and_record(MessageStream *mstream) {
     // --- Null terminate the message ---
     mstream->buffer[mstream->mlen] = '\0';
     // Attempt to write the in-memory buffer to a file on disk.
-    int msg_creation_status = create_output_file(mstream->buffer, mstream->chars_received, mstream->fnm);
-    
-    ht_update_id_status(table_message_id, mstream->sid, mstream->mid, ID_RECV_COMPLETE);
-    
-    close_message_stream(mstream);
- 
+    int msg_creation_status = create_output_file(mstream->buffer, mstream->mlen, mstream->fnm);
+        
     if (msg_creation_status != RET_VAL_SUCCESS) {
         // If file creation failed, return an error.
         fprintf(stderr, "ERROR: Failed to create output message for file_id %d\n", mstream->mid);
@@ -196,6 +195,11 @@ static int msg_check_completion_and_record(MessageStream *mstream) {
         LeaveCriticalSection(&mstream->lock);
         return RET_VAL_ERROR;
     }
+
+    ht_update_id_status(table_message_id, mstream->sid, mstream->mid, ID_RECV_COMPLETE);
+    
+    close_message_stream(mstream);
+ 
     // File was successfully created and saved.
     LeaveCriticalSection(&mstream->lock);
     return RET_VAL_SUCCESS;
@@ -227,7 +231,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
     PoolEntryAckFrame *entry = NULL;
 
     if(ht_search_id(table_message_id, recv_session_id, recv_message_id, ID_RECV_COMPLETE) == TRUE){
-        fprintf(stderr, "Received file end frame for completed file Seq: %llu; sID: %u; mID: %u;\n", recv_seq_num, recv_session_id, recv_message_id);
+        fprintf(stderr, "Received message frame for completed message Seq: %llu; sID: %u; mID: %u;\n", recv_seq_num, recv_session_id, recv_message_id);
         op_code = ERR_EXISTING_MESSAGE;
         goto exit_err;
     }
@@ -239,21 +243,19 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
             return RET_VAL_ERROR;
         }
         msg_attach_fragment(&client->mstream[slot], frame->payload.text_fragment.chars, recv_fragment_offset, recv_fragment_len);
-        
         if (msg_check_completion_and_record(&client->mstream[slot]) == RET_VAL_ERROR){
             fprintf(stderr, "Final check of the message failed\n");
             op_code = ERR_MESSAGE_FINAL_CHECK;
             goto exit_err;
         }
-
         entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_frame);
         if(!entry){
             fprintf(stderr, "ERROR: Failed to allocate memory in the pool for message fragment ack frame\n");
             LeaveCriticalSection(&client->lock);
             return RET_VAL_ERROR;
         }
-        construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
-        if(push_frame(queue_message_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_MESSAGE_FRAGMENT, server->socket, &client->client_addr);
+        if(push_ptr(queue_message_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
             fprintf(stderr, "ERROR: Failed to push to queue message ack.\n");
             pool_free(pool_queue_ack_frame, entry);
         }
@@ -262,6 +264,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
 
     } else {
         int slot = msg_get_available_stream_channel(client);
+ 
         if (slot == RET_VAL_ERROR){
             fprintf(stderr, "Maximum message streams reached for client ID: %d\n", client->cid);
             op_code = ERR_RESOURCE_LIMIT;
@@ -299,8 +302,8 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
             LeaveCriticalSection(&client->lock);
             return RET_VAL_ERROR;
         }
-        construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_FRAME_DATA_ACK, server->socket, &client->client_addr);
-        if(push_frame(queue_message_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+        construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_MESSAGE_FRAGMENT, server->socket, &client->client_addr);
+        if(push_ptr(queue_message_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
             fprintf(stderr, "ERROR: Failed to push message ack to queue.\n");
             pool_free(pool_queue_ack_frame, entry);
         }
@@ -316,7 +319,7 @@ exit_err:
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
-    if(push_frame(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
+    if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
         fprintf(stderr, "ERROR: Failed to push message ack error to queue priority.\n");
         pool_free(pool_queue_ack_frame, entry);
     }

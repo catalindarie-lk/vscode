@@ -3,7 +3,9 @@
 #include <stdio.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+
 #include "include/protocol_frames.h"
+#include "include/resources.h"
 #include "include/netendians.h"         // For network byte order conversions
 #include "include/client.h"
 
@@ -23,12 +25,12 @@ int construct_connect_request(PoolEntrySendFrame *entry,
                             const uint32_t flags, 
                             const char *client_name,
                             const SOCKET src_socket, const struct sockaddr_in *dest_addr){
-    char log_message[256];
+    char log_message[CLIENT_LOG_MESSAGE_LEN];
     UdpFrame *frame = &entry->frame;
 
     if(!client_name){
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_connect_request - Invalid client_name pointer (NULL).");
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
@@ -131,13 +133,13 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
                             const uint32_t fname_len,
                             const uint32_t file_fragment_size,
                             const SOCKET src_socket, const struct sockaddr_in *dest_addr){
-    char log_message[256];
+    char log_message[CLIENT_LOG_MESSAGE_LEN];
     UdpFrame *frame = &entry->frame;
     
     // --- Validate rpath ---
     if(rpath == NULL){
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Invalid relative file path pointer (NULL).");
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
@@ -145,13 +147,13 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
     // NEW: rpath must be at least 1 character (for '\')
     if(rpath_len == 0){ // If declared length is 0
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Relative file path has a declared length of 0. Minimum is 1 (for '\\').");
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
     if (strlen(rpath) == 0) { // If actual string content is empty
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Relative file path content is empty. Minimum is 1 character (for '\\').");
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
@@ -162,7 +164,7 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
     if(rpath_len >= sizeof(frame->payload.file_metadata.rpath)){
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Relative file path content (length %u) is too long for payload buffer (max %zu chars).",
                 rpath_len, sizeof(frame->payload.file_metadata.rpath) - 1);
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
@@ -170,7 +172,7 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
     if (rpath_len != strlen(rpath)) {
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Declared rpath_len (%u) does not match actual strlen(rpath) (%zu).",
                 rpath_len, strlen(rpath));
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
@@ -178,14 +180,14 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
     // --- Validate fname ---
     if(fname == NULL){
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Invalid filename pointer (NULL).");
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
     // Filename should typically never be 0 length
     if(fname_len == 0){
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Filename has a declared length of 0.");
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
@@ -193,7 +195,7 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
     if(fname_len >= sizeof(frame->payload.file_metadata.fname)){
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Filename content (length %u) is too long for payload buffer (max %zu chars).",
                 fname_len, sizeof(frame->payload.file_metadata.fname) - 1);
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);
         return RET_VAL_ERROR;
     }
@@ -201,7 +203,7 @@ int construct_file_metadata(PoolEntrySendFrame *entry,
     if (fname_len != strlen(fname)) {
         snprintf(log_message, sizeof(log_message), "CRITICAL ERROR: send_file_metadata - Declared fname_len (%u) does not match actual strlen(fname) (%zu).\n",
                 fname_len, strlen(fname));
-        error_log(log_message);
+        log_to_file(log_message);
         fprintf(stderr, "%s\n", log_message);        
         return RET_VAL_ERROR;
     }

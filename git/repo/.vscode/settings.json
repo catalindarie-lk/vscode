@@ -37,6 +37,9 @@
         "server_frames.h": "c",
         "mswsock.h": "c",
         "client_api.h": "c",
-        "client_statistics.h": "c"
+        "client_statistics.h": "c",
+        "resources.h": "c",
+        "server_statistics.h": "c",
+        "sha256.h": "c"
     }
 }

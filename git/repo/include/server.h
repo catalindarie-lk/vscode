@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "include/protocol_frames.h"
+#include "include/resources.h"
 #include "include/queue.h"
 #include "include/mem_pool.h"
 #include "include/hash.h"
@@ -25,9 +26,9 @@
 #define MAX_CLIENTS                                 10
 #define SACK_READY_FRAME_TIMEOUT_MS                 100
 
-#define SERVER_PARTITION_DRIVE                      "D:\\"
-#define SERVER_ROOT_FOLDER                          "D:\\_test\\server_root\\"
-#define SERVER_MESSAGE_TEXT_FILES_FOLDER            "D:\\_test\\messages_root\\"
+#define SERVER_PARTITION_DRIVE                      "H:\\"
+#define SERVER_ROOT_FOLDER                          "H:\\_test\\server_root\\"
+#define SERVER_MESSAGE_TEXT_FILES_FOLDER            "H:\\_test\\messages_root\\"
 #define SERVER_SID_FOLDER_NAME_FOR_CLIENT           "SID_"
 
 #define FRAGMENTS_PER_CHUNK                         (64ULL)
@@ -43,13 +44,13 @@
 //---------------------------------------------------------------------------------------------------------
 // --- Server Stream Configuration ---
 #define MAX_SERVER_ACTIVE_FSTREAMS                  10
-#define MAX_SERVER_ACTIVE_MSTREAMS                  1
+#define MAX_SERVER_ACTIVE_MSTREAMS                  10
 
 // --- Server Worker Thread Configuration ---
-#define SERVER_MAX_THREADS_RECV_SEND_FRAME          2
-#define SERVER_MAX_THREADS_PROCESS_FRAME            4
+#define SERVER_MAX_THREADS_RECV_SEND_FRAME          1
+#define SERVER_MAX_THREADS_PROCESS_FRAME            8
 
-#define SERVER_MAX_THREADS_SEND_FILE_SACK_FRAMES    2
+#define SERVER_MAX_THREADS_SEND_FILE_SACK_FRAMES    1
 #define SERVER_MAX_THREADS_SEND_MESSAGE_ACK_FRAMES  1
 
 
@@ -62,7 +63,7 @@
 #define SERVER_QUEUE_SIZE_SEND_MESSAGE_ACK_FRAME    (1024 + 512 * MAX_SERVER_ACTIVE_FSTREAMS)
 #define SERVER_QUEUE_SIZE_SEND_PRIO_ACK_FRAME       128
 #define SERVER_QUEUE_SIZE_CLIENT_ACK_SEQ            (SERVER_QUEUE_SIZE_SEND_FRAME)
-#define SERVER_QUEUE_SIZE_CLIENT_SLOT               (SERVER_QUEUE_SIZE_CLIENT_ACK_SEQ * 2)
+#define SERVER_QUEUE_SIZE_CLIENT_SLOT               (SERVER_QUEUE_SIZE_CLIENT_ACK_SEQ * MAX_SERVER_ACTIVE_FSTREAMS)
 // --- Server SEND Memory Pool Sizes ---
 #define SERVER_POOL_SIZE_SEND                       (SERVER_QUEUE_SIZE_SEND_FRAME + \
                                                     SERVER_QUEUE_SIZE_SEND_PRIO_FRAME + \
@@ -93,18 +94,18 @@
     MemPool *pool_iocp_send_context = &((buffers_obj).pool_iocp_send_context); \
     MemPool *pool_iocp_recv_context = &((buffers_obj).pool_iocp_recv_context); \
     MemPool *pool_recv_udp_frame = &((buffers_obj).pool_recv_udp_frame); \
-    QueueFrame *queue_recv_udp_frame = &((buffers_obj).queue_recv_udp_frame); \
-    QueueFrame *queue_recv_prio_udp_frame = &((buffers_obj).queue_recv_prio_udp_frame); \
-    QueueFstream *queue_process_fstream = &((buffers_obj).queue_process_fstream); \
+    QueuePtr *queue_recv_udp_frame = &((buffers_obj).queue_recv_udp_frame); \
+    QueuePtr *queue_recv_prio_udp_frame = &((buffers_obj).queue_recv_prio_udp_frame); \
+    QueuePtr *queue_process_fstream = &((buffers_obj).queue_process_fstream); \
     HashTableIdentifierNode *table_file_id = &((buffers_obj).table_file_id); \
     HashTableIdentifierNode *table_message_id = &((buffers_obj).table_message_id); \
     MemPool *pool_queue_ack_frame = &((buffers_obj).pool_queue_ack_frame); \
-    QueueFrame *queue_message_ack_frame = &((buffers_obj).queue_message_ack_frame); \
-    QueueFrame *queue_prio_ack_frame = &((buffers_obj).queue_prio_ack_frame); \
+    QueuePtr *queue_message_ack_frame = &((buffers_obj).queue_message_ack_frame); \
+    QueuePtr *queue_prio_ack_frame = &((buffers_obj).queue_prio_ack_frame); \
     MemPool *pool_send_udp_frame = &((buffers_obj).pool_send_udp_frame); \
-    QueueFrame *queue_send_udp_frame = &((buffers_obj).queue_send_udp_frame); \
-    QueueFrame *queue_send_prio_udp_frame = &((buffers_obj).queue_send_prio_udp_frame); \
-    QueueFrame *queue_send_ctrl_udp_frame = &((buffers_obj).queue_send_ctrl_udp_frame); \
+    QueuePtr *queue_send_udp_frame = &((buffers_obj).queue_send_udp_frame); \
+    QueuePtr *queue_send_prio_udp_frame = &((buffers_obj).queue_send_prio_udp_frame); \
+    QueuePtr *queue_send_ctrl_udp_frame = &((buffers_obj).queue_send_ctrl_udp_frame); \
     QueueClientSlot *queue_client_slot = &((buffers_obj).queue_client_slot); \
 
 // end of #define PARSE_GLOBAL_DATA // End marker for the macro definition
@@ -292,19 +293,19 @@ typedef struct {
     MemPool pool_iocp_recv_context;
 
     MemPool pool_recv_udp_frame;
-    QueueFrame queue_recv_udp_frame;
-    QueueFrame queue_recv_prio_udp_frame;
+    QueuePtr queue_recv_udp_frame;
+    QueuePtr queue_recv_prio_udp_frame;
 
     MemPool pool_queue_ack_frame;
-    QueueFrame queue_message_ack_frame;
-    QueueFrame queue_prio_ack_frame;
+    QueuePtr queue_message_ack_frame;
+    QueuePtr queue_prio_ack_frame;
 
     MemPool pool_send_udp_frame;
-    QueueFrame queue_send_udp_frame;
-    QueueFrame queue_send_prio_udp_frame;
-    QueueFrame queue_send_ctrl_udp_frame;
+    QueuePtr queue_send_udp_frame;
+    QueuePtr queue_send_prio_udp_frame;
+    QueuePtr queue_send_ctrl_udp_frame;
 
-    QueueFstream queue_process_fstream;
+    QueuePtr queue_process_fstream;
 
     QueueClientSlot queue_client_slot;
 

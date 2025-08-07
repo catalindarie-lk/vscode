@@ -257,8 +257,6 @@ FILE* FopenRename(const char* in_fpath, char* out_fpath, size_t fpath_max_size, 
     return fp;
 }
 
-
-
 // Function to list folders in a root path and extract session IDs
 void ReadSessionIDsInRoot(const char *rootPath, const char *sidFolder) {
     WIN32_FIND_DATA findData;

@@ -6,6 +6,7 @@
 #include <ws2tcpip.h>                   // For modern IP address functions (inet_pton, inet_ntop)
 #include <windows.h>                    // For Windows-specific functions like CreateThread, Sleep       
 
+#include "include/resources.h"
 #include "include/queue.h"
 #include "include/client.h"
 #include "include/client_frames.h"
@@ -14,7 +15,7 @@
 
 int RequestConnect(const char *server_ip) {
 
-    PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     // Define server address
     memset(&client->server_addr, 0, sizeof(client->server_addr));
@@ -45,7 +46,7 @@ int RequestConnect(const char *server_ip) {
         fprintf(stderr, "CRITICAL ERROR: construct_connect_request() returned RET_VAL_ERROR. Should not happen since inputs are validated before calling");
         return RET_VAL_ERROR;
     }
-    if(s_push_frame(queue_send_ctrl_udp_frame, (uintptr_t)entry_send) == RET_VAL_ERROR){
+    if(s_push_ptr(queue_send_ctrl_udp_frame, (uintptr_t)entry_send) == RET_VAL_ERROR){
         fprintf(stderr, "CRITICAL ERROR: Failed to push connect request frame to queue_send_ctrl_frame. Should never happen since queue is blocking on push/pop semaphores\n");
         s_pool_free(pool_send_udp_frame, (void*)entry_send);
         return RET_VAL_ERROR;
@@ -69,7 +70,7 @@ int RequestConnect(const char *server_ip) {
 
 void RequestDisconnect(){
     
-    PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
     
     if(client->session_status == CONNECTION_CLOSED){
         fprintf(stdout, "Not connected to server\n");
@@ -85,7 +86,7 @@ void RequestDisconnect(){
     }
 
     construct_disconnect_request(entry_send, client->sid, client->socket, &client->server_addr);
-    if(s_push_frame(queue_send_ctrl_udp_frame, (uintptr_t)entry_send) == RET_VAL_ERROR){
+    if(s_push_ptr(queue_send_ctrl_udp_frame, (uintptr_t)entry_send) == RET_VAL_ERROR){
         fprintf(stderr, "CRITICAL ERROR: Failed to push disconnect request frame to queue_send_ctrl_frame. Should never happen since queue is blocking on push/pop semaphores\n");
         s_pool_free(pool_send_udp_frame, (void*)entry_send);
     }
@@ -110,9 +111,9 @@ void RequestDisconnect(){
 // len: The actual nr of bytes of the text buffer, NOT including the null terminator.
 void SendTextMessage(const char *buffer, const size_t len) {
 
-    PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
 
-    QueueCommandEntry entry;
+    PoolEntryCommand *entry = NULL;
 
     if(!buffer){
         fprintf(stderr, "ERROR: Message buffer invalid pointer.\n");
@@ -127,13 +128,20 @@ void SendTextMessage(const char *buffer, const size_t len) {
         return;
     }
 
-    snprintf(entry.command.send_message.text, sizeof("SendTextMessage"), "%s", "SendTextMessage");
-    entry.command.send_message.message_len = len;
-    entry.command.send_message.message_buffer = malloc(len + 1);
-    memcpy(entry.command.send_message.message_buffer, buffer, len);
-    entry.command.send_message.message_buffer[len] = '\0';
+    entry = (PoolEntryCommand*)s_pool_alloc(pool_send_command);
+    if(!entry){
+        fprintf(stderr, "CRITICAL ERROR: failed to allocate memory for message command from the pool\n");
+        return;
+    }
 
-    if(s_push_command(queue_process_mstream, &entry) == RET_VAL_ERROR){
+    snprintf(entry->command.send_message.text, sizeof("SendTextMessage"), "%s", "SendTextMessage");
+    entry->command.send_message.message_len = len;
+    entry->command.send_message.message_buffer = malloc(len + 1);
+    memcpy(entry->command.send_message.message_buffer, buffer, len);
+    entry->command.send_message.message_buffer[len] = '\0';
+
+    if(s_push_ptr(queue_send_message_command, (uintptr_t)entry) == RET_VAL_ERROR){
+        s_pool_free(pool_send_command, (void*)entry);
         fprintf(stderr, "CRITICAL ERROR: Failed to push command to queue_process_mstream. Should never happen since queue is blocking on push/pop semaphores\n");
     }
     return;
@@ -218,96 +226,125 @@ static void stream_file(const char *fpath, const size_t fpath_len,
                         const char *rpath, const size_t rpath_len,
                         const char *fname, const size_t fname_len) {
 
-    PARSE_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
 
-    QueueCommandEntry entry; // Represents the command to be enqueued
+    PoolEntryCommand *entry = NULL;
     int res; // For checking return values of secure functions
-    memset(&entry, 0, sizeof(QueueCommandEntry));
+    // memset(&entry, 0, sizeof(QueueCommandEntry));
 
     // --- Input Validation (now based on content lengths) ---
 
     // Validate fpath (full actual disk directory path)
-    if (!fpath) { fprintf(stderr, "ERROR: stream_file - Absolute directory path string invalid pointer.\n"); return; }
+    if (!fpath) { 
+        fprintf(stderr, "ERROR: stream_file - Absolute directory path string invalid pointer.\n"); 
+        return; 
+    }
     // fpath_len 0 is invalid for a path
-    if (fpath_len == 0) { fprintf(stderr, "ERROR: stream_file - Absolute directory path string zero content length.\n"); return; }
+    if (fpath_len == 0) { 
+        fprintf(stderr, "ERROR: stream_file - Absolute directory path string zero content length.\n"); 
+        return; 
+    }
     // A string of 'fpath_len' characters needs 'fpath_len + 1' bytes for the null terminator.
     // So, it must be strictly less than MAX_PATH to fit within a MAX_PATH buffer.
-    if (fpath_len >= MAX_PATH) { fprintf(stderr, "ERROR: stream_file - Absolute directory path string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, fpath_len); return; }
+    if (fpath_len >= MAX_PATH) { 
+        fprintf(stderr, "ERROR: stream_file - Absolute directory path string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, fpath_len); 
+        return; 
+    }
     // (Optional but good check: Verify actual null termination if function might pass to strlen-reliant APIs)
     // if (strnlen_s(fpath, fpath_len + 1) > fpath_len) { /* Good, null terminated within expected length */ }
     // else { fprintf(stderr, "WARNING: stream_file - Absolute directory path may not be null-terminated within its claimed length + 1.\n"); }
 
 
     // Validate rpath (relative directory path)
-    if (!rpath) { fprintf(stderr, "ERROR: stream_file - Relative directory path string invalid pointer.\n"); return; }
+    if (!rpath) { 
+        fprintf(stderr, "ERROR: stream_file - Relative directory path string invalid pointer.\n"); 
+        return; 
+    }
     // rpath_len MUST be at least 1 (for '\'), so 0 content length is an error
     if (rpath_len == 0) { // Should not happen with correct logic from recursive function (should always be at least "\")
         fprintf(stderr, "ERROR: stream_file - Relative directory path string zero content length.\n");
         return;
     }
-    if (rpath_len >= MAX_PATH) { fprintf(stderr, "ERROR: stream_file - Relative directory path string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, rpath_len); return; }
+    if (rpath_len >= MAX_PATH) { 
+        fprintf(stderr, "ERROR: stream_file - Relative directory path string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, rpath_len); 
+        return; 
+    }
     // (Optional null termination check)
 
 
     // Validate fname (just the filename)
-    if (!fname) { fprintf(stderr, "ERROR: stream_file - Filename string invalid pointer.\n"); return; }
-    if (fname_len == 0) { fprintf(stderr, "ERROR: stream_file - Filename string zero content length (filename cannot be empty).\n"); return; }
-    if (fname_len >= MAX_PATH) { fprintf(stderr, "ERROR: stream_file - Filename string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, fname_len); return; }
+    if (!fname) { 
+        fprintf(stderr, "ERROR: stream_file - Filename string invalid pointer.\n"); 
+        return; 
+    }
+    if (fname_len == 0) { fprintf(stderr, "ERROR: stream_file - Filename string zero content length (filename cannot be empty).\n"); 
+        return; 
+    }
+    if (fname_len >= MAX_PATH) { fprintf(stderr, "ERROR: stream_file - Filename string content too long (max %d chars excluding null). Length: %zu\n", MAX_PATH - 1, fname_len); 
+        return; 
+    }
     // (Optional null termination check)
 
     // --- Populate QueueCommandEntry using secure functions ---
 
+    entry = (PoolEntryCommand*)s_pool_alloc(pool_send_command);
+    if(!entry){
+        fprintf(stderr, "CRITICAL ERROR: failed to allocate memory for file command from the pool\n");
+        return;
+    }
+
     // Populate 'text' field for stream_file command type
     // Note: "sendfile" has 8 chars, fits easily in 32 bytes with null.
-    res = snprintf(entry.command.send_file.text,
-                      sizeof(entry.command.send_file.text),
+    res = snprintf(entry->command.send_file.text,
+                      sizeof(entry->command.send_file.text),
                       "%s", "sendfile");
     // Check for errors (negative return) or truncation (result >= buffer size)
-    if (res < 0 || (size_t)res >= sizeof(entry.command.send_file.text)) { // Cast result to size_t for comparison
+    if (res < 0 || (size_t)res >= sizeof(entry->command.send_file.text)) { // Cast result to size_t for comparison
         fprintf(stderr, "ERROR: stream_file - Failed to set 'text' field for send_file command (truncation or error). Result: %d, Buffer Size: %zu\n",
-                res, sizeof(entry.command.send_file.text));
+                res, sizeof(entry->command.send_file.text));
         return;
     }
 
     // Populate 'fpath' field with the FULL ACTUAL DISK DIRECTORY PATH
     // Use '%.*s' to copy exactly 'fpath_len' characters
-    res = snprintf(entry.command.send_file.fpath,
-                      sizeof(entry.command.send_file.fpath),
+    res = snprintf(entry->command.send_file.fpath,
+                      sizeof(entry->command.send_file.fpath),
                       "%.*s", (int)fpath_len, fpath); // Cast fpath_len to int for printf specifier
     // Check if the exact number of characters was copied
     if (res < 0 || (size_t)res != fpath_len) {
         fprintf(stderr, "ERROR: stream_file - Failed to copy absolute directory path to command entry (truncation or error). Path len: %zu, Result: %d, Buffer Size: %zu\n",
-                fpath_len, res, sizeof(entry.command.send_file.fpath));
+                fpath_len, res, sizeof(entry->command.send_file.fpath));
         return;
     }
-    entry.command.send_file.fpath_len = (uint32_t)fpath_len;
+    entry->command.send_file.fpath_len = (uint32_t)fpath_len;
 
     // Populate 'rpath' field with the RELATIVE DIRECTORY PATH
     // Use '%.*s' to copy exactly 'rpath_len' characters
-    res = snprintf(entry.command.send_file.rpath,
-                      sizeof(entry.command.send_file.rpath),
+    res = snprintf(entry->command.send_file.rpath,
+                      sizeof(entry->command.send_file.rpath),
                       "%.*s", (int)rpath_len, rpath);
     if (res < 0 || (size_t)res != rpath_len) {
         fprintf(stderr, "ERROR: stream_file - Failed to copy relative directory path to command entry (truncation or error). Path len: %zu, Result: %d, Buffer Size: %zu\n",
-                rpath_len, res, sizeof(entry.command.send_file.rpath));
+                rpath_len, res, sizeof(entry->command.send_file.rpath));
         return;
     }
-    entry.command.send_file.rpath_len = (uint32_t)rpath_len;
+    entry->command.send_file.rpath_len = (uint32_t)rpath_len;
 
     // Populate 'fname' field with JUST THE FILENAME
     // Use '%.*s' to copy exactly 'fname_len' characters
-    res = snprintf(entry.command.send_file.fname,
-                      sizeof(entry.command.send_file.fname),
+    res = snprintf(entry->command.send_file.fname,
+                      sizeof(entry->command.send_file.fname),
                       "%.*s", (int)fname_len, fname);
     if (res < 0 || (size_t)res != fname_len) {
         fprintf(stderr, "ERROR: stream_file - Failed to copy filename to command entry (truncation or error). Name len: %zu, Result: %d, Buffer Size: %zu\n",
-                fname_len, res, sizeof(entry.command.send_file.fname));
+                fname_len, res, sizeof(entry->command.send_file.fname));
         return;
     }
-    entry.command.send_file.fname_len = (uint32_t)fname_len;
+    entry->command.send_file.fname_len = (uint32_t)fname_len;
 
     // Push the command to the queue
-    if(s_push_command(queue_process_fstream, &entry) == RET_VAL_ERROR){
+    if(s_push_ptr(queue_send_file_command, (uintptr_t)entry) == RET_VAL_ERROR){
+        s_pool_free(pool_send_command, (void*)entry);
         fprintf(stderr, "CRITICAL ERROR: Failed to push command to queue_process_fstream. Should never happen since queue is blocking on push/pop semaphores\n");
     }
                     
