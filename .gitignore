@@ -1,8 +1,5 @@
-git/repo/bin/pdb/*.pdb # Ignore PDB files in the specific path
-/git/repo/bin/obj/*.obj # Ignore OBJ files in the specific path
-/git/repo/bin/*.exe # Ignore EXE files in the specific path
-/.vscode/ # Ignore Visual Studio Code specific files
-.gitignore # Ignore the .gitignore file itself
-*.obj
+.gitignore
 *.pdb
+*.ilk
+*.obj
 *.exe
