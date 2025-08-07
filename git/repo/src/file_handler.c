@@ -25,7 +25,7 @@ static ServerFileStream *get_free_file_stream(){
     
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
-    EnterCriticalSection(&server->fstreams_lock);
+    //EnterCriticalSection(&server->fstreams_lock);
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &server->fstream[i];
         EnterCriticalSection(&fstream->lock);
@@ -37,25 +37,25 @@ static ServerFileStream *get_free_file_stream(){
         }
         LeaveCriticalSection(&fstream->lock);
     }
-    LeaveCriticalSection(&server->fstreams_lock);
+    //LeaveCriticalSection(&server->fstreams_lock);
     return NULL;
 }
 static ServerFileStream *search_file_stream(const uint32_t session_id, const uint32_t file_id){
     
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
-    EnterCriticalSection(&server->fstreams_lock);
+    //EnterCriticalSection(&server->fstreams_lock);
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
         ServerFileStream *fstream = &server->fstream[i];
-        EnterCriticalSection(&fstream->lock);
+        //EnterCriticalSection(&fstream->lock);
         if(fstream->fstream_busy == TRUE && fstream->sid == session_id && fstream->fid == file_id){
-            LeaveCriticalSection(&fstream->lock);
-            LeaveCriticalSection(&server->fstreams_lock);
+            //LeaveCriticalSection(&fstream->lock);
+            //LeaveCriticalSection(&server->fstreams_lock);
             return fstream;
         }
-        LeaveCriticalSection(&fstream->lock);
+        //LeaveCriticalSection(&fstream->lock);
     }
-    LeaveCriticalSection(&server->fstreams_lock);
+    //LeaveCriticalSection(&server->fstreams_lock);
     return NULL;
 }
 static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){

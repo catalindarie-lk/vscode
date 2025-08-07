@@ -27,6 +27,7 @@
 #include "include/client_statistics.h"
 
 ClientData Client;
+ClientQueues Queues;
 ClientBuffers Buffers;
 ClientThreads Threads;
 
@@ -34,12 +35,12 @@ const char *server_ip = "192.168.100.2";
 const char *client_ip = "192.168.100.1";
 
 static uint64_t get_new_seq_num(){
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
     return InterlockedIncrement64(&client->frame_count);
 }
 int init_client_session(){
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     memset(client, 0, sizeof(ClientData));
     
@@ -66,7 +67,7 @@ int init_client_session(){
 }
 int reset_client_session(){
     
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     client->session_status = CONNECTION_CLOSED;
     
@@ -83,7 +84,7 @@ int reset_client_session(){
 }
 static int init_client_config(){
     
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     WSADATA wsaData;
 
@@ -127,7 +128,7 @@ static int init_client_config(){
 }
 static int init_client_buffers(){
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     init_pool(pool_send_iocp_context, sizeof(IOCP_CONTEXT), CLIENT_POOL_SIZE_IOCP_SEND);
     s_init_pool(pool_send_udp_frame, sizeof(PoolEntrySendFrame), CLIENT_POOL_SIZE_SEND);
@@ -222,7 +223,7 @@ static int init_client_buffers(){
 }
 static int start_threads(){
     
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     //-------------------------------------------------------------------------------------------------------------------
     for(int i = 0; i < CLIENT_MAX_THREADS_RECV_SEND_FRAME; i++){
@@ -254,21 +255,21 @@ static int start_threads(){
     }
     //-------------------------------------------------------------------------------------------------------------------
     for(int i = 0; i < CLIENT_MAX_THREADS_SEND_FRAME; i++){
-        threads->pop_send_frame[i] = (HANDLE)_beginthreadex(NULL, 0, fthread_pop_send_frame, NULL, 0, NULL);
-        if (threads->pop_send_frame[i] == NULL) {
+        threads->send_frame[i] = (HANDLE)_beginthreadex(NULL, 0, fthread_send_frame, NULL, 0, NULL);
+        if (threads->send_frame[i] == NULL) {
             fprintf(stderr, "CRITICAL ERROR: Failed to create thread (pop_send_frame). Error: %d\n", GetLastError());
             return RET_VAL_ERROR;
         }
     }
     //-------------------------------------------------------------------------------------------------------------------
-    threads->pop_send_prio_frame = (HANDLE)_beginthreadex(NULL, 0, fthread_pop_send_prio_frame, NULL, 0, NULL);
-    if (threads->pop_send_prio_frame == NULL) {
+    threads->send_prio_frame = (HANDLE)_beginthreadex(NULL, 0, fthread_send_prio_frame, NULL, 0, NULL);
+    if (threads->send_prio_frame == NULL) {
         fprintf(stderr, "CRITICAL ERROR: Failed to create thread (pop_send_prio_frame). Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
     //-------------------------------------------------------------------------------------------------------------------
-    threads->pop_send_ctrl_frame = (HANDLE)_beginthreadex(NULL, 0, fthread_pop_send_ctrl_frame, NULL, 0, NULL);
-    if (threads->pop_send_ctrl_frame == NULL) {
+    threads->send_ctrl_frame = (HANDLE)_beginthreadex(NULL, 0, fthread_send_ctrl_frame, NULL, 0, NULL);
+    if (threads->send_ctrl_frame == NULL) {
         fprintf(stderr, "CRITICAL ERROR: Failed to create thread (pop_send_ctrl_frame). Error: %d\n", GetLastError());
         return RET_VAL_ERROR;
     }
@@ -323,7 +324,7 @@ static void client_shutdown(){
 int log_to_file(const char* log_message) {
     // Get the precise system time
     
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     if (!log_message) {
         fprintf(stderr, "Invalid log message pointer.\n");
@@ -394,7 +395,7 @@ void close_message_stream(ClientMessageStream *mstream){
 // --- Receive frame thread function ---
 static DWORD WINAPI fthread_recv_send_frame(LPVOID lpParam) {
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
  
     HANDLE CompletitionPort = client->iocp_handle;
     DWORD NrOfBytesTransferred;
@@ -547,7 +548,7 @@ static DWORD WINAPI fthread_recv_send_frame(LPVOID lpParam) {
 // --- Processes a received frame ---
 static DWORD WINAPI fthread_process_frame(LPVOID lpParam) {
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     UdpFrame *frame;
     struct sockaddr_in *src_addr;
@@ -770,7 +771,7 @@ static DWORD WINAPI fthread_process_frame(LPVOID lpParam) {
 // --- Re-Send frames not acknowledges within set time ---
 static DWORD WINAPI fthread_resend_frame(LPVOID lpParam){
    
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     while(client->client_status == STATUS_READY){ 
         // if(client.session_status == CONNECTION_CLOSED){
@@ -811,7 +812,7 @@ static DWORD WINAPI fthread_resend_frame(LPVOID lpParam){
 // --- Send keep alive ---
 static DWORD WINAPI fthread_keep_alive(LPVOID lpParam){
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     time_t now_keep_alive = time(NULL);
     time_t last_keep_alive = time(NULL);
@@ -862,9 +863,9 @@ static DWORD WINAPI fthread_keep_alive(LPVOID lpParam){
     return 0;
 }
 // --- Pop a frame from frame queue for processing ---
-static DWORD WINAPI fthread_pop_send_frame(LPVOID lpParam){
+static DWORD WINAPI fthread_send_frame(LPVOID lpParam){
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     char log_message[CLIENT_LOG_MESSAGE_LEN];
 
@@ -882,9 +883,9 @@ static DWORD WINAPI fthread_pop_send_frame(LPVOID lpParam){
     return 0;
 }
 // --- Pop a frame from priority queue for processing ---
-static DWORD WINAPI fthread_pop_send_prio_frame(LPVOID lpParam){
+static DWORD WINAPI fthread_send_prio_frame(LPVOID lpParam){
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     char log_message[CLIENT_LOG_MESSAGE_LEN];
 
@@ -902,9 +903,9 @@ static DWORD WINAPI fthread_pop_send_prio_frame(LPVOID lpParam){
     return 0;
 }
 // --- Pop a frame from ctrl queue for processing ---
-static DWORD WINAPI fthread_pop_send_ctrl_frame(LPVOID lpParam){
+static DWORD WINAPI fthread_send_ctrl_frame(LPVOID lpParam){
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     char log_message[CLIENT_LOG_MESSAGE_LEN];
 
@@ -925,7 +926,7 @@ static DWORD WINAPI fthread_pop_send_ctrl_frame(LPVOID lpParam){
 // --- File transfer thread function ---
 static DWORD WINAPI fthread_process_fstream(LPVOID lpParam){
     
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     SHA256_CTX sha256_ctx;
     uint32_t chunk_bytes_to_send;
@@ -940,7 +941,6 @@ static DWORD WINAPI fthread_process_fstream(LPVOID lpParam){
     char log_message[CLIENT_LOG_MESSAGE_LEN];
  
     while(client->client_status == STATUS_READY){
-        // memset(&entry, 0, sizeof(QueueCommandEntry));
         // this semaphore is released when a stream finished it's job
         WaitForSingleObject(client->fstreams_semaphore, INFINITE);
         
@@ -1170,7 +1170,7 @@ static DWORD WINAPI fthread_process_fstream(LPVOID lpParam){
 // --- Send message thread function ---
 static DWORD WINAPI fthread_process_mstream(LPVOID lpParam){
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     uint32_t frame_fragment_offset;
     uint32_t frame_fragment_len;
@@ -1305,14 +1305,15 @@ static DWORD WINAPI fthread_client_command(LPVOID lpParam) {
     
        fprintf(stdout, "Input the client number: ");
         nr = getchar();
-        if(nr == '0'){
+        if(nr == '1'){
             snprintf(client_root_folder, MAX_PATH, "%s", "H:\\_test\\client1\\");
-        } else if(nr == '1'){
-            snprintf(client_root_folder, MAX_PATH, "%s", "H:\\_test\\client2\\");
         } else if(nr == '2'){
+            snprintf(client_root_folder, MAX_PATH, "%s", "H:\\_test\\client2\\");
+        } else if(nr == '3'){
             snprintf(client_root_folder, MAX_PATH, "%s", "H:\\_test\\client3\\");
         } else {
-            fprintf(stdout, "Invalid client number! Please enter 0, 1, or 2.\n");
+            fprintf(stdout, "Defaulted to 'client_folder'\n");
+            snprintf(client_root_folder, MAX_PATH, "%s", CLIENT_ROOT_FOLDER);
         }
 
     while(Client.client_status == STATUS_READY){
@@ -1393,7 +1394,7 @@ static DWORD WINAPI fthread_client_command(LPVOID lpParam) {
 // --- Thread function to write error logs to a file ---
 static DWORD WINAPI fthread_error_log_write(LPVOID lpParam){
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     while(client->client_status == STATUS_READY){
         WaitForSingleObject(queue_error_log->push_semaphore, INFINITE);

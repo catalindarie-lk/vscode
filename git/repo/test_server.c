@@ -1481,11 +1481,10 @@ int main() {
 
         Sleep(250); // Prevent busy-waiting
    
-        fprintf(stdout, "\r\033[2K-- Hash_fID_Count: %llu; FreeRecvFrame: %llu; FreeSendFrame: %llu; FreeAckFrame: %llu; PendingAck: %llu; PoolFileChunk: %llu", 
+        fprintf(stdout, "\r\033[2K-- Hash_fID_Count: %llu; FreeRecvFrame: %llu; FreeSendFrame: %llu; PendingAck: %llu; PoolFileChunk: %llu", 
                             Buffers.table_file_id.count,
                             Buffers.pool_recv_udp_frame.free_blocks,
                             Buffers.pool_send_udp_frame.free_blocks,
-                            Buffers.pool_queue_ack_frame.free_blocks,
                             ClientList.client[0].queue_file_ack_seq.pending,
                             Buffers.pool_file_chunk.free_blocks
                             );

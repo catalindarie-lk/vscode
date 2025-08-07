@@ -81,25 +81,26 @@
 // --- Macro to Parse Global Data to Threads ---
 // This macro simplifies passing pointers to global client data structures into thread functions.
 // It creates local pointers within the thread function's scope, pointing to the global instances.
-#define PARSE_CLIENT_GLOBAL_DATA(client_obj, buffers_obj, threads_obj) \
+#define PARSE_CLIENT_GLOBAL_DATA(client_obj, queues_obj, buffers_obj, threads_obj) \
     ClientData *client = &(client_obj); /* Pointer to the global ClientData structure */ \
+    ClientQueues *queues = &(queues_obj); /* Pointer to queues struct queue */ \
     ClientBuffers *buffers = &(buffers_obj); /* Pointer to the global ClientBuffers structure */ \
     ClientThreads *threads = &(threads_obj); /* Pointer to threads struct queue */ \
     MemPool *pool_send_iocp_context = &((buffers_obj).pool_send_iocp_context); /* Pointer to IOCP send context memory pool */ \
     MemPool *pool_recv_iocp_context = &((buffers_obj).pool_recv_iocp_context); /* Pointer to IOCP recv context memory pool */ \
     MemPool *pool_recv_udp_frame = &((buffers_obj).pool_recv_udp_frame); \
-    QueuePtr *queue_recv_udp_frame = &((buffers_obj).queue_recv_udp_frame); \
-    QueuePtr *queue_recv_prio_udp_frame = &((buffers_obj).queue_recv_prio_udp_frame); \
+    QueuePtr *queue_recv_udp_frame = &((queues_obj).queue_recv_udp_frame); \
+    QueuePtr *queue_recv_prio_udp_frame = &((queues_obj).queue_recv_prio_udp_frame); \
     s_MemPool *pool_send_udp_frame = &((buffers_obj).pool_send_udp_frame); /* Pointer to send frame memory pool */ \
-    s_QueuePtr *queue_send_udp_frame = &((buffers_obj).queue_send_udp_frame); /* Pointer to send queue for normal frames */ \
-    s_QueuePtr *queue_send_prio_udp_frame = &((buffers_obj).queue_send_prio_udp_frame); /* Pointer to send queue for priority frames */ \
-    s_QueuePtr *queue_send_ctrl_udp_frame = &((buffers_obj).queue_send_ctrl_udp_frame); /* Pointer to send queue for control frames */ \
+    s_QueuePtr *queue_send_udp_frame = &((queues_obj).queue_send_udp_frame); /* Pointer to send queue for normal frames */ \
+    s_QueuePtr *queue_send_prio_udp_frame = &((queues_obj).queue_send_prio_udp_frame); /* Pointer to send queue for priority frames */ \
+    s_QueuePtr *queue_send_ctrl_udp_frame = &((queues_obj).queue_send_ctrl_udp_frame); /* Pointer to send queue for control frames */ \
     TableSendFrame *table_send_udp_frame = &((buffers_obj).table_send_udp_frame); /* Pointer to hash table for sent frames awaiting ACK */ \
     s_MemPool *pool_send_command = &((buffers_obj).pool_send_command); /* Pointer commands memory pool */ \
-    s_QueuePtr *queue_send_file_command = &((buffers_obj).queue_send_file_command); /* Pointer to file stream command queue */ \
-    s_QueuePtr *queue_send_message_command = &((buffers_obj).queue_send_message_command); /* Pointer to message stream command queue */ \
+    s_QueuePtr *queue_send_file_command = &((queues_obj).queue_send_file_command); /* Pointer to file stream command queue */ \
+    s_QueuePtr *queue_send_message_command = &((queues_obj).queue_send_message_command); /* Pointer to message stream command queue */ \
     MemPool *pool_error_log = &((buffers_obj).pool_error_log); /* Pointer to error log memory pool */ \
-    QueuePtr *queue_error_log = &((buffers_obj).queue_error_log); /* Pointer to error log queue */ \
+    QueuePtr *queue_error_log = &((queues_obj).queue_error_log); /* Pointer to error log queue */ \
 
     // end of #define PARSE_GLOBAL_DATA // End marker for the macro definition
 
@@ -215,9 +216,9 @@ typedef struct {
     HANDLE process_frame[CLIENT_MAX_TREADS_PROCESS_FRAME];     // Handles for threads processing frames
     HANDLE resend_frame;                                       // Handle for the resend management thread
     HANDLE keep_alive;                                         // Handle for the keep-alive thread
-    HANDLE pop_send_frame[CLIENT_MAX_THREADS_SEND_FRAME];  // Handles for threads popping normal send frames
-    HANDLE pop_send_prio_frame;                                // Handle for thread popping priority send frames
-    HANDLE pop_send_ctrl_frame;                                // Handle for thread popping control send frames
+    HANDLE send_frame[CLIENT_MAX_THREADS_SEND_FRAME];  // Handles for threads popping normal send frames
+    HANDLE send_prio_frame;                                // Handle for thread popping priority send frames
+    HANDLE send_ctrl_frame;                                // Handle for thread popping control send frames
 
     HANDLE process_fstream[CLIENT_MAX_ACTIVE_FSTREAMS]; // Handles for individual file stream threads (if any)
     HANDLE process_mstream[CLIENT_MAX_ACTIVE_MSTREAMS]; // Handles for individual message stream threads (if any)   
@@ -230,27 +231,27 @@ typedef struct {
 typedef struct {
     MemPool pool_send_iocp_context;             // Memory pool for IOCP send contexts
     MemPool pool_recv_iocp_context;             // Memory pool for IOCP receive contexts
-
     MemPool pool_recv_udp_frame;                    // Memory pool for received frames
+    s_MemPool pool_send_udp_frame;                  // Memory pool for normal frames to be sent
+    TableSendFrame table_send_udp_frame;              // Hash table to track sent frames awaiting acknowledgment (ACK)
+    s_MemPool pool_send_command;
+    MemPool pool_error_log;                     // Memory pool for error log entries    
+}ClientBuffers;
+
+typedef struct {
     QueuePtr queue_recv_udp_frame;
     QueuePtr queue_recv_prio_udp_frame;
-
-    s_MemPool pool_send_udp_frame;                  // Memory pool for normal frames to be sent
     s_QueuePtr queue_send_udp_frame;            // Queue for normal frames awaiting transmission
     s_QueuePtr queue_send_prio_udp_frame;       // Queue for priority frames awaiting transmission
     s_QueuePtr queue_send_ctrl_udp_frame;       // Queue for control frames awaiting transmission
-    TableSendFrame table_send_udp_frame;              // Hash table to track sent frames awaiting acknowledgment (ACK)
-
-    s_MemPool pool_send_command;
     s_QueuePtr queue_send_file_command;         // Queue for file stream commands
     s_QueuePtr queue_send_message_command;         // Queue for message stream commands
-
-    MemPool pool_error_log;                     // Memory pool for error log entries    
     QueuePtr queue_error_log;                // Queue for normal frames to be sent
-}ClientBuffers;
+}ClientQueues;
 
 // --- Global Data Declarations (defined in a corresponding .c file) ---
 extern ClientData Client;                       // Global instance of client data
+extern ClientQueues Queues;                   // Global instance of client queues
 extern ClientBuffers Buffers;                   // Global instance of client buffers and pools
 extern ClientThreads Threads;                   // Global instance of client thread handles
 
@@ -271,9 +272,9 @@ static DWORD WINAPI fthread_recv_send_frame(LPVOID lpParam);       // Thread for
 static DWORD WINAPI fthread_process_frame(LPVOID lpParam);         // Thread for processing received frames
 static DWORD WINAPI fthread_resend_frame(LPVOID lpParam);          // Thread for managing retransmissions
 static DWORD WINAPI fthread_keep_alive(LPVOID lpParam);            // Thread for sending keep-alive messages to maintain session
-static DWORD WINAPI fthread_pop_send_frame(LPVOID lpParam);        // Thread for popping normal frames from send queue and initiating send
-static DWORD WINAPI fthread_pop_send_prio_frame(LPVOID lpParam);   // Thread for popping priority frames from send queue
-static DWORD WINAPI fthread_pop_send_ctrl_frame(LPVOID lpParam);   // Thread for popping control frames from send queue
+static DWORD WINAPI fthread_send_frame(LPVOID lpParam);        // Thread for popping normal frames from send queue and initiating send
+static DWORD WINAPI fthread_send_prio_frame(LPVOID lpParam);   // Thread for popping priority frames from send queue
+static DWORD WINAPI fthread_send_ctrl_frame(LPVOID lpParam);   // Thread for popping control frames from send queue
 static DWORD WINAPI fthread_process_fstream(LPVOID lpParam);       // Thread for managing a specific file stream operation
 static DWORD WINAPI fthread_process_mstream(LPVOID lpParam);       // Thread for managing a specific message stream operation
 static DWORD WINAPI fthread_client_command(LPVOID lpParam);        // Thread for processing client commands (e.g., from UI or other modules)

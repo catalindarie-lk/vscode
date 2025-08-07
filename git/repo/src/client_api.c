@@ -15,7 +15,7 @@
 
 int RequestConnect(const char *server_ip) {
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     // Define server address
     memset(&client->server_addr, 0, sizeof(client->server_addr));
@@ -70,7 +70,7 @@ int RequestConnect(const char *server_ip) {
 
 void RequestDisconnect(){
     
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
     
     if(client->session_status == CONNECTION_CLOSED){
         fprintf(stdout, "Not connected to server\n");
@@ -111,7 +111,7 @@ void RequestDisconnect(){
 // len: The actual nr of bytes of the text buffer, NOT including the null terminator.
 void SendTextMessage(const char *buffer, const size_t len) {
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     PoolEntryCommand *entry = NULL;
 
@@ -226,7 +226,7 @@ static void stream_file(const char *fpath, const size_t fpath_len,
                         const char *rpath, const size_t rpath_len,
                         const char *fname, const size_t fname_len) {
 
-    PARSE_CLIENT_GLOBAL_DATA(Client, Buffers, Threads) // this macro is defined in client header file (client.h)
+    PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
 
     PoolEntryCommand *entry = NULL;
     int res; // For checking return values of secure functions

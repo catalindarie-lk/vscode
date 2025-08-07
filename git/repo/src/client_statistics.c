@@ -340,15 +340,15 @@ DWORD WINAPI MainLogicThread(LPVOID lpParam) {
             g_clientStats.fstream_progress[i] = progress;
         }
 
-        g_clientStats.files_pending_for_streaming = Buffers.queue_send_file_command.pending;
+        g_clientStats.files_pending_for_streaming = Queues.queue_send_file_command.pending;
 
-        g_clientStats.queue_send_frames_pending = Buffers.queue_send_udp_frame.pending;
-        g_clientStats.queue_send_prio_frames_pending = Buffers.queue_recv_prio_udp_frame.pending;
-        g_clientStats.queue_send_ctrl_frames_pending = Buffers.queue_send_ctrl_udp_frame.pending;
+        g_clientStats.queue_send_frames_pending = Queues.queue_send_udp_frame.pending;
+        g_clientStats.queue_send_prio_frames_pending = Queues.queue_recv_prio_udp_frame.pending;
+        g_clientStats.queue_send_ctrl_frames_pending = Queues.queue_send_ctrl_udp_frame.pending;
         g_clientStats.hash_table_send_frames_pending = Buffers.table_send_udp_frame.count;
 
-        g_clientStats.queue_recv_frames_pending = Buffers.queue_recv_udp_frame.pending;
-        g_clientStats.queue_recv_prio_frames_pending = Buffers.queue_recv_prio_udp_frame.pending;
+        g_clientStats.queue_recv_frames_pending = Queues.queue_recv_udp_frame.pending;
+        g_clientStats.queue_recv_prio_frames_pending = Queues.queue_recv_prio_udp_frame.pending;
 
         g_clientStats.pool_send_frames_free_blocks = Buffers.pool_send_udp_frame.free_blocks;
         g_clientStats.pool_send_frames_total_blocks = Buffers.pool_send_udp_frame.block_count;
