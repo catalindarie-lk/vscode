@@ -27,8 +27,15 @@
 #define MIN_CONNECTION_TIMEOUT_SEC                  15                     // Minimum timeout for a connection in seconds
 
 #define CLIENT_ROOT_FOLDER                          "H:\\_test\\client_root\\"
+#define CLIENT_1_ROOT_FOLDER                        "H:\\_test\\client1_root\\"
+#define CLIENT_2_ROOT_FOLDER                        "H:\\_test\\client2_root\\"
+#define CLIENT_3_ROOT_FOLDER                        "H:\\_test\\client3_root\\"
+
 #define CLIENT_ERROR_LOG_FILE                       "H:\\_test\\client_error_log.txt" // Path to the client log file
 #define CLIENT_DEBUG_LOG_FILE                       "H:\\_test\\client_debug_log.txt" // Path to the client debug log file
+
+
+
 
 #define CLIENT_LOG_MESSAGE_LEN                      256
 

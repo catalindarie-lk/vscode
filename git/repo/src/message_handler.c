@@ -205,6 +205,39 @@ static int msg_check_completion_and_record(MessageStream *mstream) {
     return RET_VAL_SUCCESS;
 }
 
+
+// Clean up the message stream resources after a file transfer is completed or aborted.
+void close_message_stream(MessageStream *mstream){
+
+    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
+
+    if(mstream == NULL){
+        fprintf(stderr, "ERROR: Trying to clean a NULL pointer message stream\n");
+        return;
+    }
+    if(mstream->buffer){
+        free(mstream->buffer);
+        mstream->buffer = NULL; // Set the pointer to NULL to prevent dangling pointers.
+    }
+    if(mstream->bitmap != NULL){
+        free(mstream->bitmap); // Free the memory allocated for the bitmap.
+        mstream->bitmap = NULL; // Set the pointer to NULL to prevent dangling pointers.
+    }
+    mstream->busy = FALSE; // Reset the busy flag.
+    mstream->stream_err = STREAM_ERR_NONE; // Reset error status.
+    mstream->sid = 0; // Reset session ID.
+    mstream->mid = 0; // Reset message ID.
+    mstream->mlen = 0; // Reset message length.
+    mstream->fragment_count = 0; // Reset fragment count.
+    mstream->chars_received = 0; // Reset characters received counter.
+    mstream->bitmap_entries_count = 0; // Reset bitmap entries count.
+    memset(mstream->fnm, 0, MAX_NAME_SIZE); // Clear the file name buffer by filling it with zeros.
+
+    return;
+
+}
+
+
 // HANDLE received message fragment frame
 int handle_message_fragment(Client *client, UdpFrame *frame){
 

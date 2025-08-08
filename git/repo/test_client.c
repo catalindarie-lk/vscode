@@ -31,8 +31,8 @@ ClientQueues Queues;
 ClientBuffers Buffers;
 ClientThreads Threads;
 
-const char *server_ip = "192.168.100.2";
-const char *client_ip = "192.168.100.1";
+const char *server_ip = "192.168.100.1";
+const char *client_ip = "192.168.100.2";
 
 static uint64_t get_new_seq_num(){
     PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
@@ -1306,11 +1306,11 @@ static DWORD WINAPI fthread_client_command(LPVOID lpParam) {
        fprintf(stdout, "Input the client number: ");
         nr = getchar();
         if(nr == '1'){
-            snprintf(client_root_folder, MAX_PATH, "%s", "H:\\_test\\client1\\");
+            snprintf(client_root_folder, MAX_PATH, "%s", CLIENT_1_ROOT_FOLDER);
         } else if(nr == '2'){
-            snprintf(client_root_folder, MAX_PATH, "%s", "H:\\_test\\client2\\");
+            snprintf(client_root_folder, MAX_PATH, "%s", CLIENT_2_ROOT_FOLDER);
         } else if(nr == '3'){
-            snprintf(client_root_folder, MAX_PATH, "%s", "H:\\_test\\client3\\");
+            snprintf(client_root_folder, MAX_PATH, "%s", CLIENT_3_ROOT_FOLDER);
         } else {
             fprintf(stdout, "Defaulted to 'client_folder'\n");
             snprintf(client_root_folder, MAX_PATH, "%s", CLIENT_ROOT_FOLDER);

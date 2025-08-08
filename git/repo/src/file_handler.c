@@ -21,49 +21,245 @@
 #include "include/folders.h"
 
 
-static ServerFileStream *get_free_file_stream(){
-    
-    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
-    //EnterCriticalSection(&server->fstreams_lock);
-    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        ServerFileStream *fstream = &server->fstream[i];
-        EnterCriticalSection(&fstream->lock);
-        if(!fstream->fstream_busy){
-            fstream->fstream_busy = TRUE;
-            LeaveCriticalSection(&fstream->lock);
-            LeaveCriticalSection(&server->fstreams_lock);
+void init_fstream_pool(ServerFileStreamPool* pool, const uint64_t block_count) {
+
+    pool->block_count = block_count;
+
+    // Allocate memory for 'next' array
+    pool->next = (uint64_t*)_aligned_malloc(sizeof(uint64_t) * pool->block_count, 64);
+    if (!pool->next) {
+        fprintf(stderr, "Memory allocation failed for next indices in init_fstream_pool().\n");
+        return;
+    }
+    memset(pool->next, 0, pool->block_count * sizeof(uint64_t)); // Initialize to 0
+
+    // Allocate memory for 'used' array
+    pool->used = (uint8_t*)_aligned_malloc(sizeof(uint8_t) * pool->block_count, 64);
+    if (!pool->used) {
+        fprintf(stderr, "Memory allocation failed for used flags in init_fstream_pool().\n");
+        _aligned_free(pool->next);
+        return;
+    }
+    memset(pool->used, 0, pool->block_count * sizeof(uint8_t)); // Initialize to 0 (unused)
+    
+    // Allocate the main memory buffer for the pool
+    pool->fstream = (ServerFileStream*)_aligned_malloc(sizeof(ServerFileStream) * pool->block_count, 64);
+    if (!pool->fstream) {
+        fprintf(stderr, "Memory allocation failed for fstream in init_fstream_pool().\n");
+        _aligned_free(pool->next);
+        _aligned_free(pool->used);
+        return; // early return in case of failure
+    }
+    // Initialize memory to zero
+    memset(pool->fstream, 0, sizeof(ServerFileStream) * pool->block_count);
+    
+    // Initialize the free list: all blocks are initially free
+    pool->free_head = 0;                                        // The first block is the head of the free list
+    // Link all blocks together and mark them as unused
+    for (uint64_t index = 0; index < pool->block_count - 1; index++) {
+        pool->next[index] = index + 1;                          // Link to the next block
+        pool->used[index] = FREE_BLOCK;                         // Mark as unused
+        InitializeSRWLock(&pool->fstream[index].lock);
+    }
+    // The last block points to END_BLOCK, indicating the end of the free list
+    pool->next[pool->block_count - 1] = END_BLOCK;              // Use END_BLOCK to indicate end of list
+    pool->used[pool->block_count - 1] = FREE_BLOCK;             // Last block is also unused
+    InitializeSRWLock(&pool->fstream[pool->block_count - 1].lock);
+    pool->free_blocks = pool->block_count;
+    // Initialize the critical section for thread safety
+    InitializeSRWLock(&pool->lock);
+    return;
+}
+ServerFileStream* alloc_fstream(ServerFileStreamPool* pool) {
+    // Enter critical section to protect shared pool data
+    if(!pool) {
+        fprintf(stderr, "ERROR: Attempt to alloc_fstream() in an unallocated pool!\n");
+        return NULL;
+    }
+    AcquireSRWLockExclusive(&pool->lock);
+    // Check if the pool is exhausted
+    if (pool->free_head == END_BLOCK) { // Check against END_BLOCK
+        ReleaseSRWLockExclusive(&pool->lock);
+        return NULL; // Pool exhausted
+    }
+    // Get the index of the first free block
+    uint64_t index = pool->free_head;
+    // Update the free head to the next free block
+    pool->free_head = pool->next[index];
+    // Mark the allocated block as used
+    pool->used[index] = USED_BLOCK;
+    pool->free_blocks--;
+    AcquireSRWLockExclusive(&pool->fstream[index].lock);
+    pool->fstream[index].fstream_busy = TRUE;
+    ReleaseSRWLockExclusive(&pool->fstream[index].lock);
+    ReleaseSRWLockExclusive(&pool->lock);
+    return &pool->fstream[index];
+}
+ServerFileStream* find_fstream(ServerFileStreamPool* pool, const uint32_t sid, const uint32_t fid) {
+
+    if(!pool) {
+        fprintf(stderr, "ERROR: Attempt to find_fstream() in an unallocated pool!\n");
+        return NULL;
+    }
+
+    if(sid == 0 || fid == 0){
+        fprintf(stderr, "ERROR: Invalid sid or fid values to find_fstream() in pool");
+        return NULL;
+    }
+
+    ServerFileStream *fstream = NULL;
+    for(uint64_t index = 0; index < pool->block_count; index++){
+        if(!pool->used[index]) {
+            continue;
+        }
+        fstream = &pool->fstream[index];
+        // AcquireSRWLockShared(&fstream->lock);
+        if(fstream->fstream_busy && fstream->sid == sid && fstream->fid == fid){
+            // ReleaseSRWLockShared(&fstream->lock);
             return fstream;
         }
-        LeaveCriticalSection(&fstream->lock);
+        // ReleaseSRWLockShared(&fstream->lock);
     }
-    //LeaveCriticalSection(&server->fstreams_lock);
     return NULL;
 }
-static ServerFileStream *search_file_stream(const uint32_t session_id, const uint32_t file_id){
-    
+void free_fstream(ServerFileStreamPool* pool, ServerFileStream* fstream) {
+    // Handle NULL pointer case
+
+    if (!pool) {
+        fprintf(stderr, "ERROR: Attempt to free_fstream() in an unallocated pool!\n");
+        return;
+    }
+    if (!fstream) {
+        fprintf(stderr, "ERROR: Attempt to free a NULL block in fstream pool!\n");
+        return;
+    }
+    // Calculate the index of the block to be freed
+    uint64_t index = (uint64_t)(((char*)fstream - (char*)pool->fstream) / sizeof(ServerFileStream));
+    // uint64_t index = (uint64_t)(fstream - pool->fstream);
+    // Validate the index and usage flag for safety and debugging
+    if (index >= pool->block_count || pool->used[index] == FREE_BLOCK) {       
+        fprintf(stderr, "CRITICAL ERROR: Attempt to free invalid fstream from pool!\n");
+        return;
+    }
+    AcquireSRWLockExclusive(&pool->lock);
+    // Add the freed block back to the head of the free list
+    pool->next[index] = pool->free_head;
+    pool->free_head = index;
+    // Mark the block as unused
+    pool->used[index] = FREE_BLOCK;
+    pool->free_blocks++;
+    ReleaseSRWLockExclusive(&pool->lock);
+    return;
+}
+void destroy_fstream_pool(ServerFileStreamPool* pool) {
+    // Check for NULL pool pointer
+    if (!pool) {
+        fprintf(stderr, "ERROR: Attempt to destroy_fstream_pool() on an unallocated pool!\n");
+        return;
+    }
+
+    // Free allocated memory for 'next' array
+    if (pool->next) {
+        _aligned_free(pool->next);
+        pool->next = NULL;
+    }
+    // Free allocated memory for 'used' array
+    if (pool->used) {
+        _aligned_free(pool->used);
+        pool->used = NULL;
+    }
+    // Free the main memory buffer
+    if (pool->fstream) {
+        _aligned_free(pool->fstream);
+        pool->fstream = NULL;
+    }
+    pool->free_blocks = 0;
+}
+
+
+// Clean up the file stream resources after a file transfer is completed or aborted.
+void close_file_stream(ServerFileStream *fstream){
+
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
-    //EnterCriticalSection(&server->fstreams_lock);
-    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        ServerFileStream *fstream = &server->fstream[i];
-        //EnterCriticalSection(&fstream->lock);
-        if(fstream->fstream_busy == TRUE && fstream->sid == session_id && fstream->fid == file_id){
-            //LeaveCriticalSection(&fstream->lock);
-            //LeaveCriticalSection(&server->fstreams_lock);
-            return fstream;
-        }
-        //LeaveCriticalSection(&fstream->lock);
+    if(!fstream){
+        fprintf(stderr, "ERROR: Trying to clean a NULL pointer file stream\n");
+        return;
     }
-    //LeaveCriticalSection(&server->fstreams_lock);
-    return NULL;
+    if(fstream->fp && fstream->fstream_busy && !fstream->file_complete){
+        fclose(fstream->fp);
+        remove(fstream->fpath);
+        fstream->fp = NULL;
+    }
+    if(fstream->fp){
+        if(fflush(fstream->fp) != 0){
+            fprintf(stderr, "Error flushing the file to disk. File is still in use.\n");
+        } else {
+            int fclosed = fclose(fstream->fp);
+            Sleep(1);
+            if(fclosed != 0){
+                fprintf(stderr, "Error closing the file stream: %s (errno: %d)\n", fstream->fpath, errno);
+            }
+            fstream->fp = NULL; // Set the file pointer to NULL after closing.
+        }
+    }
+    if(fstream->bitmap){
+        free(fstream->bitmap);
+        fstream->bitmap = NULL;
+    }
+    if(fstream->flag){
+        free(fstream->flag);
+        fstream->flag = NULL;
+    }    
+    for(long long index = 0; index < fstream->bitmap_entries_count; index++){
+        if(fstream->pool_block_file_chunk[index]){
+            pool_free(pool_file_chunk, fstream->pool_block_file_chunk[index]);
+        }
+        fstream->pool_block_file_chunk[index] = NULL;
+    }
+
+    fstream->sid = 0;                                   // Session ID associated with this file stream.
+    fstream->fid = 0;                                   // File ID, unique identifier for the file associated with this file stream.
+    fstream->fsize = 0;                                 // Total size of the file being transferred.
+    fstream->trailing_chunk = FALSE;                // True if the last bitmap entry represents a partial chunk (less than 64 fragments).
+    fstream->trailing_chunk_complete = FALSE;       // True if all bytes for the last, potentially partial, chunk have been received.
+    fstream->trailing_chunk_size = 0;               // The actual size of the last chunk (if partial).
+    fstream->file_end_frame_seq_num = 0;
+    fstream->fragment_count = 0;                    // Total number of fragments in the entire file.
+    fstream->recv_bytes_count = 0;                  // Total bytes received for this file so far.
+    fstream->written_bytes_count = 0;               // Total bytes written to disk for this file so far.
+    fstream->bitmap_entries_count = 0;              // Number of uint64_t entries in the bitmap array.
+    fstream->hashed_chunks_count = 0;
+ 
+    fstream->fstream_err = STREAM_ERR_NONE;         // Stores an error code if something goes wrong with the stream.
+    fstream->file_complete = FALSE;                 // True if the entire file has been received and written.
+    fstream->file_bytes_received = FALSE;
+    fstream->file_bytes_written = FALSE;
+    fstream->file_hash_received = FALSE;
+    fstream->file_hash_calculated = FALSE;
+    fstream->file_hash_validated = FALSE;
+
+    memset(&fstream->received_sha256, 0, 32);
+    memset(&fstream->calculated_sha256, 0, 32);
+    fstream->rpath_len = 0;
+    memset(&fstream->rpath, 0, MAX_PATH);
+    fstream->fname_len = 0;
+    memset(&fstream->fname, 0, MAX_PATH);
+    memset(&fstream->fpath, 0, MAX_PATH);
+    memset(&fstream->client_addr, 0, sizeof(struct sockaddr_in));
+
+    fstream->fstream_busy = FALSE;                  // Indicates if this stream channel is currently in use for a transfer.    
+    free_fstream(fstream_pool, fstream);
+    return;
 }
+
 static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragment_buffer, const uint64_t fragment_offset, const uint32_t fragment_size){
 
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
     // Acquire the critical section lock for the specific FileStream.
-    EnterCriticalSection(&fstream->lock);
+    AcquireSRWLockExclusive(&fstream->lock);
 
     // Calculate the index of the 64-bit bitmap entry (which corresponds to a "chunk" of 64 fragments)
     // to which this incoming fragment belongs.
@@ -111,7 +307,7 @@ static void file_attach_fragment_to_chunk(ServerFileStream *fstream, char *fragm
     mark_fragment_received(fstream->bitmap, fragment_offset, FILE_FRAGMENT_SIZE);
 
     // Release the critical section lock for the file stream.
-    LeaveCriticalSection(&fstream->lock);
+    ReleaseSRWLockExclusive(&fstream->lock);
     return;
 
 }
@@ -119,8 +315,9 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, const st
 
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
-    EnterCriticalSection(&fstream->lock);
+    AcquireSRWLockExclusive(&fstream->lock);
 
+    // fstream->fstream_busy = TRUE;
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
     fstream->sid = _ntohl(frame->header.session_id);
     fstream->fid = _ntohl(frame->payload.file_metadata.file_id);
@@ -278,13 +475,13 @@ static int init_file_stream(ServerFileStream *fstream, UdpFrame *frame, const st
         goto exit_error;
     }
 
-    LeaveCriticalSection(&fstream->lock);
+    ReleaseSRWLockExclusive(&fstream->lock);
     return RET_VAL_SUCCESS;
 
 exit_error:
     //Call close_file_stream to free any partially allocated resources
     close_file_stream(fstream);
-    LeaveCriticalSection(&fstream->lock);
+    ReleaseSRWLockExclusive(&fstream->lock);
     return RET_VAL_ERROR;
 }
 
@@ -322,7 +519,8 @@ int handle_file_metadata(Client *client, UdpFrame *frame) {
         goto exit_err;
     }
 
-    ServerFileStream *fstream = get_free_file_stream();
+    // ServerFileStream *fstream = get_free_file_stream();
+    ServerFileStream *fstream = alloc_fstream(fstream_pool);
     if(fstream == NULL){
         // fprintf(stderr, "All server file transfers streams are in use!\n");
         op_code = ERR_RESOURCE_LIMIT;
@@ -402,7 +600,8 @@ int handle_file_fragment(Client *client, UdpFrame *frame){
         goto exit_err;
     }
 
-    ServerFileStream *fstream = search_file_stream(recv_session_id, recv_file_id);
+    // ServerFileStream *fstream = search_file_stream(recv_session_id, recv_file_id);
+    ServerFileStream *fstream = find_fstream(fstream_pool, recv_session_id, recv_file_id);
     if(!fstream){
         fprintf(stderr, "Received fragment frame Seq: %llu for unknown fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
         op_code = ERR_MISSING_METADATA;
@@ -488,8 +687,6 @@ exit_err:
     
     LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
-    LeaveCriticalSection(&client->lock);
-    return RET_VAL_ERROR;
 }
 // Process received file end frame
 int handle_file_end(Client *client, UdpFrame *frame){
@@ -518,30 +715,33 @@ int handle_file_end(Client *client, UdpFrame *frame){
         goto exit_err;
     }
 
-    ServerFileStream *fstream = search_file_stream(recv_session_id, recv_file_id);
+    // ServerFileStream *fstream = search_file_stream(recv_session_id, recv_file_id);
+    ServerFileStream *fstream = find_fstream(fstream_pool, recv_session_id, recv_file_id);
     if(!fstream){
         fprintf(stderr, "Received end frame Seq: %llu for unknown fID: %u; sID %u;\n", recv_seq_num, recv_file_id, recv_session_id);
         op_code = ERR_MISSING_METADATA;
         goto exit_err;
     }
 
+    AcquireSRWLockExclusive(&fstream->lock);
     for(int i = 0; i < 32; i++){   
         fstream->received_sha256[i] = frame->payload.file_end.file_hash[i];
     }
     fstream->file_hash_received = TRUE;
     fstream->file_end_frame_seq_num = recv_seq_num;
- 
+    ReleaseSRWLockExclusive(&fstream->lock);
+
     if(fstream->file_complete){
         entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_frame);
         if(!entry){
-            fprintf(stderr, "ERROR: Failed to allocate memory in the pool for file_end ack frame\n");
             LeaveCriticalSection(&client->lock);
             return RET_VAL_ERROR;
         }
         construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_FILE_END, server->socket, &client->client_addr);
         if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
-            fprintf(stderr, "ERROR: Failed to push file end ack frame to queue\n");
             pool_free(pool_queue_ack_frame, entry);
+            LeaveCriticalSection(&client->lock);
+            return RET_VAL_ERROR;
         }
     }
     LeaveCriticalSection(&client->lock);
@@ -551,13 +751,11 @@ exit_err:
 
     entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_frame);
     if(!entry){
-        fprintf(stderr, "ERROR: Failed to allocate memory in the pool for file fragment ack error frame\n");
         LeaveCriticalSection(&client->lock);
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
     if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
-        fprintf(stderr, "ERROR: Failed to push file end ack error frame to queue\n");
         pool_free(pool_queue_ack_frame, entry);
     }
     LeaveCriticalSection(&client->lock);

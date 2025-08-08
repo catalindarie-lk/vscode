@@ -13,9 +13,9 @@
 #define RET_VAL_ERROR -1
 #endif
 
-#define POOL_END UINT64_MAX
-#define FREE 0
-#define USED 1
+#define END_BLOCK UINT64_MAX
+#define FREE_BLOCK 0
+#define USED_BLOCK 1
 
 //--------------------------------------------------------------------------------------------------------------------------
 __declspec(align(64)) typedef struct {
@@ -54,10 +54,5 @@ void s_init_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t bloc
 void* s_pool_alloc(s_MemPool* pool);
 void s_pool_free(s_MemPool* pool, void* ptr);
 void s_pool_destroy(s_MemPool* pool);
-
-
-
-
-
 
 #endif // MEM_POOL_H

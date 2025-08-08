@@ -204,12 +204,12 @@ DWORD WINAPI MainLogicThread_Server(LPVOID lpParam) {
         }
 
         for (int i = 0; i < 10; ++i) {
-            if(server->fstream[i].fstream_busy){
-                g_serverStats.fstream_progress[i] = (double)((double)server->fstream[i].recv_bytes_count / (double)server->fstream[i].fsize) * 100.0;
-                g_serverStats.fstream_session_id[i] = server->fstream[i].sid;
+            if(fstream_pool->fstream[i].fstream_busy){
+                g_serverStats.fstream_progress[i] = (double)((double)fstream_pool->fstream[i].recv_bytes_count / (double)fstream_pool->fstream[i].fsize) * 100.0;
+                g_serverStats.fstream_session_id[i] = fstream_pool->fstream[i].sid;
             } else {
-                g_serverStats.fstream_progress[i] = (double)((double)server->fstream[i].recv_bytes_count / (double)server->fstream[i].fsize) * 100.0;
-                g_serverStats.fstream_session_id[i] = server->fstream[i].sid;
+                g_serverStats.fstream_progress[i] = (double)((double)fstream_pool->fstream[i].recv_bytes_count / (double)fstream_pool->fstream[i].fsize) * 100.0;
+                g_serverStats.fstream_session_id[i] = fstream_pool->fstream[i].sid;
             }
             
         }

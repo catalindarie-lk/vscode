@@ -31,7 +31,7 @@ ServerBuffers Buffers;
 ClientListData ClientList;
 ServerThreads Threads;
 
-const char *server_ip = "192.168.100.2";
+const char *server_ip = "192.168.100.1";
 
 
 static void get_network_config(){
@@ -135,11 +135,6 @@ static int init_server_buffers(){
             InitializeCriticalSection(&client_list->client[i].mstream[j].lock);
         }
     }
-    // Initialilize fstreams locks
-    for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        InitializeCriticalSection(&server->fstream[i].lock);
-    }
-    InitializeCriticalSection(&server->fstreams_lock);
     // Initialize clients locks
     for(int i = 0; i < MAX_CLIENTS; i++){
         Client *client = &client_list->client[i];
@@ -148,6 +143,8 @@ static int init_server_buffers(){
     }
     // Initialize client_list lock
     InitializeCriticalSection(&client_list->lock);
+
+    init_fstream_pool(fstream_pool, MAX_SERVER_ACTIVE_FSTREAMS);
 
     init_pool(pool_recv_udp_frame, sizeof(PoolEntryRecvFrame), SERVER_POOL_SIZE_RECV);
     init_queue_ptr(queue_recv_udp_frame, SERVER_QUEUE_SIZE_RECV_FRAME);
@@ -387,7 +384,7 @@ static void cleanup_client(Client *client){
     EnterCriticalSection(&client->lock);
 
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        ServerFileStream *fstream = &server->fstream[i];
+        ServerFileStream *fstream = &fstream_pool->fstream[i];
         if(fstream->sid ==  client->sid){
             close_file_stream(fstream);
         }
@@ -450,7 +447,7 @@ static void check_open_file_stream(){
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        if(server->fstream[i].fstream_busy == TRUE){
+        if(fstream_pool->fstream[i].fstream_busy == TRUE){
             fprintf(stdout, "File stream still open: %d\n", i);
         }
     }
@@ -1140,10 +1137,10 @@ static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam) {
         }
 
         sha256_init(&sha256_ctx);
-        while(1){
-            EnterCriticalSection(&fstream->lock);
-            if(fstream->fstream_busy == FALSE){
-                LeaveCriticalSection(&fstream->lock);
+        while(true){
+            AcquireSRWLockExclusive(&fstream->lock);
+            if(!fstream->fstream_busy){
+                ReleaseSRWLockExclusive(&fstream->lock);
                 break; // Exit the while loop if the file stream is not busy.
             }
             // Iterate through all bitmap entries (chunks) for the current file stream.
@@ -1211,7 +1208,7 @@ static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam) {
 
             if(fstream->fstream_err != STREAM_ERR_NONE){
                 close_file_stream(fstream); // Clean up the entire file stream.
-                LeaveCriticalSection(&fstream->lock);
+                ReleaseSRWLockExclusive(&fstream->lock);
                 break;
             }
 
@@ -1258,7 +1255,7 @@ static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam) {
 
             if(fstream->fstream_err != STREAM_ERR_NONE){
                 close_file_stream(fstream); // Clean up the entire file stream.
-                LeaveCriticalSection(&fstream->lock);
+                ReleaseSRWLockExclusive(&fstream->lock);
                 break;
             }
 
@@ -1281,7 +1278,7 @@ static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam) {
                     fprintf(stderr, "STREAM ERROR: sha256 mismatch!\n");
                     fstream->fstream_err = STREAM_ERR_SHA256_MISMATCH; // Set a specific error code.                        
                     close_file_stream(fstream);
-                    LeaveCriticalSection(&fstream->lock);
+                    ReleaseSRWLockExclusive(&fstream->lock);
                     break;  //exit the while loop
                 }                                                    
             }
@@ -1303,7 +1300,7 @@ static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam) {
                 if(!entry_ack_frame){
                     fprintf(stderr, "ERROR: Failed to allocate memory in the pool for file_end ack frame\n");
                     close_file_stream(fstream);
-                    LeaveCriticalSection(&fstream->lock);
+                    ReleaseSRWLockExclusive(&fstream->lock);
                     break;
                 }
                 construct_ack_frame(entry_ack_frame, fstream->file_end_frame_seq_num, fstream->sid, STS_CONFIRM_FILE_END, server->socket, &fstream->client_addr);
@@ -1313,11 +1310,11 @@ static DWORD WINAPI fthread_process_file_stream(LPVOID lpParam) {
                 }
 
                 close_file_stream(fstream);
-                LeaveCriticalSection(&fstream->lock);
+                ReleaseSRWLockExclusive(&fstream->lock);
                 break; //exit the while loop
             }
             
-            LeaveCriticalSection(&fstream->lock);
+            ReleaseSRWLockExclusive(&fstream->lock);
             Sleep(1);
         } // end of while(fstream->busy)
     }
@@ -1359,116 +1356,6 @@ static DWORD WINAPI fthread_server_command(LPVOID lpParam){
     return 0;
 }
 
-// Clean up the file stream resources after a file transfer is completed or aborted.
-void close_file_stream(ServerFileStream *fstream){
-
-    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
-
-    if(fstream == NULL){
-        fprintf(stderr, "ERROR: Trying to clean a NULL pointer file stream\n");
-        return;
-    }
-
-    EnterCriticalSection(&fstream->lock);
-
-    if(fstream->fp && fstream->fstream_busy && !fstream->file_complete){
-        fclose(fstream->fp);
-        remove(fstream->fpath);
-        fstream->fp = NULL;
-    }
-    if(fstream->fp != NULL){
-        if(fflush(fstream->fp) != 0){
-            fprintf(stderr, "Error flushing the file to disk. File is still in use.\n");
-        } else {
-            int fclosed = fclose(fstream->fp);
-            Sleep(50); // Sleep for 50 milliseconds to ensure the file is properly closed before proceeding.
-            if(fclosed != 0){
-                fprintf(stderr, "Error closing the file stream: %s (errno: %d)\n", fstream->fpath, errno);
-            }
-            fstream->fp = NULL; // Set the file pointer to NULL after closing.
-        }
-    }
-    if(fstream->bitmap != NULL){
-        free(fstream->bitmap);
-        fstream->bitmap = NULL;
-    }
-    if(fstream->flag != NULL){
-        free(fstream->flag);
-        fstream->flag = NULL;
-    }    
-    for(long long k = 0; k < fstream->bitmap_entries_count; k++){
-        if(fstream->pool_block_file_chunk[k] != NULL){
-            pool_free(pool_file_chunk, fstream->pool_block_file_chunk[k]);
-        }
-        fstream->pool_block_file_chunk[k] = NULL;
-    }
-
-    fstream->sid = 0;                                   // Session ID associated with this file stream.
-    fstream->fid = 0;                                   // File ID, unique identifier for the file associated with this file stream.
-    fstream->fsize = 0;                                 // Total size of the file being transferred.
-    fstream->trailing_chunk = FALSE;                // True if the last bitmap entry represents a partial chunk (less than 64 fragments).
-    fstream->trailing_chunk_complete = FALSE;       // True if all bytes for the last, potentially partial, chunk have been received.
-    fstream->trailing_chunk_size = 0;               // The actual size of the last chunk (if partial).
-    fstream->file_end_frame_seq_num = 0;
-    fstream->fragment_count = 0;                    // Total number of fragments in the entire file.
-    fstream->recv_bytes_count = 0;                  // Total bytes received for this file so far.
-    fstream->written_bytes_count = 0;               // Total bytes written to disk for this file so far.
-    fstream->bitmap_entries_count = 0;              // Number of uint64_t entries in the bitmap array.
-    fstream->hashed_chunks_count = 0;
- 
-    fstream->fstream_err = STREAM_ERR_NONE;         // Stores an error code if something goes wrong with the stream.
-    fstream->file_complete = FALSE;                 // True if the entire file has been received and written.
-    fstream->file_bytes_received = FALSE;
-    fstream->file_bytes_written = FALSE;
-    fstream->file_hash_received = FALSE;
-    fstream->file_hash_calculated = FALSE;
-    fstream->file_hash_validated = FALSE;
-
-    memset(&fstream->received_sha256, 0, 32);
-    memset(&fstream->calculated_sha256, 0, 32);
-    fstream->rpath_len = 0;
-    memset(&fstream->rpath, 0, MAX_PATH);
-    fstream->fname_len = 0;
-    memset(&fstream->fname, 0, MAX_PATH);
-    memset(&fstream->fpath, 0, MAX_PATH);
-    memset(&fstream->client_addr, 0, sizeof(struct sockaddr_in));
-
-    fstream->fstream_busy = FALSE;                  // Indicates if this stream channel is currently in use for a transfer.    
-    LeaveCriticalSection(&fstream->lock);
-    return;
-}
-// Clean up the message stream resources after a file transfer is completed or aborted.
-void close_message_stream(MessageStream *mstream){
-
-    PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
-
-    if(mstream == NULL){
-        fprintf(stderr, "ERROR: Trying to clean a NULL pointer message stream\n");
-        return;
-    }
-    if(mstream->buffer){
-        free(mstream->buffer);
-        mstream->buffer = NULL; // Set the pointer to NULL to prevent dangling pointers.
-    }
-    if(mstream->bitmap != NULL){
-        free(mstream->bitmap); // Free the memory allocated for the bitmap.
-        mstream->bitmap = NULL; // Set the pointer to NULL to prevent dangling pointers.
-    }
-    mstream->busy = FALSE; // Reset the busy flag.
-    mstream->stream_err = STREAM_ERR_NONE; // Reset error status.
-    mstream->sid = 0; // Reset session ID.
-    mstream->mid = 0; // Reset message ID.
-    mstream->mlen = 0; // Reset message length.
-    mstream->fragment_count = 0; // Reset fragment count.
-    mstream->chars_received = 0; // Reset characters received counter.
-    mstream->bitmap_entries_count = 0; // Reset bitmap entries count.
-    memset(mstream->fnm, 0, MAX_NAME_SIZE); // Clear the file name buffer by filling it with zeros.
-
-    return;
-
-}
-// Clean client resources
-
 int main() {
     // get_network_config();
     init_server_session();
@@ -1494,8 +1381,6 @@ int main() {
     shutdown_server();
     return 0;
 }
-
-
 
 
 

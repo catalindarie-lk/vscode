@@ -12,6 +12,13 @@
 #define RET_VAL_ERROR -1
 #endif
 
+
+void init_fstream_pool(ServerFileStreamPool* pool, /*const uint64_t block_size,*/ const uint64_t block_count);
+ServerFileStream* alloc_fstream(ServerFileStreamPool* pool);
+void free_fstream(ServerFileStreamPool* pool, ServerFileStream* fstream);
+ServerFileStream* find_fstream(ServerFileStreamPool* pool, const uint32_t sid, const uint32_t fid);
+void close_file_stream(ServerFileStream *fstream);
+
 int handle_file_metadata(Client *client, UdpFrame *frame);
 int handle_file_fragment(Client *client, UdpFrame *frame);
 int handle_file_end(Client *client, UdpFrame *frame);

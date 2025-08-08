@@ -107,7 +107,7 @@
     QueuePtr *queue_send_prio_udp_frame = &((buffers_obj).queue_send_prio_udp_frame); \
     QueuePtr *queue_send_ctrl_udp_frame = &((buffers_obj).queue_send_ctrl_udp_frame); \
     QueueClientSlot *queue_client_slot = &((buffers_obj).queue_client_slot); \
-
+    ServerFileStreamPool *fstream_pool = &((server_obj).fstream_pool); \
 // end of #define PARSE_GLOBAL_DATA // End marker for the macro definition
 
 
@@ -228,7 +228,7 @@ typedef struct{
     char fpath[MAX_PATH];
     FILE *fp;                           // File pointer for the file being written to disk.
 
-    CRITICAL_SECTION lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
+    SRWLOCK lock;              // Spinlock/Mutex to protect access to this FileStream structure in multithreaded environments.
 
 }ServerFileStream;
 
@@ -272,6 +272,16 @@ typedef struct {
     CRITICAL_SECTION lock;          // For thread-safe access to connected_clients
 }ClientListData;
 
+__declspec(align(64)) typedef struct {
+    ServerFileStream *fstream;               // Raw memory buffer
+    uint64_t free_head;         // Index of the first free block
+    uint64_t *next;             // Next free block indices
+    uint8_t *used;              // Usage flags (optional, for safety/debugging)
+    uint64_t block_count;       // Total number of blocks in the pool
+    uint64_t free_blocks;
+    SRWLOCK lock;               // Mutex for thread safety
+} ServerFileStreamPool;
+
 typedef struct{
     SOCKET socket;
     struct sockaddr_in server_addr;            // Server address structure
@@ -283,8 +293,7 @@ typedef struct{
     IOCP_CONTEXT iocp_context;
     HANDLE iocp_handle;
 
-    ServerFileStream fstream[MAX_SERVER_ACTIVE_FSTREAMS];
-    CRITICAL_SECTION fstreams_lock;
+    ServerFileStreamPool fstream_pool;
 }ServerData;
 
 typedef struct {
@@ -332,6 +341,8 @@ typedef struct {
     HANDLE server_command;
 } ServerThreads;
 
+//--------------------------------------------------------------------------------------------------------------------------
+
 extern ServerData Server;
 extern ServerBuffers Buffers;
 extern ClientListData ClientList;
@@ -364,8 +375,8 @@ static void cleanup_client(Client *client);
 static BOOL validate_file_hash(ServerFileStream *fstream);
 static void check_open_file_stream();
 
-void close_file_stream(ServerFileStream *fstream);
-void close_message_stream(MessageStream *mstream);
+
+
 
 
 #endif

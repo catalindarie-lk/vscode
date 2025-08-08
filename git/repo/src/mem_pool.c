@@ -45,13 +45,12 @@ void init_pool(MemPool* pool, const uint64_t block_size, const uint64_t block_co
     // Link all blocks together and mark them as unused
     for (uint64_t i = 0; i < pool->block_count - 1; i++) {
         pool->next[i] = i + 1;      // Link to the next block
-        pool->used[i] = FREE;       // Mark as unused
+        pool->used[i] = FREE_BLOCK;       // Mark as unused
     }
     // The last block points to POOL_END, indicating the end of the free list
-    pool->next[pool->block_count - 1] = POOL_END;        // Use POOL_END to indicate end of list
-    pool->used[pool->block_count - 1] = FREE;           // Last block is also unused
+    pool->next[pool->block_count - 1] = END_BLOCK;        // Use POOL_END to indicate end of list
+    pool->used[pool->block_count - 1] = FREE_BLOCK;           // Last block is also unused
     pool->free_blocks = pool->block_count;
-    VirtualLock(pool->memory, pool->block_size * pool->block_count);
     // Initialize the critical section for thread safety
     InitializeCriticalSection(&pool->mutex);
     return;
@@ -61,7 +60,7 @@ void* pool_alloc(MemPool* pool) {
     // Enter critical section to protect shared pool data
     EnterCriticalSection(&pool->mutex);
     // Check if the pool is exhausted
-    if (pool->free_head == POOL_END) { // Check against POOL_END
+    if (pool->free_head == END_BLOCK) { // Check against POOL_END
         LeaveCriticalSection(&pool->mutex);
         return NULL; // Pool exhausted
     }
@@ -70,7 +69,7 @@ void* pool_alloc(MemPool* pool) {
     // Update the free head to the next free block
     pool->free_head = pool->next[index];
     // Mark the allocated block as used
-    pool->used[index] = USED;
+    pool->used[index] = USED_BLOCK;
     // Leave critical section
     pool->free_blocks--;
     // Return the memory address of the allocated block
@@ -90,7 +89,7 @@ void pool_free(MemPool* pool, void* ptr) {
     // Calculate the index of the block to be freed
     uint64_t index = ((char*)ptr - pool->memory) / pool->block_size;
     // Validate the index and usage flag for safety and debugging
-    if (index >= pool->block_count || pool->used[index] == FREE) {
+    if (index >= pool->block_count || pool->used[index] == FREE_BLOCK) {
         // Log critical errors with maximum detail
         fprintf(stderr, "CRITICAL ERROR: Attempt to free invalid or already freed chunk!\n");
         fprintf(stderr, "   Pointer to free: %p\n", ptr);
@@ -109,7 +108,7 @@ void pool_free(MemPool* pool, void* ptr) {
     pool->next[index] = pool->free_head;
     pool->free_head = index;
     // Mark the block as unused
-    pool->used[index] = FREE;
+    pool->used[index] = FREE_BLOCK;
     pool->free_blocks++;
     LeaveCriticalSection(&pool->mutex);
     return;
@@ -191,11 +190,11 @@ void s_init_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t bloc
     // Link all blocks together and mark them as unused
     for (uint64_t i = 0; i < pool->block_count - 1; i++) {
         pool->next[i] = i + 1;      // Link to the next block
-        pool->used[i] = FREE;       // Mark as unused
+        pool->used[i] = FREE_BLOCK;       // Mark as unused
     }
     // The last block points to POOL_END, indicating the end of the free list
-    pool->next[pool->block_count - 1] = POOL_END;        // Use POOL_END to indicate end of list
-    pool->used[pool->block_count - 1] = FREE;           // Last block is also unused
+    pool->next[pool->block_count - 1] = END_BLOCK;        // Use POOL_END to indicate end of list
+    pool->used[pool->block_count - 1] = FREE_BLOCK;           // Last block is also unused
     pool->free_blocks = pool->block_count;
     // Initialize the critical section for thread safety
     InitializeCriticalSection(&pool->mutex);
@@ -207,7 +206,7 @@ void* s_pool_alloc(s_MemPool* pool) {
     WaitForSingleObject(pool->semaphore, INFINITE);
     EnterCriticalSection(&pool->mutex);
     // Check if the pool is exhausted
-    if (pool->free_head == POOL_END) { // Check against POOL_END
+    if (pool->free_head == END_BLOCK) { // Check against POOL_END
         LeaveCriticalSection(&pool->mutex);
         return NULL; // Pool exhausted
     }
@@ -216,7 +215,7 @@ void* s_pool_alloc(s_MemPool* pool) {
     // Update the free head to the next free block
     pool->free_head = pool->next[index];
     // Mark the allocated block as used
-    pool->used[index] = USED;
+    pool->used[index] = USED_BLOCK;
     // Leave critical section
     pool->free_blocks--;
     // Return the memory address of the allocated block
@@ -236,7 +235,7 @@ void s_pool_free(s_MemPool* pool, void* ptr) {
     // Calculate the index of the block to be freed
     uint64_t index = ((char*)ptr - pool->memory) / pool->block_size;
     // Validate the index and usage flag for safety and debugging
-    if (index >= pool->block_count || pool->used[index] == FREE) {
+    if (index >= pool->block_count || pool->used[index] == FREE_BLOCK) {
         // Log critical errors with maximum detail
         fprintf(stderr, "CRITICAL ERROR: Attempt to free invalid or already freed chunk!\n");
         fprintf(stderr, "   Pointer to free: %p\n", ptr);
@@ -255,7 +254,7 @@ void s_pool_free(s_MemPool* pool, void* ptr) {
     pool->next[index] = pool->free_head;
     pool->free_head = index;
     // Mark the block as unused
-    pool->used[index] = FREE;
+    pool->used[index] = FREE_BLOCK;
     pool->free_blocks++;
     // memset(pool->memory + index * pool->block_size, 0, pool->block_size);
     ReleaseSemaphore(pool->semaphore, 1, NULL);
