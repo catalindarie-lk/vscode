@@ -155,7 +155,7 @@ uintptr_t search_table_send_frame(TableSendFrame *table, const uint64_t seq_num)
 
 
 //--------------------------------------------------------------------------------------------------------------------------
-void init_table_id(HashTableIdentifierNode *ht, size_t size, const size_t max_nodes){
+void init_table_id(TableIDs *table, size_t size, const size_t max_nodes){
     
     if(size <= 0){
         fprintf(stderr, "ERROR: Invalid size for hash table ID's init\n");
@@ -165,20 +165,20 @@ void init_table_id(HashTableIdentifierNode *ht, size_t size, const size_t max_no
         fprintf(stderr, "ERROR: Invalid max_nodes for hash table ID's init\n");
         return;
     }
-    ht->size = size;
-    ht->entry = (IdentifierNode **)_aligned_malloc(sizeof(IdentifierNode) * size, 64);
-    if(!ht->entry){
+    table->size = size;
+    table->entry = (NodeTableIDs **)_aligned_malloc(sizeof(NodeTableIDs) * size, 64);
+    if(!table->entry){
         fprintf(stderr, "ERROR: Unable to allocate memory for hash table ID's init\n");
         return;
     }   
     
-    init_pool(&ht->pool_nodes, sizeof(IdentifierNode), max_nodes);
+    init_pool(&table->pool_nodes, sizeof(NodeTableIDs), max_nodes);
     // memset(ht->entry, 0, sizeof(uintptr_t) * size);
     for(int i = 0; i < size; i++){
-        ht->entry[i] = NULL;
+        table->entry[i] = NULL;
     }
-    InitializeCriticalSection(&ht->mutex); 
-    ht->count = 0;
+    InitializeCriticalSection(&table->mutex); 
+    table->count = 0;
 }
 uint64_t ht_get_hash_id(uint32_t id, const size_t size) {
     if(size <= 0){
@@ -187,12 +187,12 @@ uint64_t ht_get_hash_id(uint32_t id, const size_t size) {
     }
     return (id % (uint32_t)size);
 }
-int ht_insert_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status) {
+int ht_insert_id(TableIDs *table, const uint32_t sid, const uint32_t id, const uint8_t status) {
 
-    EnterCriticalSection(&ht->mutex);
-    uint64_t index = ht_get_hash_id(id, ht->size);
+    EnterCriticalSection(&table->mutex);
+    uint64_t index = ht_get_hash_id(id, table->size);
 
-    IdentifierNode *node = (IdentifierNode*)pool_alloc(&ht->pool_nodes);
+    NodeTableIDs *node = (NodeTableIDs*)pool_alloc(&table->pool_nodes);
     if(node == NULL){
         fprintf(stderr, "ERROR: fail to allocate memory for hash table ID's node\n");
         return RET_VAL_ERROR;
@@ -201,129 +201,129 @@ int ht_insert_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t
     node->sid = sid;
     node->id = id;    
     node->status = status;
-    node->next = (IdentifierNode *)ht->entry[index];  // Insert at the head (linked list)
-    ht->entry[index] = node;
-    ht->count++;
-    LeaveCriticalSection(&ht->mutex);
+    node->next = (NodeTableIDs *)table->entry[index];  // Insert at the head (linked list)
+    table->entry[index] = node;
+    table->count++;
+    LeaveCriticalSection(&table->mutex);
     return RET_VAL_SUCCESS;
 }
-void ht_remove_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id) {
+void ht_remove_id(TableIDs *table, const uint32_t sid, const uint32_t id) {
     
-    EnterCriticalSection(&ht->mutex);
-    uint64_t index = ht_get_hash_id(id, ht->size);
-    IdentifierNode *curr = ht->entry[index];
-    IdentifierNode *prev = NULL;
+    EnterCriticalSection(&table->mutex);
+    uint64_t index = ht_get_hash_id(id, table->size);
+    NodeTableIDs *curr = table->entry[index];
+    NodeTableIDs *prev = NULL;
     while (curr) {     
         if (curr->id == id && curr->sid == sid) {
             // Found it
             if (prev) {
                 prev->next = curr->next;
             } else {
-                ht->entry[index] = curr->next;
+                table->entry[index] = curr->next;
             }
-            pool_free(&ht->pool_nodes, (void*)curr);
-            ht->count--;
-            LeaveCriticalSection(&ht->mutex);
+            table->count--;
+            LeaveCriticalSection(&table->mutex);
+            pool_free(&table->pool_nodes, (void*)curr);
             return;
         }
         prev = curr;
         curr = curr->next;
     }
-    LeaveCriticalSection(&ht->mutex);
+    LeaveCriticalSection(&table->mutex);
     return;
 }
-void ht_remove_all_sid(HashTableIdentifierNode *ht, const uint32_t sid) {
+void ht_remove_all_sid(TableIDs *table, const uint32_t sid) {
     
-    EnterCriticalSection(&ht->mutex);
+    EnterCriticalSection(&table->mutex);
     for (size_t i = 0; i < HASH_SIZE_ID; ++i) {
-        IdentifierNode *curr = ht->entry[i];
-        IdentifierNode *prev = NULL;
+        NodeTableIDs *curr = table->entry[i];
+        NodeTableIDs *prev = NULL;
 
         while (curr) {
             if (curr->sid == sid) {
-                IdentifierNode *to_remove = curr;
+                NodeTableIDs *to_remove = curr;
 
                 if (prev) {
                     prev->next = curr->next;
                 } else {
-                    ht->entry[i] = curr->next;
+                    table->entry[i] = curr->next;
                 }
                 curr = curr->next;
-                pool_free(&ht->pool_nodes, (void*)to_remove);
-                ht->count--;
+                pool_free(&table->pool_nodes, (void*)to_remove);
+                table->count--;
             } else {
                 prev = curr;
                 curr = curr->next;
             }
         }
     }
-    LeaveCriticalSection(&ht->mutex);
+    LeaveCriticalSection(&table->mutex);
 }
-BOOL ht_search_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status) {
+BOOL ht_search_id(TableIDs *table, const uint32_t sid, const uint32_t id, const uint8_t status) {
     
-    EnterCriticalSection(&ht->mutex);
-    uint64_t index = ht_get_hash_id(id, ht->size);
-    IdentifierNode *node = ht->entry[index];
+    EnterCriticalSection(&table->mutex);
+    uint64_t index = ht_get_hash_id(id, table->size);
+    NodeTableIDs *node = table->entry[index];
     while (node) {
         if (node->sid == sid && node->id == id && node->status == status){
-            LeaveCriticalSection(&ht->mutex);
+            LeaveCriticalSection(&table->mutex);
             return TRUE;
         }           
         node = node->next;
     }
-    LeaveCriticalSection(&ht->mutex);
+    LeaveCriticalSection(&table->mutex);
     return FALSE;
 }
-int ht_update_id_status(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status) {
+int ht_update_id_status(TableIDs *table, const uint32_t sid, const uint32_t id, const uint8_t status) {
     
-    EnterCriticalSection(&ht->mutex);
-    uint64_t index = ht_get_hash_id(id, ht->size);
-    IdentifierNode *node = ht->entry[index];
+    EnterCriticalSection(&table->mutex);
+    uint64_t index = ht_get_hash_id(id, table->size);
+    NodeTableIDs *node = table->entry[index];
     while (node) {
         if (node->id == id && node->sid == sid){
             node->status = status;
-            LeaveCriticalSection(&ht->mutex);
+            LeaveCriticalSection(&table->mutex);
             return RET_VAL_SUCCESS;
         }           
         node = node->next;
     }
-    LeaveCriticalSection(&ht->mutex);
+    LeaveCriticalSection(&table->mutex);
     return RET_VAL_ERROR;
 }
-void ht_clean_id(HashTableIdentifierNode *ht) {
+void ht_clean_id(TableIDs *table) {
     
-    EnterCriticalSection(&ht->mutex);
-    IdentifierNode *head = NULL;
+    EnterCriticalSection(&table->mutex);
+    NodeTableIDs *head = NULL;
     for (int index = 0; index < HASH_SIZE_ID; index++) {
-        if(ht->entry[index]){       
-            IdentifierNode *node = ht->entry[index];
+        if(table->entry[index]){       
+            NodeTableIDs *node = table->entry[index];
             while (node) {
                     head = node;                
                     node = node->next;
                     free(head);
             }
             // free(node);
-            pool_free(&ht->pool_nodes, (void*)node);
-            ht->count--;
-            ht->entry[index] = NULL;
+            pool_free(&table->pool_nodes, (void*)node);
+            table->count--;
+            table->entry[index] = NULL;
         }     
     }
-    LeaveCriticalSection(&ht->mutex);
+    LeaveCriticalSection(&table->mutex);
     return;
 }
-void ht_print_id(HashTableIdentifierNode *ht) {
+void ht_print_id(TableIDs *table) {
     
-    EnterCriticalSection(&ht->mutex);
+    EnterCriticalSection(&table->mutex);
     for (int index = 0; index < HASH_SIZE_ID; index++) {
-        if(ht->entry[index]){
+        if(table->entry[index]){
             printf("BUCKET %d: \n", index);           
-            IdentifierNode *node = ht->entry[index];
+            NodeTableIDs *node = table->entry[index];
             while (node) {
                     fprintf(stdout, "sID: %d - fID: %d\n", node->sid, node->id);                   
                     node = node->next;
             }
         }     
     }
-    LeaveCriticalSection(&ht->mutex);
+    LeaveCriticalSection(&table->mutex);
 }
 

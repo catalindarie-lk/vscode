@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "include/protocol_frames.h"
+#include "include/server_frames.h"
 #include "include/resources.h"
 #include "include/queue.h"
 #include "include/mem_pool.h"
@@ -18,7 +19,7 @@
 ////////////////////////////////////////////////////
 
 #ifndef DEFAULT_SESSION_TIMEOUT_SEC
-#define DEFAULT_SESSION_TIMEOUT_SEC                 30
+#define DEFAULT_SESSION_TIMEOUT_SEC                 60
 #endif
 
 // --- Constants 
@@ -39,7 +40,7 @@
 #define CHUNK_NONE                                  (0)       // 0b00000000
 
 #define BLOCK_SIZE_CHUNK                            (FILE_FRAGMENT_SIZE * 64)
-#define BLOCK_COUNT_CHUNK                           (256 + 64 * MAX_SERVER_ACTIVE_FSTREAMS)
+#define BLOCK_COUNT_CHUNK                           (2048 + 64 * MAX_SERVER_ACTIVE_FSTREAMS)
 
 //---------------------------------------------------------------------------------------------------------
 // --- Server Stream Configuration ---
@@ -73,7 +74,7 @@
 #define SERVER_POOL_SIZE_IOCP_SEND                  (SERVER_POOL_SIZE_SEND + \
                                                     SERVER_POOL_SIZE_ACK_SEND + 128) // Total size for IOCP send contexts
 // --- SERVER RECV Buffer Sizes ---
-#define SERVER_QUEUE_SIZE_RECV_FRAME                (4096 + 1024 * MAX_SERVER_ACTIVE_FSTREAMS)
+#define SERVER_QUEUE_SIZE_RECV_FRAME                (8192 + 1024 * MAX_SERVER_ACTIVE_FSTREAMS)
 #define SERVER_QUEUE_SIZE_RECV_PRIO_FRAME           128
 // --- Server RECV Memory Pool Sizes ---
 #define SERVER_POOL_SIZE_RECV                       (SERVER_QUEUE_SIZE_RECV_FRAME + \
@@ -97,8 +98,8 @@
     QueuePtr *queue_recv_udp_frame = &((buffers_obj).queue_recv_udp_frame); \
     QueuePtr *queue_recv_prio_udp_frame = &((buffers_obj).queue_recv_prio_udp_frame); \
     QueuePtr *queue_process_fstream = &((buffers_obj).queue_process_fstream); \
-    HashTableIdentifierNode *table_file_id = &((buffers_obj).table_file_id); \
-    HashTableIdentifierNode *table_message_id = &((buffers_obj).table_message_id); \
+    TableIDs *table_file_id = &((buffers_obj).table_file_id); \
+    TableIDs *table_message_id = &((buffers_obj).table_message_id); \
     MemPool *pool_queue_ack_frame = &((buffers_obj).pool_queue_ack_frame); \
     QueuePtr *queue_message_ack_frame = &((buffers_obj).queue_message_ack_frame); \
     QueuePtr *queue_prio_ack_frame = &((buffers_obj).queue_prio_ack_frame); \
@@ -107,7 +108,8 @@
     QueuePtr *queue_send_prio_udp_frame = &((buffers_obj).queue_send_prio_udp_frame); \
     QueuePtr *queue_send_ctrl_udp_frame = &((buffers_obj).queue_send_ctrl_udp_frame); \
     QueueClientSlot *queue_client_slot = &((buffers_obj).queue_client_slot); \
-    ServerFileStreamPool *fstream_pool = &((server_obj).fstream_pool); \
+    ServerFstreamPool *pool_fstreams = &((server_obj).pool_fstreams); \
+    ServerClientPool *pool_clients = &((server_obj).pool_clients); \
 // end of #define PARSE_GLOBAL_DATA // End marker for the macro definition
 
 
@@ -232,12 +234,12 @@ typedef struct{
 
 }ServerFileStream;
 
-typedef struct{
+typedef struct {
     SAckPayload payload; // SACK payload for this client
     uint32_t ack_pending;
     uint64_t start_timestamp;
     BOOL start_recorded;
-    CRITICAL_SECTION lock;
+    SRWLOCK lock;
 }ClientSAckContext;
 
 typedef struct {
@@ -264,7 +266,7 @@ typedef struct {
 
     ClientSAckContext sack_ctx; // SACK context for this client
  
-    CRITICAL_SECTION lock;
+    SRWLOCK lock;
 } Client;
 
 typedef struct {
@@ -280,9 +282,19 @@ __declspec(align(64)) typedef struct {
     uint64_t block_count;       // Total number of blocks in the pool
     uint64_t free_blocks;
     SRWLOCK lock;               // Mutex for thread safety
-} ServerFileStreamPool;
+} ServerFstreamPool;
 
-typedef struct{
+__declspec(align(64)) typedef struct {
+    Client *client;               // Raw memory buffer
+    uint64_t free_head;         // Index of the first free block
+    uint64_t *next;             // Next free block indices
+    uint8_t *used;              // Usage flags (optional, for safety/debugging)
+    uint64_t block_count;       // Total number of blocks in the pool
+    uint64_t free_blocks;
+    SRWLOCK lock;               // Mutex for thread safety
+} ServerClientPool;
+
+typedef struct {
     SOCKET socket;
     struct sockaddr_in server_addr;            // Server address structure
     uint8_t server_status;                // Status of the server (e.g., busy, ready, error)
@@ -293,7 +305,8 @@ typedef struct{
     IOCP_CONTEXT iocp_context;
     HANDLE iocp_handle;
 
-    ServerFileStreamPool fstream_pool;
+    ServerFstreamPool pool_fstreams;
+    ServerClientPool pool_clients;
 }ServerData;
 
 typedef struct {
@@ -318,8 +331,8 @@ typedef struct {
 
     QueueClientSlot queue_client_slot;
 
-    HashTableIdentifierNode table_file_id;
-    HashTableIdentifierNode table_message_id;
+    TableIDs table_file_id;
+    TableIDs table_message_id;
 }ServerBuffers;
 
 typedef struct {

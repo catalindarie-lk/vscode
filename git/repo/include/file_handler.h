@@ -13,10 +13,10 @@
 #endif
 
 
-void init_fstream_pool(ServerFileStreamPool* pool, /*const uint64_t block_size,*/ const uint64_t block_count);
-ServerFileStream* alloc_fstream(ServerFileStreamPool* pool);
-void free_fstream(ServerFileStreamPool* pool, ServerFileStream* fstream);
-ServerFileStream* find_fstream(ServerFileStreamPool* pool, const uint32_t sid, const uint32_t fid);
+void init_fstream_pool(ServerFstreamPool* pool, /*const uint64_t block_size,*/ const uint64_t block_count);
+ServerFileStream* alloc_fstream(ServerFstreamPool* pool);
+void free_fstream(ServerFstreamPool* pool, ServerFileStream* fstream);
+ServerFileStream* find_fstream(ServerFstreamPool* pool, const uint32_t sid, const uint32_t fid);
 void close_file_stream(ServerFileStream *fstream);
 
 int handle_file_metadata(Client *client, UdpFrame *frame);

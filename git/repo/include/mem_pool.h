@@ -26,7 +26,7 @@ __declspec(align(64)) typedef struct {
     uint64_t block_size;        // Size of each block in bytes
     uint64_t block_count;       // Total number of blocks in the pool
     uint64_t free_blocks;
-    CRITICAL_SECTION mutex;     // Mutex for thread safety
+    SRWLOCK lock;
     // HANDLE semaphore;
 } MemPool;
 
@@ -45,7 +45,7 @@ __declspec(align(64)) typedef struct {
     uint64_t block_size;        // Size of each block in bytes
     uint64_t block_count;       // Total number of blocks in the pool
     uint64_t free_blocks;
-    CRITICAL_SECTION mutex;     // Mutex for thread safety
+    SRWLOCK lock;
     HANDLE semaphore;
 } s_MemPool;
 

@@ -45,7 +45,7 @@ int s_init_queue_ptr(s_QueuePtr *queue, const size_t size){
         _aligned_free(queue->ptr);
         return RET_VAL_ERROR;
     }
-    InitializeCriticalSection(&queue->lock);    
+    InitializeSRWLock(&queue->lock);    
     return RET_VAL_SUCCESS;
 }
 int s_push_ptr(s_QueuePtr *queue,  const uintptr_t ptr){
@@ -60,20 +60,19 @@ int s_push_ptr(s_QueuePtr *queue,  const uintptr_t ptr){
     }
     // Check if the queue is full
     WaitForSingleObject(queue->push_semaphore, INFINITE);
-    EnterCriticalSection(&queue->lock);
+    AcquireSRWLockExclusive(&queue->lock);
     size_t next_tail = (queue->tail + 1) % queue->size;
     if(next_tail == queue->head){
-        LeaveCriticalSection(&queue->lock);
-        fprintf(stdout, "WARNING: - s_queue ptr FULL (push fail)\n");
+        ReleaseSRWLockExclusive(&queue->lock);
         return RET_VAL_ERROR;
     }
     queue->ptr[queue->tail] = ptr;
+
     // Move the tail index forward    
     queue->tail = next_tail;
     InterlockedIncrement64(&queue->pending);
-
     ReleaseSemaphore(queue->pop_semaphore, 1, NULL);
-    LeaveCriticalSection(&queue->lock);
+    ReleaseSRWLockExclusive(&queue->lock);
     return RET_VAL_SUCCESS;
 }
 uintptr_t s_pop_ptr(s_QueuePtr *queue){       
@@ -89,22 +88,20 @@ uintptr_t s_pop_ptr(s_QueuePtr *queue){
     }
 
     WaitForSingleObject(queue->pop_semaphore, INFINITE);
-    EnterCriticalSection(&queue->lock);
+    AcquireSRWLockExclusive(&queue->lock);
     // Check if the queue is empty before removing
-    
     if (queue->head == queue->tail) {
-        LeaveCriticalSection(&queue->lock);
-        fprintf(stderr, "WARNING: - s_queue ptr queue empty (pop fail)\n");
+        ReleaseSRWLockExclusive(&queue->lock);
         return pool_entry;
     }
     pool_entry = queue->ptr[queue->head];
     queue->ptr[queue->head] = 0;
+
     // Move the head index forward
     queue->head = (queue->head + 1) % queue->size;
     InterlockedDecrement64(&queue->pending);
-
     ReleaseSemaphore(queue->push_semaphore, 1, NULL);
-    LeaveCriticalSection(&queue->lock);
+    ReleaseSRWLockExclusive(&queue->lock);
     return pool_entry;
 }
 
@@ -138,7 +135,7 @@ int init_queue_ptr(QueuePtr *queue, const size_t size){
         _aligned_free(queue->ptr);
     return RET_VAL_ERROR;
     }
-    InitializeCriticalSection(&queue->lock);    
+    InitializeSRWLock(&queue->lock);    
     return RET_VAL_SUCCESS;
 }
 int push_ptr(QueuePtr *queue,  const uintptr_t ptr){
@@ -152,20 +149,19 @@ int push_ptr(QueuePtr *queue,  const uintptr_t ptr){
         return RET_VAL_ERROR;
     }
     // Check if the queue is full
-    EnterCriticalSection(&queue->lock);
+    AcquireSRWLockExclusive(&queue->lock);
     size_t next_tail = (queue->tail + 1) % queue->size;
     if(next_tail == queue->head) {
-        LeaveCriticalSection(&queue->lock);
-        fprintf(stdout, "WARNING: - Push ptr queue FULL!\n");
+        ReleaseSRWLockExclusive(&queue->lock);
         return RET_VAL_ERROR;
     }
     queue->ptr[queue->tail] = ptr;
+
     // Move the tail index forward    
     queue->tail = next_tail;
     InterlockedIncrement64(&queue->pending);
-    
     ReleaseSemaphore(queue->push_semaphore, 1, NULL);
-    LeaveCriticalSection(&queue->lock);    
+    ReleaseSRWLockExclusive(&queue->lock);    
     return RET_VAL_SUCCESS;
 }
 uintptr_t pop_ptr(QueuePtr *queue){       
@@ -179,21 +175,20 @@ uintptr_t pop_ptr(QueuePtr *queue){
         fprintf(stderr, "CRITICAL ERROR: Pop - Ptr queue size not initialized\n");
         return ptr;
     }
-    EnterCriticalSection(&queue->lock);
+    AcquireSRWLockExclusive(&queue->lock);
     // Check if the queue is empty before removing
     
     if (queue->head == queue->tail) {
-        LeaveCriticalSection(&queue->lock);
-        fprintf(stderr, "WARNING: - Pop ptr queue EMPTY\n");
+        ReleaseSRWLockExclusive(&queue->lock);
         return ptr;
     }
     ptr = queue->ptr[queue->head];
     queue->ptr[queue->head] = 0;
+    
     // Move the head index forward
     queue->head = (queue->head + 1) % queue->size;
     InterlockedDecrement64(&queue->pending);
-
-    LeaveCriticalSection(&queue->lock);
+    ReleaseSRWLockExclusive(&queue->lock);
     return ptr;
 }
 
@@ -217,7 +212,6 @@ int init_queue_slot(QueueClientSlot *queue, size_t size){
     }
     // Initialize memory to zero
     memset(queue->slot, 0, sizeof(uint32_t) * size);
-
     queue->head = 0;
     queue->tail = 0;
     queue->pending = 0;
@@ -228,7 +222,7 @@ int init_queue_slot(QueueClientSlot *queue, size_t size){
         _aligned_free(queue->slot);
         return RET_VAL_ERROR;
     }
-    InitializeCriticalSection(&queue->lock);    
+    InitializeSRWLock(&queue->lock);    
     return RET_VAL_SUCCESS;
 }
 int push_slot(QueueClientSlot *queue,  const uint32_t slot){
@@ -242,19 +236,19 @@ int push_slot(QueueClientSlot *queue,  const uint32_t slot){
         return RET_VAL_ERROR;
     }
     // Check if the queue is full
-    EnterCriticalSection(&queue->lock);
+    AcquireSRWLockExclusive(&queue->lock);
     size_t next_tail = (queue->tail + 1) % queue->size;
     if(next_tail == queue->head){
-        LeaveCriticalSection(&queue->lock);
-        fprintf(stdout, "WARNING: - Push slot queue FULL!\n");
+        ReleaseSRWLockExclusive(&queue->lock);
         return RET_VAL_ERROR;
     }
     queue->slot[queue->tail] = slot;
+
     // Move the tail index forward    
     queue->tail = next_tail;
     InterlockedIncrement64(&queue->pending);
     ReleaseSemaphore(queue->push_semaphore, 1, NULL);
-    LeaveCriticalSection(&queue->lock);    
+    ReleaseSRWLockExclusive(&queue->lock);    
     return RET_VAL_SUCCESS;
 }
 uint32_t pop_slot(QueueClientSlot *queue){       
@@ -268,21 +262,19 @@ uint32_t pop_slot(QueueClientSlot *queue){
         fprintf(stderr, "CRITICAL ERROR: Pop - Slot queue size not initialized\n");
         return slot;
     }
-    EnterCriticalSection(&queue->lock);
+    AcquireSRWLockExclusive(&queue->lock);
     // Check if the queue is empty before removing
-    
     if (queue->head == queue->tail) {
-        LeaveCriticalSection(&queue->lock);
-        // fprintf(stderr, "ERROR: - Pop slot queue EMPTY\n");
+        ReleaseSRWLockExclusive(&queue->lock);
         return slot;
     }
     slot = queue->slot[queue->head];
     queue->slot[queue->head] = 0;
+
     // Move the head index forward
     queue->head = (queue->head + 1) % queue->size;
     InterlockedDecrement64(&queue->pending);
-
-    LeaveCriticalSection(&queue->lock);
+    ReleaseSRWLockExclusive(&queue->lock);
     return slot;
 }
 
@@ -297,7 +289,6 @@ int init_queue_seq(QueueSeq *queue, const size_t size){
         return RET_VAL_ERROR;
     }
     queue->size = size;
-
     // Allocate memory aligned to cache line (64 bytes typical)
     queue->seq = (uint64_t *)_aligned_malloc(sizeof(uint64_t) * size, 64);
     if (!queue->seq) {
@@ -306,7 +297,6 @@ int init_queue_seq(QueueSeq *queue, const size_t size){
     }
     // Initialize memory to zero
     memset(queue->seq, 0, sizeof(uint64_t) * size);
-
     queue->head = 0;
     queue->tail = 0;
     queue->pending = 0;
@@ -316,7 +306,7 @@ int init_queue_seq(QueueSeq *queue, const size_t size){
         _aligned_free(queue->seq);
         return RET_VAL_ERROR;
     }
-    InitializeCriticalSection(&queue->lock);    
+    InitializeSRWLock(&queue->lock);    
     return RET_VAL_SUCCESS;
 }
 int push_seq(QueueSeq *queue,  const uint64_t seq){
@@ -330,19 +320,19 @@ int push_seq(QueueSeq *queue,  const uint64_t seq){
         return RET_VAL_ERROR;
     }
     // Check if the queue is full
-    EnterCriticalSection(&queue->lock);
+    AcquireSRWLockExclusive(&queue->lock);
     size_t next_tail = (queue->tail + 1) % queue->size;
     if(next_tail == queue->head){
-        LeaveCriticalSection(&queue->lock);
-        fprintf(stdout, "WARNING: - Push seq queue FULL!\n");
+        ReleaseSRWLockExclusive(&queue->lock);
         return RET_VAL_ERROR;
     }
     queue->seq[queue->tail] = seq;
+
     // Move the tail index forward    
     queue->tail = next_tail;
     InterlockedIncrement64(&queue->pending);
     ReleaseSemaphore(queue->push_semaphore, 1, NULL);
-    LeaveCriticalSection(&queue->lock);    
+    ReleaseSRWLockExclusive(&queue->lock);    
     return RET_VAL_SUCCESS;
 }
 uint64_t pop_seq(QueueSeq *queue){       
@@ -356,12 +346,10 @@ uint64_t pop_seq(QueueSeq *queue){
         fprintf(stderr, "Pop - Seq queue size not initialized\n");
         return seq;
     }
-    EnterCriticalSection(&queue->lock);
+    AcquireSRWLockExclusive(&queue->lock);
     // Check if the queue is empty before removing
-    
     if (queue->head == queue->tail) {
-        LeaveCriticalSection(&queue->lock);
-        fprintf(stderr, "ERROR: - Pop seq queue EMPTY\n");
+        ReleaseSRWLockExclusive(&queue->lock);
         return seq;
     }
     seq = queue->seq[queue->head];
@@ -369,8 +357,7 @@ uint64_t pop_seq(QueueSeq *queue){
     // Move the head index forward
     queue->head = (queue->head + 1) % queue->size;
     InterlockedDecrement64(&queue->pending);
-
-    LeaveCriticalSection(&queue->lock);
+    ReleaseSRWLockExclusive(&queue->lock);
     return seq;
 }
 

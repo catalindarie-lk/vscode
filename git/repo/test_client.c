@@ -31,8 +31,8 @@ ClientQueues Queues;
 ClientBuffers Buffers;
 ClientThreads Threads;
 
-const char *server_ip = "192.168.100.1";
-const char *client_ip = "192.168.100.2";
+const char *server_ip = "192.168.0.245";
+const char *client_ip = "192.168.0.244";
 
 static uint64_t get_new_seq_num(){
     PARSE_CLIENT_GLOBAL_DATA(Client, Queues, Buffers, Threads) // this macro is defined in client header file (client.h)
@@ -53,7 +53,7 @@ int init_client_session(){
     snprintf(client->client_name, MAX_NAME_SIZE, "%.*s", MAX_NAME_SIZE - 1, CLIENT_NAME);
     client->last_active_time = time(NULL);
 
-    client->frame_count = 1;//(uint64_t)UINT32_MAX;
+    client->frame_count = 1;
     client->fid_count = 0;
     client->mid_count = 0;
 
@@ -71,7 +71,7 @@ int reset_client_session(){
 
     client->session_status = CONNECTION_CLOSED;
     
-    client->frame_count = 1;//(uint64_t)UINT32_MAX;
+    client->frame_count = 1;
     client->fid_count = 0;
     client->mid_count = 0;
 

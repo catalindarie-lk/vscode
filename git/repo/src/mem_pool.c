@@ -52,16 +52,15 @@ void init_pool(MemPool* pool, const uint64_t block_size, const uint64_t block_co
     pool->used[pool->block_count - 1] = FREE_BLOCK;           // Last block is also unused
     pool->free_blocks = pool->block_count;
     // Initialize the critical section for thread safety
-    InitializeCriticalSection(&pool->mutex);
+    InitializeSRWLock(&pool->lock);
     return;
 }
-//--------------------------------------------------------------------------------------------------------------------------
 void* pool_alloc(MemPool* pool) {
     // Enter critical section to protect shared pool data
-    EnterCriticalSection(&pool->mutex);
+    AcquireSRWLockExclusive(&pool->lock);
     // Check if the pool is exhausted
     if (pool->free_head == END_BLOCK) { // Check against POOL_END
-        LeaveCriticalSection(&pool->mutex);
+        ReleaseSRWLockExclusive(&pool->lock);
         return NULL; // Pool exhausted
     }
     // Get the index of the first free block
@@ -74,10 +73,9 @@ void* pool_alloc(MemPool* pool) {
     pool->free_blocks--;
     // Return the memory address of the allocated block
     memset(pool->memory + index * pool->block_size, 0, pool->block_size);
-    LeaveCriticalSection(&pool->mutex);
+    ReleaseSRWLockExclusive(&pool->lock);
     return (void *)(pool->memory + index * pool->block_size);
 }
-//--------------------------------------------------------------------------------------------------------------------------
 void pool_free(MemPool* pool, void* ptr) {
     // Handle NULL pointer case
     if (ptr == NULL) {
@@ -85,23 +83,23 @@ void pool_free(MemPool* pool, void* ptr) {
         return;
     }
     // Enter critical section
-    EnterCriticalSection(&pool->mutex);
+    AcquireSRWLockExclusive(&pool->lock);
     // Calculate the index of the block to be freed
     uint64_t index = ((char*)ptr - pool->memory) / pool->block_size;
     // Validate the index and usage flag for safety and debugging
     if (index >= pool->block_count || pool->used[index] == FREE_BLOCK) {
         // Log critical errors with maximum detail
         fprintf(stderr, "CRITICAL ERROR: Attempt to free invalid or already freed chunk!\n");
-        fprintf(stderr, "   Pointer to free: %p\n", ptr);
-        fprintf(stderr, "   Calculated index: %llu\n", index);
-        fprintf(stderr, "   Pool base address: %p\n", pool->memory);
-        fprintf(stderr, "   Block size: %llu bytes\n", pool->block_size);
-        fprintf(stderr, "   Total block count: %llu\n", pool->block_count);
-        fprintf(stderr, "   Is within bounds (0 to %llu)? %s\n", pool->block_count - 1,
-                        (index < pool->block_count) ? "Yes" : "No");
-        fprintf(stderr, "   Was block marked as used? %s\n", 
-                        (index < pool->block_count && pool->used[index]) ? "Yes" : "No (Double-Free/Corruption)\n");
-        LeaveCriticalSection(&pool->mutex);
+        // fprintf(stderr, "   Pointer to free: %p\n", ptr);
+        // fprintf(stderr, "   Calculated index: %llu\n", index);
+        // fprintf(stderr, "   Pool base address: %p\n", pool->memory);
+        // fprintf(stderr, "   Block size: %llu bytes\n", pool->block_size);
+        // fprintf(stderr, "   Total block count: %llu\n", pool->block_count);
+        // fprintf(stderr, "   Is within bounds (0 to %llu)? %s\n", pool->block_count - 1,
+        //                 (index < pool->block_count) ? "Yes" : "No");
+        // fprintf(stderr, "   Was block marked as used? %s\n", 
+        //                 (index < pool->block_count && pool->used[index]) ? "Yes" : "No (Double-Free/Corruption)\n");
+        ReleaseSRWLockExclusive(&pool->lock);
         return;
     }
     // Add the freed block back to the head of the free list
@@ -110,10 +108,9 @@ void pool_free(MemPool* pool, void* ptr) {
     // Mark the block as unused
     pool->used[index] = FREE_BLOCK;
     pool->free_blocks++;
-    LeaveCriticalSection(&pool->mutex);
+    ReleaseSRWLockExclusive(&pool->lock);
     return;
 }
-//--------------------------------------------------------------------------------------------------------------------------
 void pool_destroy(MemPool* pool) {
     // Check for NULL pool pointer
     if (pool == NULL) {
@@ -137,10 +134,8 @@ void pool_destroy(MemPool* pool) {
         pool->memory = NULL;
     }
     pool->free_blocks = 0;
-    DeleteCriticalSection(&pool->mutex);
 }
 //--------------------------------------------------------------------------------------------------------------------------
-
 
 //--------------------------------------------------------------------------------------------------------------------------
 void s_init_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t block_count) {
@@ -197,17 +192,16 @@ void s_init_pool(s_MemPool* pool, const uint64_t block_size, const uint64_t bloc
     pool->used[pool->block_count - 1] = FREE_BLOCK;           // Last block is also unused
     pool->free_blocks = pool->block_count;
     // Initialize the critical section for thread safety
-    InitializeCriticalSection(&pool->mutex);
+    InitializeSRWLock(&pool->lock);
     return;
 }
-//--------------------------------------------------------------------------------------------------------------------------
 void* s_pool_alloc(s_MemPool* pool) {
     // Enter critical section to protect shared pool data
     WaitForSingleObject(pool->semaphore, INFINITE);
-    EnterCriticalSection(&pool->mutex);
+    AcquireSRWLockExclusive(&pool->lock);
     // Check if the pool is exhausted
     if (pool->free_head == END_BLOCK) { // Check against POOL_END
-        LeaveCriticalSection(&pool->mutex);
+        ReleaseSRWLockExclusive(&pool->lock);
         return NULL; // Pool exhausted
     }
     // Get the index of the first free block
@@ -220,10 +214,9 @@ void* s_pool_alloc(s_MemPool* pool) {
     pool->free_blocks--;
     // Return the memory address of the allocated block
     memset(pool->memory + index * pool->block_size, 0, pool->block_size);
-    LeaveCriticalSection(&pool->mutex);
+    ReleaseSRWLockExclusive(&pool->lock);
     return (void *)(pool->memory + index * pool->block_size);
 }
-//--------------------------------------------------------------------------------------------------------------------------
 void s_pool_free(s_MemPool* pool, void* ptr) {
     // Handle NULL pointer case
     if (ptr == NULL) {
@@ -231,23 +224,23 @@ void s_pool_free(s_MemPool* pool, void* ptr) {
         return;
     }
     // Enter critical section
-    EnterCriticalSection(&pool->mutex);
+    AcquireSRWLockExclusive(&pool->lock);
     // Calculate the index of the block to be freed
     uint64_t index = ((char*)ptr - pool->memory) / pool->block_size;
     // Validate the index and usage flag for safety and debugging
     if (index >= pool->block_count || pool->used[index] == FREE_BLOCK) {
         // Log critical errors with maximum detail
         fprintf(stderr, "CRITICAL ERROR: Attempt to free invalid or already freed chunk!\n");
-        fprintf(stderr, "   Pointer to free: %p\n", ptr);
-        fprintf(stderr, "   Calculated index: %llu\n", index);
-        fprintf(stderr, "   Pool base address: %p\n", pool->memory);
-        fprintf(stderr, "   Block size: %llu bytes\n", pool->block_size);
-        fprintf(stderr, "   Total block count: %llu\n", pool->block_count);
-        fprintf(stderr, "   Is within bounds (0 to %llu)? %s\n", pool->block_count - 1,
-                        (index < pool->block_count) ? "Yes" : "No");
-        fprintf(stderr, "   Was block marked as used? %s\n", 
-                        (index < pool->block_count && pool->used[index]) ? "Yes" : "No (Double-Free/Corruption)\n");
-        LeaveCriticalSection(&pool->mutex);
+        // fprintf(stderr, "   Pointer to free: %p\n", ptr);
+        // fprintf(stderr, "   Calculated index: %llu\n", index);
+        // fprintf(stderr, "   Pool base address: %p\n", pool->memory);
+        // fprintf(stderr, "   Block size: %llu bytes\n", pool->block_size);
+        // fprintf(stderr, "   Total block count: %llu\n", pool->block_count);
+        // fprintf(stderr, "   Is within bounds (0 to %llu)? %s\n", pool->block_count - 1,
+        //                 (index < pool->block_count) ? "Yes" : "No");
+        // fprintf(stderr, "   Was block marked as used? %s\n", 
+        //                 (index < pool->block_count && pool->used[index]) ? "Yes" : "No (Double-Free/Corruption)\n");
+        ReleaseSRWLockExclusive(&pool->lock);
         return;
     }
     // Add the freed block back to the head of the free list
@@ -258,10 +251,9 @@ void s_pool_free(s_MemPool* pool, void* ptr) {
     pool->free_blocks++;
     // memset(pool->memory + index * pool->block_size, 0, pool->block_size);
     ReleaseSemaphore(pool->semaphore, 1, NULL);
-    LeaveCriticalSection(&pool->mutex);
+    ReleaseSRWLockExclusive(&pool->lock);
     return;
 }
-//--------------------------------------------------------------------------------------------------------------------------
 void s_pool_destroy(s_MemPool* pool) {
     // Check for NULL pool pointer
     if (pool == NULL) {
@@ -285,6 +277,5 @@ void s_pool_destroy(s_MemPool* pool) {
         pool->memory = NULL;
     }
     pool->free_blocks = 0;
-    DeleteCriticalSection(&pool->mutex);
 }
 //--------------------------------------------------------------------------------------------------------------------------

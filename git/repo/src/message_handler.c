@@ -40,7 +40,6 @@ static int msg_validate_fragment(Client *client, const int index, UdpFrame *fram
 
     MessageStream *mstream = &client->mstream[index];
 
-    EnterCriticalSection(&client->lock);
     EnterCriticalSection(&mstream->lock);
 
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
@@ -74,24 +73,22 @@ static int msg_validate_fragment(Client *client, const int index, UdpFrame *fram
     }
 
     LeaveCriticalSection(&mstream->lock);
-    LeaveCriticalSection(&client->lock);
     return RET_VAL_SUCCESS;
 
 exit_err:
 
     entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_frame);
     if(!entry){
+        LeaveCriticalSection(&mstream->lock);
         fprintf(stderr, "ERROR: Failed to allocate memory in the pool for message fragment ack error frame\n");
-        LeaveCriticalSection(&client->lock);
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
     if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
-        fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
         pool_free(pool_queue_ack_frame, entry);
+        fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
     }
     LeaveCriticalSection(&mstream->lock);
-    LeaveCriticalSection(&client->lock);
     return RET_VAL_ERROR;
 }
 static int msg_get_available_stream_channel(Client *client){
@@ -248,11 +245,9 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
         fprintf(stdout, "Received frame for non existing client context!\n");
         return RET_VAL_ERROR;
     }
-
-    EnterCriticalSection(&client->lock);
-
-    client->last_activity_time = time(NULL);
     
+    AcquireSRWLockExclusive(&client->lock);
+
     uint64_t recv_seq_num = _ntohll(frame->header.seq_num);
     uint32_t recv_session_id = _ntohl(frame->header.session_id);
     uint32_t recv_message_id = _ntohl(frame->payload.text_fragment.message_id);
@@ -272,7 +267,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
     slot = msg_match_fragment(client, frame);
     if (slot != RET_VAL_ERROR) {
         if (msg_validate_fragment(client, slot, frame) == RET_VAL_ERROR) {
-            LeaveCriticalSection(&client->lock);
+            ReleaseSRWLockExclusive(&client->lock);
             return RET_VAL_ERROR;
         }
         msg_attach_fragment(&client->mstream[slot], frame->payload.text_fragment.chars, recv_fragment_offset, recv_fragment_len);
@@ -284,7 +279,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
         entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_frame);
         if(!entry){
             fprintf(stderr, "ERROR: Failed to allocate memory in the pool for message fragment ack frame\n");
-            LeaveCriticalSection(&client->lock);
+            ReleaseSRWLockExclusive(&client->lock);
             return RET_VAL_ERROR;
         }
         construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_MESSAGE_FRAGMENT, server->socket, &client->client_addr);
@@ -292,7 +287,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
             fprintf(stderr, "ERROR: Failed to push to queue message ack.\n");
             pool_free(pool_queue_ack_frame, entry);
         }
-        LeaveCriticalSection(&client->lock);
+        ReleaseSRWLockExclusive(&client->lock);
         return RET_VAL_SUCCESS;
 
     } else {
@@ -304,7 +299,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
             goto exit_err;
         }
         if (msg_validate_fragment(client, slot, frame) == RET_VAL_ERROR){
-            LeaveCriticalSection(&client->lock);
+            ReleaseSRWLockExclusive(&client->lock);
             return RET_VAL_ERROR;
         }
         if (msg_init_stream(&client->mstream[slot], recv_session_id, recv_message_id, recv_message_len) == RET_VAL_ERROR){
@@ -332,7 +327,7 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
         entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_frame);
         if(!entry){
             fprintf(stderr, "ERROR: Failed to allocate memory in the pool for message fragment ack frame\n");
-            LeaveCriticalSection(&client->lock);
+            ReleaseSRWLockExclusive(&client->lock);
             return RET_VAL_ERROR;
         }
         construct_ack_frame(entry, recv_seq_num, recv_session_id, STS_CONFIRM_MESSAGE_FRAGMENT, server->socket, &client->client_addr);
@@ -340,24 +335,24 @@ int handle_message_fragment(Client *client, UdpFrame *frame){
             fprintf(stderr, "ERROR: Failed to push message ack to queue.\n");
             pool_free(pool_queue_ack_frame, entry);
         }
-        LeaveCriticalSection(&client->lock);
+        ReleaseSRWLockExclusive(&client->lock);
         return RET_VAL_SUCCESS;
     }
 exit_err:
 
     entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_frame);
     if(!entry){
+        ReleaseSRWLockExclusive(&client->lock);
         fprintf(stderr, "ERROR: Failed to allocate memory in the pool for message fragment error ack frame\n");
-        LeaveCriticalSection(&client->lock);
         return RET_VAL_ERROR;
     }
     construct_ack_frame(entry, recv_seq_num, recv_session_id, op_code, server->socket, &client->client_addr);
     if(push_ptr(queue_prio_ack_frame, (uintptr_t)entry) == RET_VAL_ERROR){
-        fprintf(stderr, "ERROR: Failed to push message ack error to queue priority.\n");
         pool_free(pool_queue_ack_frame, entry);
+        fprintf(stderr, "ERROR: Failed to push message ack error to queue priority.\n");
     }
 
-    LeaveCriticalSection(&client->lock);
+    ReleaseSRWLockExclusive(&client->lock);
     return RET_VAL_ERROR;
 }
 

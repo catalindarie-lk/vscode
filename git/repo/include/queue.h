@@ -20,7 +20,7 @@ __declspec(align(64))typedef struct {
     volatile size_t head;          
     volatile size_t tail;
     volatile size_t pending;
-    CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
+    SRWLOCK lock;      // Mutex for thread-safe access to frame_buffer
     HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
 }QueuePtr;
 
@@ -36,7 +36,7 @@ __declspec(align(64))typedef struct {
     volatile size_t head;          
     volatile size_t tail;
     volatile size_t pending;
-    CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
+    SRWLOCK lock;
     HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
     HANDLE pop_semaphore;       
 }s_QueuePtr;
@@ -53,8 +53,8 @@ __declspec(align(64))typedef struct {
     volatile size_t head;          
     volatile size_t tail;
     volatile size_t pending;
+    SRWLOCK lock;      // Mutex for thread-safe access to frame_buffer
     HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
-    CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
 }QueueClientSlot;
 
 //----------------------------------------------------------------------------------------------------------------
@@ -69,7 +69,7 @@ __declspec(align(64))typedef struct {
     volatile size_t head;          
     volatile size_t tail;
     volatile size_t pending;
-    CRITICAL_SECTION lock;      // Mutex for thread-safe access to frame_buffer
+    SRWLOCK lock;      // Mutex for thread-safe access to frame_buffer
     HANDLE push_semaphore;      // this semaphore is released when frame is pushed on the queue
 }QueueSeq;
 

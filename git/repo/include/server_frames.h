@@ -2,8 +2,10 @@
 #define SERVER_FRAMES_H
 
 #include <stdint.h>
-#include <ws2tcpip.h>
-#include "include/server.h"
+#include <winsock2.h>          // For Windows-specific functions like CreateThread, Sleep
+#include "include/protocol_frames.h"    // For protocol frame definitions
+#include "include/resources.h"         // For resource definitions
+
 
 int construct_ack_frame(PoolEntryAckFrame *entry,
                     const uint64_t seq_num, 

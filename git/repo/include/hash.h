@@ -17,38 +17,37 @@
 //--------------------------------------------------------------------------------------------------------------------------
 #define HASH_SIZE_ID                  (1024)
 
-typedef uint8_t HashTableStatus;
-enum HashTableStatus{
+typedef uint8_t TableStatus;
+enum TableStatus{
     ID_STATUS_NONE = 0,
     ID_WAITING_FRAGMENTS = 1,
     ID_RECV_COMPLETE= 2
 };
 
-typedef struct IdentifierNode{
+typedef struct NodeTableIDs{
     uint32_t id;
     uint32_t sid;
     uint8_t status;                         //1 - Pending; 2 - Finished
-    struct IdentifierNode *next;
-}IdentifierNode;
+    struct NodeTableIDs *next;
+}NodeTableIDs;
 
 typedef struct{
-    IdentifierNode **entry;
+    NodeTableIDs **entry;
     CRITICAL_SECTION mutex;
     size_t size;
     size_t count;
-    MemPool pool_nodes;                     // memory pool of nodes; when new node is inserted into table, memory is allocated
-                                            // from this pre-allocated mem pool;
-}HashTableIdentifierNode;
+    MemPool pool_nodes;                     // memory pool of nodes; when new node is inserted into table, memory is allocated                                        // from this pre-allocated mem pool;
+}TableIDs;
 
-void init_table_id(HashTableIdentifierNode *ht, size_t size, const size_t max_nodes);
+void init_table_id(TableIDs *table, size_t size, const size_t max_nodes);
 uint64_t ht_get_hash_id(uint32_t id, const size_t size);
-int ht_insert_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
-void ht_remove_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id);
-void ht_remove_all_sid(HashTableIdentifierNode *ht, const uint32_t sid);
-BOOL ht_search_id(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
-int ht_update_id_status(HashTableIdentifierNode *ht, const uint32_t sid, const uint32_t id, const uint8_t status);
-void ht_clean_id(HashTableIdentifierNode *ht);
-void ht_print_id(HashTableIdentifierNode *ht);
+int ht_insert_id(TableIDs *table, const uint32_t sid, const uint32_t id, const uint8_t status);
+void ht_remove_id(TableIDs *table, const uint32_t sid, const uint32_t id);
+void ht_remove_all_sid(TableIDs *table, const uint32_t sid);
+BOOL ht_search_id(TableIDs *table, const uint32_t sid, const uint32_t id, const uint8_t status);
+int ht_update_id_status(TableIDs *table, const uint32_t sid, const uint32_t id, const uint8_t status);
+void ht_clean_id(TableIDs *table);
+void ht_print_id(TableIDs *table);
 
 
 //--------------------------------------------------------------------------------------------------------------------------

@@ -27,11 +27,11 @@
 #include "include/server_statistics.h"
 
 ServerData Server;
-ServerBuffers Buffers;
 ClientListData ClientList;
+ServerBuffers Buffers;
 ServerThreads Threads;
 
-const char *server_ip = "192.168.100.1";
+const char *server_ip = "192.168.0.245";
 
 
 static void get_network_config(){
@@ -138,13 +138,13 @@ static int init_server_buffers(){
     // Initialize clients locks
     for(int i = 0; i < MAX_CLIENTS; i++){
         Client *client = &client_list->client[i];
-        InitializeCriticalSection(&client->sack_ctx.lock);
-        InitializeCriticalSection(&client->lock);
+        InitializeSRWLock(&client->sack_ctx.lock);
+        InitializeSRWLock(&client->lock);
     }
     // Initialize client_list lock
     InitializeCriticalSection(&client_list->lock);
 
-    init_fstream_pool(fstream_pool, MAX_SERVER_ACTIVE_FSTREAMS);
+    init_fstream_pool(pool_fstreams, MAX_SERVER_ACTIVE_FSTREAMS);
 
     init_pool(pool_recv_udp_frame, sizeof(PoolEntryRecvFrame), SERVER_POOL_SIZE_RECV);
     init_queue_ptr(queue_recv_udp_frame, SERVER_QUEUE_SIZE_RECV_FRAME);
@@ -328,7 +328,7 @@ static Client* add_client(const UdpFrame *recv_frame, const struct sockaddr_in *
    
     Client *new_client = &client_list->client[free_slot]; 
     
-    EnterCriticalSection(&new_client->lock);
+    AcquireSRWLockExclusive(&new_client->lock);
 
     new_client->slot = free_slot;
     new_client->slot_status = SLOT_BUSY;
@@ -347,7 +347,7 @@ static Client* add_client(const UdpFrame *recv_frame, const struct sockaddr_in *
 
     fprintf(stdout, "\n[ADDING NEW CLIENT] %s:%d Session ID:%d\n", new_client->ip, new_client->port, new_client->sid);
 
-    LeaveCriticalSection(&new_client->lock);
+    ReleaseSRWLockExclusive(&new_client->lock);
     LeaveCriticalSection(&client_list->lock);
     return new_client;
 }
@@ -381,10 +381,11 @@ static void cleanup_client(Client *client){
         fprintf(stdout, "Error: Tried to remove null pointer client!\n");
         return;
     }
-    EnterCriticalSection(&client->lock);
+
+    AcquireSRWLockExclusive(&client->lock);
 
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        ServerFileStream *fstream = &fstream_pool->fstream[i];
+        ServerFileStream *fstream = &pool_fstreams->fstream[i];
         if(fstream->sid ==  client->sid){
             close_file_stream(fstream);
         }
@@ -399,11 +400,11 @@ static void cleanup_client(Client *client){
         LeaveCriticalSection(&client->mstream[i].lock);
     }
 
-    EnterCriticalSection(&client->sack_ctx.lock);
+    AcquireSRWLockExclusive(&client->sack_ctx.lock);
     client->sack_ctx.ack_pending = 0;
     client->sack_ctx.start_recorded = 0;
     memset(&client->sack_ctx.payload, 0, sizeof(SAckPayload));
-    LeaveCriticalSection(&client->sack_ctx.lock);
+    ReleaseSRWLockExclusive(&client->sack_ctx.lock);
 
     memset(&client->client_addr, 0, sizeof(struct sockaddr_in));
     memset(&client->ip, 0, INET_ADDRSTRLEN);
@@ -415,7 +416,8 @@ static void cleanup_client(Client *client){
     client->last_activity_time = time(NULL);
     client->slot = 0;
     client->slot_status = SLOT_FREE;
-    LeaveCriticalSection(&client->lock);
+    client->sid = 0;
+    ReleaseSRWLockExclusive(&client->lock);
     return;
 }
 // Compare received hash with calculated hash
@@ -447,7 +449,7 @@ static void check_open_file_stream(){
     PARSE_SERVER_GLOBAL_DATA(Server, ClientList, Buffers, Threads) // this macro is defined in server header file (server.h)
 
     for(int i = 0; i < MAX_SERVER_ACTIVE_FSTREAMS; i++){
-        if(fstream_pool->fstream[i].fstream_busy == TRUE){
+        if(pool_fstreams->fstream[i].fstream_busy == TRUE){
             fprintf(stdout, "File stream still open: %d\n", i);
         }
     }
@@ -663,7 +665,7 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
         }
 
         Client *client = NULL;
-        time_t now = time(NULL);
+        // time_t now = time(NULL);
 
         if(recv_frame_type == FRAME_TYPE_CONNECT_REQUEST && 
                                 recv_session_id == DEFAULT_CONNECT_REQUEST_SID &&
@@ -673,9 +675,9 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
                 fprintf(stderr, "Failed to add new client from %s:%d. Max clients reached or server error.\n", src_ip, src_port);
                 continue;
             }
-            EnterCriticalSection(&client->lock);
-            client->last_activity_time = now;
-            LeaveCriticalSection(&client->lock);
+            AcquireSRWLockExclusive(&client->lock);
+            client->last_activity_time = time(NULL);
+            ReleaseSRWLockExclusive(&client->lock);
 
             pool_send_entry = (PoolEntrySendFrame*)pool_alloc(pool_send_udp_frame);
             if(!pool_send_entry){
@@ -714,9 +716,9 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
                 fprintf(stderr, "ERROR: Unknown client (invalid DEFAULT_CONNECT_REQUEST_SID)\n");
                 continue;
             }
-            EnterCriticalSection(&client->lock);
-            client->last_activity_time = now;
-            LeaveCriticalSection(&client->lock);
+            AcquireSRWLockExclusive(&client->lock);
+            client->last_activity_time = time(NULL);
+            ReleaseSRWLockExclusive(&client->lock);
 
             pool_send_entry = (PoolEntrySendFrame*)pool_alloc(pool_send_udp_frame);
             if(!pool_send_entry){
@@ -755,9 +757,6 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
         switch (recv_frame_type) {
 
             case FRAME_TYPE_ACK:
-                EnterCriticalSection(&client->lock);
-                client->last_activity_time = now;
-                LeaveCriticalSection(&client->lock);
                 // TODO: Implement the full ACK processing logic here. This typically involves:
                 //   - Removing acknowledged packets from the sender's retransmission queue.
                 //   - Updating window sizes for flow and congestion control.
@@ -765,20 +764,19 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
                 break;
 
             case FRAME_TYPE_KEEP_ALIVE:
-                EnterCriticalSection(&client->lock);
-                client->last_activity_time = now;
-                LeaveCriticalSection(&client->lock);
+                AcquireSRWLockExclusive(&client->lock);
+                client->last_activity_time = time(NULL);
+                ReleaseSRWLockExclusive(&client->lock);
 
                 pool_ack_entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_frame);
                 if(!pool_ack_entry){
                     fprintf(stderr, "ERROR: Failed to allocate memory in the pool for keep_alive ack frame\n");
-                    LeaveCriticalSection(&client->lock);
-                    return RET_VAL_ERROR;
+                    break;
                 }
                 construct_ack_frame(pool_ack_entry, recv_seq_num, recv_session_id, STS_KEEP_ALIVE, server->socket, &client->client_addr);
                 if (push_ptr(queue_prio_ack_frame, (uintptr_t)pool_ack_entry) == RET_VAL_ERROR) {
-                    fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
                     pool_free(pool_queue_ack_frame, pool_ack_entry);
+                    fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
                 }
                 break;
 
@@ -800,19 +798,16 @@ static DWORD WINAPI func_thread_process_frame(LPVOID lpParam) {
 
             case FRAME_TYPE_DISCONNECT:
                 fprintf(stdout, "DEBUG: Client %s:%d with session ID: %d requested disconnect...\n", client->ip, client->port, client->sid);
-                
                 pool_ack_entry = (PoolEntryAckFrame*)pool_alloc(pool_queue_ack_frame);
                 if(!pool_ack_entry){
                     fprintf(stderr, "ERROR: Failed to allocate memory in the pool for disconnect ack frame\n");
-                    LeaveCriticalSection(&client->lock);
-                    return RET_VAL_ERROR;
+                    break;
                 }
                 construct_ack_frame(pool_ack_entry, recv_seq_num, recv_session_id, STS_CONFIRM_DISCONNECT, server->socket, &client->client_addr);
                 if (push_ptr(queue_prio_ack_frame, (uintptr_t)pool_ack_entry) == RET_VAL_ERROR) {
-                    fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
                     pool_free(pool_queue_ack_frame, pool_ack_entry);
+                    fprintf(stderr, "ERROR: Failed to push to queue priority.\n");
                 }
-
                 remove_client(client->slot);
                 break;
 
@@ -857,20 +852,18 @@ static DWORD WINAPI fthread_send_file_sack_frame(LPVOID lpParam){
             fprintf(stdout, "Poped invalid slot from 'queue_client_slot'\n");
             continue;
         }
-
         client = &client_list->client[slot];
 
-        EnterCriticalSection(&client->lock);
+        AcquireSRWLockShared(&client->lock);
         if(client->slot_status == SLOT_FREE || client->slot != slot){
+            ReleaseSRWLockShared(&client->lock);
             fprintf(stderr, "ERROR: Client slot %d is not valid or has been freed.\n", slot);
-            // pool_free(pool_queue_ack_frame, ack_entry);
-            LeaveCriticalSection(&client->lock);
             client = NULL;
             continue;
         }
-        LeaveCriticalSection(&client->lock);
+        ReleaseSRWLockShared(&client->lock);
 
-        EnterCriticalSection(&client->sack_ctx.lock);
+        AcquireSRWLockExclusive(&client->sack_ctx.lock);
         GetSystemTimePreciseAsFileTime(&ft);
         current_timestamp = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
         if(!client->sack_ctx.start_recorded && client->queue_file_ack_seq.pending > 0){
@@ -878,16 +871,15 @@ static DWORD WINAPI fthread_send_file_sack_frame(LPVOID lpParam){
             client->sack_ctx.start_timestamp = current_timestamp;
             client->sack_ctx.start_recorded = TRUE;
         }
-
         if(client->queue_file_ack_seq.pending >= MAX_SACK_COUNT){
             client->sack_ctx.ack_pending = MAX_SACK_COUNT;
             for(int i = 0; i < client->sack_ctx.ack_pending; i++){
                 ack_seq = pop_seq(&client->queue_file_ack_seq);
                 if(ack_seq == 0) {
-                    fprintf(stderr,"CRITICAL ERROR: pop_seq() returned seq with value 0 from queue_file_ack_seq\n");
                     memset(&client->sack_ctx.payload, 0, sizeof(SAckPayload));
-                    LeaveCriticalSection(&client->sack_ctx.lock);
+                    ReleaseSRWLockExclusive(&client->sack_ctx.lock);
                     client = NULL;
+                    fprintf(stderr,"CRITICAL ERROR: pop_seq() returned seq with value 0 from queue_file_ack_seq\n");
                     continue;
                 }
                 client->sack_ctx.payload.seq_num[i] = ack_seq;
@@ -904,7 +896,7 @@ static DWORD WINAPI fthread_send_file_sack_frame(LPVOID lpParam){
             client->sack_ctx.ack_pending = 0;
             client->sack_ctx.start_recorded = FALSE;
         } 
-        LeaveCriticalSection(&client->sack_ctx.lock);
+        ReleaseSRWLockExclusive(&client->sack_ctx.lock);
         client = NULL;
 
     }
@@ -940,8 +932,7 @@ static DWORD WINAPI fthread_scan_for_trailing_sack(LPVOID lpParam){
                 continue;
             }
             
-            EnterCriticalSection(&client->sack_ctx.lock);
-            
+            AcquireSRWLockExclusive(&client->sack_ctx.lock);            
             GetSystemTimePreciseAsFileTime(&ft);
             current_timestamp = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
             sack_ready_timeout = client->sack_ctx.start_recorded && ((current_timestamp - client->sack_ctx.start_timestamp) > (SACK_READY_FRAME_TIMEOUT_MS * 10000));
@@ -952,9 +943,9 @@ static DWORD WINAPI fthread_scan_for_trailing_sack(LPVOID lpParam){
                 for(int i = 0; i < client->sack_ctx.ack_pending; i++){
                     ack_seq = pop_seq(&client->queue_file_ack_seq);
                     if(ack_seq == 0) {
-                        fprintf(stderr,"CRITICAL ERROR: pop_seq() returned seq with value 0 from queue_file_ack_seq\n");
                         memset(&client->sack_ctx.payload, 0, sizeof(SAckPayload));
-                        LeaveCriticalSection(&client->sack_ctx.lock);
+                        ReleaseSRWLockExclusive(&client->sack_ctx.lock);
+                        fprintf(stderr,"CRITICAL ERROR: pop_seq() returned seq with value 0 from queue_file_ack_seq\n");
                         continue;
                     }
                     client->sack_ctx.payload.seq_num[i] = ack_seq;
@@ -971,7 +962,7 @@ static DWORD WINAPI fthread_scan_for_trailing_sack(LPVOID lpParam){
                 client->sack_ctx.ack_pending = 0;
                 client->sack_ctx.start_recorded = FALSE;
             } 
-            LeaveCriticalSection(&client->sack_ctx.lock);
+            ReleaseSRWLockExclusive(&client->sack_ctx.lock);
         }
     }
     _endthreadex(0);
